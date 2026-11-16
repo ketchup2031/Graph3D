@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QAbstractButton>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
@@ -13,6 +14,7 @@
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPushButton>
@@ -360,6 +362,62 @@ private slots:
         action("openProject")->trigger();
         QCOMPARE(tree->topLevelItemCount(), 3);
         QCOMPARE(tree->topLevelItem(2)->text(1), QStringLiteral("сцена.step"));
+        QVERIFY(!window.isWindowModified());
+    }
+
+    void drawingFromSelectedBody()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow window;
+        window.show();
+        window.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* action = window.findChild<QAction*>("drawingPreview");
+        QVERIFY(tree && action);
+        tree->setCurrentItem(nullptr);
+        QVERIFY(!action->isEnabled());
+        tree->setCurrentItem(tree->topLevelItem(0));
+        QVERIFY(action->isEnabled());
+        const auto file = folder.filePath(QStringLiteral("чертёж.pdf"));
+        bool sawDrawing = false;
+        bool dimensionsChangedPreview = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) {
+                return;
+            }
+            auto* title = dialog->findChild<QLineEdit*>("drawingTitle");
+            auto* canvas = dialog->findChild<QWidget*>("drawingPreviewCanvas");
+            auto* dimensions = dialog->findChild<QCheckBox*>("drawingDimensions");
+            auto* save = dialog->findChild<QPushButton*>("drawingSavePdf");
+            sawDrawing = dialog->objectName() == "drawingDialog" && title && canvas && dimensions && save;
+            if (sawDrawing) {
+                title->setText(QStringLiteral("Куб"));
+                const auto before = canvas->grab().toImage();
+                dimensions->setChecked(false);
+                dimensionsChangedPreview = !before.isNull() && canvas->grab().toImage() != before;
+                dimensions->setChecked(true);
+                QTimer::singleShot(0, [&] {
+                    if (auto* chooser = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                        chooser->selectFile(file);
+                        static_cast<QDialog*>(chooser)->accept();
+                    }
+                });
+                save->click();
+            }
+            dialog->reject();
+        });
+        action->trigger();
+        QVERIFY(sawDrawing);
+        QVERIFY(dimensionsChangedPreview);
+        QFile pdf(file);
+        QVERIFY(pdf.open(QIODevice::ReadOnly));
+        QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
+        QVERIFY(pdf.size() > 1000);
         QVERIFY(!window.isWindowModified());
     }
 };

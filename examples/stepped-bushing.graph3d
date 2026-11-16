@@ -1,0 +1,90 @@
+{
+  "format": "Graph3D",
+  "version": 1,
+  "unit": "mm",
+  "objects": [
+    {
+      "id": 1,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XZ",
+      "entities": [
+        {
+          "type": "line",
+          "a": [
+            10,
+            0
+          ],
+          "b": [
+            20,
+            0
+          ]
+        },
+        {
+          "type": "line",
+          "a": [
+            20,
+            0
+          ],
+          "b": [
+            20,
+            10
+          ]
+        },
+        {
+          "type": "line",
+          "a": [
+            20,
+            10
+          ],
+          "b": [
+            15,
+            10
+          ]
+        },
+        {
+          "type": "line",
+          "a": [
+            15,
+            10
+          ],
+          "b": [
+            15,
+            30
+          ]
+        },
+        {
+          "type": "line",
+          "a": [
+            15,
+            30
+          ],
+          "b": [
+            10,
+            30
+          ]
+        },
+        {
+          "type": "line",
+          "a": [
+            10,
+            30
+          ],
+          "b": [
+            10,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "revolve",
+      "visible": true,
+      "profile": 1,
+      "axis": "V",
+      "offset": 0,
+      "angle": 360
+    }
+  ]
+}

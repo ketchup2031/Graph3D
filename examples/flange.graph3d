@@ -1,0 +1,185 @@
+{
+  "format": "Graph3D",
+  "version": 1,
+  "unit": "mm",
+  "objects": [
+    {
+      "id": 1,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            0,
+            0
+          ],
+          "radius": 50
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "extrude",
+      "visible": false,
+      "profile": 1,
+      "distance": 15
+    },
+    {
+      "id": 3,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            0,
+            0
+          ],
+          "radius": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "extrude",
+      "visible": false,
+      "profile": 3,
+      "distance": 15
+    },
+    {
+      "id": 5,
+      "type": "boolean",
+      "visible": false,
+      "first": 2,
+      "second": 4,
+      "operation": "difference"
+    },
+    {
+      "id": 6,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            35,
+            0
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "extrude",
+      "visible": false,
+      "profile": 6,
+      "distance": 15
+    },
+    {
+      "id": 8,
+      "type": "boolean",
+      "visible": false,
+      "first": 5,
+      "second": 7,
+      "operation": "difference"
+    },
+    {
+      "id": 9,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            0,
+            35
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "extrude",
+      "visible": false,
+      "profile": 9,
+      "distance": 15
+    },
+    {
+      "id": 11,
+      "type": "boolean",
+      "visible": false,
+      "first": 8,
+      "second": 10,
+      "operation": "difference"
+    },
+    {
+      "id": 12,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            -35,
+            0
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "extrude",
+      "visible": false,
+      "profile": 12,
+      "distance": 15
+    },
+    {
+      "id": 14,
+      "type": "boolean",
+      "visible": false,
+      "first": 11,
+      "second": 13,
+      "operation": "difference"
+    },
+    {
+      "id": 15,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            0,
+            -35
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "extrude",
+      "visible": false,
+      "profile": 15,
+      "distance": 15
+    },
+    {
+      "id": 17,
+      "type": "boolean",
+      "visible": true,
+      "first": 14,
+      "second": 16,
+      "operation": "difference"
+    }
+  ]
+}

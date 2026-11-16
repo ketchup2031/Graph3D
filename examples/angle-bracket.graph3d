@@ -1,0 +1,129 @@
+{
+  "format": "Graph3D",
+  "version": 1,
+  "unit": "mm",
+  "objects": [
+    {
+      "id": 1,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "rectangle",
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            80,
+            45
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "extrude",
+      "visible": false,
+      "profile": 1,
+      "distance": 8
+    },
+    {
+      "id": 3,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XZ",
+      "entities": [
+        {
+          "type": "rectangle",
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            80,
+            45
+          ]
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "extrude",
+      "visible": false,
+      "profile": 3,
+      "distance": -8
+    },
+    {
+      "id": 5,
+      "type": "boolean",
+      "visible": false,
+      "first": 2,
+      "second": 4,
+      "operation": "union"
+    },
+    {
+      "id": 6,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            20,
+            30
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "extrude",
+      "visible": false,
+      "profile": 6,
+      "distance": 8
+    },
+    {
+      "id": 8,
+      "type": "boolean",
+      "visible": false,
+      "first": 5,
+      "second": 7,
+      "operation": "difference"
+    },
+    {
+      "id": 9,
+      "type": "sketch",
+      "visible": false,
+      "plane": "XY",
+      "entities": [
+        {
+          "type": "circle",
+          "center": [
+            60,
+            30
+          ],
+          "radius": 5
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "extrude",
+      "visible": false,
+      "profile": 9,
+      "distance": 8
+    },
+    {
+      "id": 11,
+      "type": "boolean",
+      "visible": true,
+      "first": 8,
+      "second": 10,
+      "operation": "difference"
+    }
+  ]
+}

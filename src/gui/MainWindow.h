@@ -41,6 +41,7 @@ private:
     void openProject();
     void importStep();
     void exportModel(io::ExchangeFormat format);
+    void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
     void updateSelection();
@@ -77,6 +78,7 @@ private:
     QAction* redo_ = nullptr;
     QAction* extrude_ = nullptr;
     QAction* revolve_ = nullptr;
+    QAction* drawing_ = nullptr;
     QMenu* booleanMenu_ = nullptr;
     QList<QAction*> fileActions_;
     QString logPath_;

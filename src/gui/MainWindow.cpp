@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "gui/DrawingDialog.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
 #include "io/Exchange.h"
@@ -189,6 +190,10 @@ void MainWindow::createMenus()
     booleanAction(tr("Cut…"), "booleanCut", geometry::BooleanOperation::Difference);
     booleanAction(tr("Intersection…"), "booleanIntersection", geometry::BooleanOperation::Intersection);
 
+    auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
+    drawing_ = menuAction(drawingMenu, tr("Create drawing from selected body…"), "drawingPreview");
+    connect(drawing_, &QAction::triggered, this, &MainWindow::showDrawing);
+
     viewMenu_ = menuBar()->addMenu(tr("&View"));
     auto* view = viewMenu_;
     auto* fit = menuAction(view, tr("Fit all"), "fitScene");
@@ -367,6 +372,7 @@ void MainWindow::updateActions()
     extrude_->setEnabled(!drawing && sketch);
     revolve_->setEnabled(!drawing && sketch);
     booleanMenu_->setEnabled(!drawing && object && validBody(*object) && bodies >= 2);
+    drawing_->setEnabled(!drawing && object && validBody(*object));
 }
 
 QString MainWindow::objectName(const document::Object& object) const
@@ -722,6 +728,30 @@ void MainWindow::exportModel(io::ExchangeFormat format)
         report(tr("Exported %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
         showSceneError(tr("Could not export model: %1").arg(QString::fromUtf8(error.what())));
+    }
+}
+
+void MainWindow::showDrawing()
+{
+    const auto* object = document_.find(selectedId());
+    if (!object || object->status != document::Status::Ready
+        || std::holds_alternative<geometry::Sketch>(object->parameters)) {
+        return;
+    }
+    try {
+        const auto create = [object] {
+            struct WaitCursor {
+                WaitCursor() { QApplication::setOverrideCursor(Qt::WaitCursor); }
+                ~WaitCursor() { QApplication::restoreOverrideCursor(); }
+            } cursor;
+            return drawing::project(object->shape);
+        };
+        DrawingDialog dialog(create(), objectName(*object), object->id, this);
+        dialog.exec();
+    } catch (const std::exception& error) {
+        const auto message = tr("Could not create drawing: %1").arg(QString::fromUtf8(error.what()));
+        showSceneError(message);
+        QMessageBox::warning(this, tr("Drawing"), message);
     }
 }
 

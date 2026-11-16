@@ -33,6 +33,10 @@ add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/Exch
 set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core PRIVATE TKDESTEP TKXSBase TKMesh TKTopAlgo)
 
+add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp)
+set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase)
+
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
 qt_add_resources(Graph3D app_icon PREFIX "/" FILES resources/icons/graph3d.png)
@@ -45,12 +49,12 @@ if(WIN32)
     target_sources(Graph3D PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Graph3D.rc")
 endif()
 add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
-    src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h
+    src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
-    PRIVATE graph3d_io TKV3d TKOpenGl TKService)
+    PRIVATE graph3d_io graph3d_drawing TKV3d TKOpenGl TKService)
 target_link_libraries(Graph3D PRIVATE graph3d_ui)
 
 include(CTest)
@@ -79,6 +83,12 @@ if(BUILD_TESTING)
     set_target_properties(exchange_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(exchange_test PRIVATE graph3d_io TKTopAlgo)
     add_test(NAME exchange COMMAND exchange_test)
+
+    add_executable(drawing_test tests/drawing/DrawingTest.cpp)
+    set_target_properties(drawing_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(drawing_test PRIVATE graph3d_drawing graph3d_io TKTopAlgo)
+    add_test(NAME drawing COMMAND drawing_test "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(drawing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)
