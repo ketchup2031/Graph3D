@@ -3,6 +3,7 @@
 #include "gui/DrawingDialog.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
+#include "gui/TransformEditor.h"
 #include "io/Exchange.h"
 #include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
@@ -97,6 +98,10 @@ MainWindow::MainWindow()
     connect(properties_, &PropertyPanel::edgeTreatmentEdited, this, [this](int id, double size) {
         editFeature(id, [this, id, size] { return document_.editEdgeTreatment(id, size); });
     });
+    connect(properties_, &PropertyPanel::transformEdited, this,
+        [this](int id, const geometry::BodyTransform& parameters) {
+            editFeature(id, [this, id, parameters] { return document_.editTransform(id, parameters); });
+        });
     connect(viewport_, &Viewport::operationFailed, this, &MainWindow::showSceneError);
     connect(viewport_, &Viewport::facePicked, this, &MainWindow::makeHole);
     connect(viewport_, &Viewport::edgePicked, this, &MainWindow::makeEdgeTreatment);
@@ -215,6 +220,17 @@ void MainWindow::createMenus()
     machiningAction(tr("Chamfer…"), "makeChamfer", Machining::Chamfer);
     machiningAction(tr("Fillet…"), "makeFillet", Machining::Fillet);
 
+    transformMenu_ = model->addMenu(tr("Transform body"));
+    const auto transformAction = [this](const QString& title, const char* name, geometry::BodyTransform defaults) {
+        auto* action = menuAction(transformMenu_, title + QStringLiteral("…"), name);
+        connect(action, &QAction::triggered, this, [this, title, defaults] {
+            transformCurrent(title, defaults);
+        });
+    };
+    transformAction(tr("Linear array"), "makeLinearArray", geometry::LinearArray{geometry::ModelAxis::X, 3, 100});
+    transformAction(tr("Circular array"), "makePolarArray", geometry::PolarArray{geometry::ModelAxis::Z, 4, 360});
+    transformAction(tr("Mirror"), "makeMirror", geometry::Mirror{geometry::Plane::YZ, 0});
+
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
     drawing_ = menuAction(drawingMenu, tr("Create drawing from selected body…"), "drawingPreview");
     connect(drawing_, &QAction::triggered, this, &MainWindow::showDrawing);
@@ -330,6 +346,8 @@ void MainWindow::refreshDocument(int selection)
                     parentId = hole->body;
                 } else if (const auto* edge = std::get_if<document::EdgeTreatment>(&object.parameters)) {
                     parentId = edge->body;
+                } else if (const auto* transform = std::get_if<document::Transform>(&object.parameters)) {
+                    parentId = transform->body;
                 }
                 auto* parent = items_.value(parentId);
                 item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree_);
@@ -402,6 +420,7 @@ void MainWindow::updateActions()
     extrude_->setEnabled(!drawing && sketch);
     revolve_->setEnabled(!drawing && sketch);
     booleanMenu_->setEnabled(!drawing && object && validBody(*object) && bodies >= 2);
+    transformMenu_->setEnabled(!drawing && !pendingMachining_ && object && validBody(*object));
     drawing_->setEnabled(!drawing && object && validBody(*object));
     for (auto* action : machiningActions_) {
         action->setEnabled(!drawing && !pendingMachining_ && object && object->visible && validBody(*object));
@@ -430,6 +449,14 @@ QString MainWindow::objectName(const document::Object& object) const
             return tr("Hole");
         } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
             return operation.kind == geometry::EdgeTreatmentKind::Chamfer ? tr("Chamfer") : tr("Fillet");
+        } else if constexpr (std::is_same_v<Type, document::Transform>) {
+            if (std::holds_alternative<geometry::LinearArray>(operation.parameters)) {
+                return tr("Linear array");
+            }
+            if (std::holds_alternative<geometry::PolarArray>(operation.parameters)) {
+                return tr("Circular array");
+            }
+            return tr("Mirror");
         } else {
             switch (operation.operation) {
             case geometry::BooleanOperation::Union: return tr("Union");
@@ -473,6 +500,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
             const auto size = operation.kind == geometry::EdgeTreatmentKind::Chamfer
                 ? tr("Distance %1 mm").arg(operation.size) : tr("Radius %1 mm").arg(operation.size);
             return tr("%1 · %2").arg(source(operation.body), size);
+        } else if constexpr (std::is_same_v<Type, document::Transform>) {
+            return source(operation.body);
         }
         return {};
     }, object.parameters);
@@ -800,6 +829,26 @@ void MainWindow::endMachining(int id)
     pendingMachining_.reset();
     viewport_->selectObject(id);
     updateActions();
+}
+
+void MainWindow::transformCurrent(const QString& title, const geometry::BodyTransform& defaults)
+{
+    const int id = selectedId();
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("transformDialog"));
+    dialog.setWindowTitle(title);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* editor = new TransformEditor(&dialog);
+    editor->setParameters(defaults);
+    layout->addWidget(editor);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted) {
+        const auto parameters = editor->parameters();
+        addFeature(title, [this, id, parameters] { return document_.addTransform(id, parameters); });
+    }
 }
 
 void MainWindow::makeHole(int id, const geometry::FaceReference& face)

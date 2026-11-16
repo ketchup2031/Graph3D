@@ -26,6 +26,7 @@ std::array<ObjectId, 2> inputs(const Parameters& parameters)
         [](const Boolean& p) { return std::array{p.first, p.second}; },
         [](const Hole& p) { return std::array{p.body, 0}; },
         [](const EdgeTreatment& p) { return std::array{p.body, 0}; },
+        [](const Transform& p) { return std::array{p.body, 0}; },
         [](const auto&) { return std::array{0, 0}; }
     }, parameters);
 }
@@ -77,6 +78,9 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         },
         [&state](const EdgeTreatment& p) {
             return geometry::treatEdge(objectAt(state, p.body).shape, p.edge, p.kind, p.size);
+        },
+        [&state](const Transform& p) {
+            return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
         },
         [](const Imported& imported) {
             if (imported.sourceShape.IsNull() || !TopExp_Explorer(imported.sourceShape, TopAbs_SOLID).More()
@@ -147,6 +151,12 @@ ObjectId Document::addEdgeTreatment(ObjectId body, geometry::EdgeReference edge,
     return append(EdgeTreatment{body, edge, kind, size});
 }
 
+ObjectId Document::addTransform(ObjectId body, geometry::BodyTransform parameters)
+{
+    requireBody(objectAt(objects_, body));
+    return append(Transform{body, std::move(parameters)});
+}
+
 Document Document::fromDefinitions(std::vector<Definition> definitions)
 {
     Document document;
@@ -166,6 +176,8 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
             requireBody(requirePrior(hole->body));
         } else if (const auto* edge = std::get_if<EdgeTreatment>(&parameters)) {
             requireBody(requirePrior(edge->body));
+        } else if (const auto* transform = std::get_if<Transform>(&parameters)) {
+            requireBody(requirePrior(transform->body));
         } else if (const auto* boolean = std::get_if<Boolean>(&parameters)) {
             if (boolean->first == boolean->second
                 || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->first).parameters)
@@ -265,6 +277,22 @@ bool Document::editEdgeTreatment(ObjectId id, double size)
     }
     auto next = objects_;
     std::get<EdgeTreatment>(next[id - 1].parameters).size = size;
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::editTransform(ObjectId id, geometry::BodyTransform parameters)
+{
+    const auto* operation = std::get_if<Transform>(&objectAt(objects_, id).parameters);
+    if (!operation || operation->parameters.index() != parameters.index()) {
+        throw std::invalid_argument("Select a matching array or mirror operation.");
+    }
+    if (operation->parameters == parameters) {
+        return false;
+    }
+    auto next = objects_;
+    std::get<Transform>(next[id - 1].parameters).parameters = std::move(parameters);
     rebuild(next, id - 1);
     commit(std::move(next));
     return true;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "geometry/Sketch.h"
+#include "geometry/BodyTransform.h"
 
 #include <QWidget>
 
@@ -15,6 +15,8 @@ namespace graph3d::document { struct Object; }
 
 namespace graph3d {
 
+class TransformEditor;
+
 class PropertyPanel final : public QWidget {
     Q_OBJECT
 
@@ -27,6 +29,7 @@ signals:
     void revolveEdited(int id, geometry::Axis axis, double offset, double angle);
     void holeEdited(int id, double diameter, double depth, bool through);
     void edgeTreatmentEdited(int id, double size);
+    void transformEdited(int id, const geometry::BodyTransform& parameters);
 
 private:
     QFormLayout* form_;
@@ -41,6 +44,7 @@ private:
     QDoubleSpinBox* depth_;
     QCheckBox* through_;
     QDoubleSpinBox* edgeSize_;
+    TransformEditor* transform_;
     QPushButton* apply_;
     int id_ = 0;
 };

@@ -1,6 +1,7 @@
 #include "gui/PropertyPanel.h"
 
 #include "document/Document.h"
+#include "gui/TransformEditor.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -17,7 +18,7 @@ PropertyPanel::PropertyPanel(QWidget* parent)
       axis_(new QComboBox(this)), offset_(new QDoubleSpinBox(this)), angle_(new QDoubleSpinBox(this)),
       diameter_(new QDoubleSpinBox(this)), depth_(new QDoubleSpinBox(this)),
       through_(new QCheckBox(tr("Through"), this)), edgeSize_(new QDoubleSpinBox(this)),
-      apply_(new QPushButton(tr("Apply"), this))
+      transform_(new TransformEditor(this)), apply_(new QPushButton(tr("Apply"), this))
 {
     setObjectName(QStringLiteral("propertyPanel"));
     object_->setObjectName(QStringLiteral("propertyObject"));
@@ -59,6 +60,7 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     form_->addRow(tr("Blind depth"), depth_);
     form_->addRow(tr("Distance / radius"), edgeSize_);
     connect(through_, &QCheckBox::toggled, depth_, &QDoubleSpinBox::setDisabled);
+    form_->addRow(transform_);
     form_->addRow(apply_);
     connect(apply_, &QPushButton::clicked, this, [this] {
         if (id_ && form_->isRowVisible(distance_)) {
@@ -70,6 +72,8 @@ PropertyPanel::PropertyPanel(QWidget* parent)
             emit holeEdited(id_, diameter_->value(), depth_->value(), through_->isChecked());
         } else if (id_ && form_->isRowVisible(edgeSize_)) {
             emit edgeTreatmentEdited(id_, edgeSize_->value());
+        } else if (id_ && form_->isRowVisible(transform_)) {
+            emit transformEdited(id_, transform_->parameters());
         }
     });
     showObject(nullptr, {}, {});
@@ -104,7 +108,12 @@ void PropertyPanel::showObject(const document::Object* object, const QString& na
     form_->setRowVisible(through_, hole != nullptr);
     form_->setRowVisible(depth_, hole != nullptr);
     form_->setRowVisible(edgeSize_, edge != nullptr);
-    form_->setRowVisible(apply_, extrusion || revolution || hole || edge);
+    const auto* transform = object ? std::get_if<document::Transform>(&object->parameters) : nullptr;
+    form_->setRowVisible(transform_, transform != nullptr);
+    form_->setRowVisible(apply_, extrusion || revolution || hole || edge || transform);
+    if (transform) {
+        transform_->setParameters(transform->parameters);
+    }
     if (hole) {
         diameter_->setValue(hole->size.diameter);
         depth_->setValue(hole->size.depth);

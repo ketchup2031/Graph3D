@@ -24,6 +24,7 @@
 
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTest>
 #include <QTemporaryDir>
@@ -540,6 +541,63 @@ private slots:
         QVERIFY(pdf.open(QIODevice::ReadOnly));
         QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
         QVERIFY(!window.isWindowModified());
+    }
+
+    void transformSelectedBody()
+    {
+        graph3d::MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        QVERIFY(tree);
+        auto* source = tree->topLevelItem(0);
+        QVERIFY(source);
+        tree->setCurrentItem(source);
+        auto* properties = window.findChild<QWidget*>("propertyPanel");
+        QVERIFY(properties);
+        auto* apply = properties->findChild<QPushButton*>("applyProperties");
+        auto* count = properties->findChild<QSpinBox*>("transformCount");
+        auto* spacing = properties->findChild<QDoubleSpinBox*>("transformSpacing");
+        auto* sweep = properties->findChild<QDoubleSpinBox*>("transformSweep");
+        auto* offset = properties->findChild<QDoubleSpinBox*>("transformOffset");
+        QVERIFY(apply && count && spacing && sweep && offset);
+        for (const auto [actionName, title] : {std::pair{"makeLinearArray", "Linear array"},
+                                                std::pair{"makePolarArray", "Circular array"},
+                                                std::pair{"makeMirror", "Mirror"}}) {
+            auto* action = window.findChild<QAction*>(actionName);
+            QVERIFY(action && action->isEnabled());
+            bool dialogSeen = false;
+            QTimer::singleShot(0, &window, [&] {
+                if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                    dialogSeen = dialog->objectName() == "transformDialog";
+                    dialog->done(dialogSeen ? QDialog::Accepted : QDialog::Rejected);
+                }
+            });
+            action->trigger();
+            QVERIFY(dialogSeen);
+            QCOMPARE(source->childCount(), 1);
+            QCOMPARE(source->checkState(0), Qt::Unchecked);
+            auto* result = source->child(0);
+            QVERIFY(result->text(0).startsWith(QString::fromLatin1(title)));
+            QVERIFY(result->text(2).isEmpty());
+            QCOMPARE(tree->currentItem(), result);
+            source = result;
+        }
+        QVERIFY(offset->isVisible() && !count->isVisible() && !sweep->isVisible());
+        offset->setValue(25);
+        apply->click();
+        QVERIFY(source->text(2).isEmpty());
+        window.findChild<QAction*>("undoDocument")->trigger();
+        QCOMPARE(offset->value(), 0.0);
+        window.findChild<QAction*>("redoDocument")->trigger();
+        QCOMPARE(offset->value(), 25.0);
+        tree->setCurrentItem(source->parent()->parent());
+        QVERIFY(count->isVisible() && spacing->isVisible() && !offset->isVisible());
+        count->setValue(2);
+        apply->click();
+        QCOMPARE(count->value(), 2);
+        QVERIFY(source->text(2).isEmpty());
     }
 
     void machineSelectedFaceAndEdges()

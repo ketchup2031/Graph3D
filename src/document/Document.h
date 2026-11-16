@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geometry/BodyTransform.h"
 #include "geometry/PartFeatures.h"
 #include "geometry/Primitive.h"
 #include "geometry/Sketch.h"
@@ -28,7 +29,9 @@ struct EdgeTreatment {
     geometry::EdgeTreatmentKind kind;
     double size;
 };
-using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported, Hole, EdgeTreatment>;
+struct Transform { ObjectId body; geometry::BodyTransform parameters; };
+using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
+                                Hole, EdgeTreatment, Transform>;
 
 struct Definition {
     Parameters parameters;
@@ -56,11 +59,13 @@ public:
     ObjectId addImported(std::string name, TopoDS_Shape shape);
     ObjectId addHole(ObjectId body, geometry::FaceReference face, geometry::HoleSize size);
     ObjectId addEdgeTreatment(ObjectId body, geometry::EdgeReference edge, geometry::EdgeTreatmentKind kind, double size);
+    ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
     static Document fromDefinitions(std::vector<Definition> definitions);
     bool editExtrude(ObjectId id, double distance);
     bool editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle);
     bool editHole(ObjectId id, geometry::HoleSize size);
     bool editEdgeTreatment(ObjectId id, double size);
+    bool editTransform(ObjectId id, geometry::BodyTransform parameters);
     bool setVisible(ObjectId id, bool visible);
     bool clear();
 

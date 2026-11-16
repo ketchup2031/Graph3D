@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <type_traits>
@@ -22,11 +23,13 @@ namespace {
 
 constexpr int legacyVersion = 1;
 constexpr int featureVersion = 2;
+constexpr int transformVersion = 3;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
 constexpr std::array planes{"XY", "XZ", "YZ"};
 constexpr std::array axes{"U", "V"};
+constexpr std::array modelAxes{"X", "Y", "Z"};
 constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
@@ -168,6 +171,25 @@ geometry::Point3 decodePoint3(const QJsonValue& value)
     return {number(coordinates.at(0), "x"), number(coordinates.at(1), "y"), number(coordinates.at(2), "z")};
 }
 
+QJsonObject encodeTransform(const document::Transform& item)
+{
+    auto data = std::visit([](const auto& transform) -> QJsonObject {
+        using Type = std::decay_t<decltype(transform)>;
+        if constexpr (std::is_same_v<Type, geometry::LinearArray>) {
+            return {{"type", "linear-array"}, {"axis", name(transform.axis, modelAxes)},
+                    {"count", transform.count}, {"spacing", encodeNumber(transform.spacing)}};
+        } else if constexpr (std::is_same_v<Type, geometry::PolarArray>) {
+            return {{"type", "polar-array"}, {"axis", name(transform.axis, modelAxes)},
+                    {"count", transform.count}, {"sweep", encodeNumber(transform.sweep)}};
+        } else {
+            return {{"type", "mirror"}, {"plane", name(transform.plane, planes)},
+                    {"offset", encodeNumber(transform.offset)}};
+        }
+    }, item.parameters);
+    data.insert("body", item.body);
+    return data;
+}
+
 QJsonObject encodeObject(const document::Object& object)
 {
     auto data = std::visit([](const auto& item) -> QJsonObject {
@@ -202,6 +224,8 @@ QJsonObject encodeObject(const document::Object& object)
             }
             return {{"type", "edge-treatment"}, {"body", item.body}, {"kind", name(item.kind, treatments)},
                     {"size", encodeNumber(item.size)}, {"curveType", item.edge.curveType}, {"samples", samples}};
+        } else if constexpr (std::is_same_v<Type, document::Transform>) {
+            return encodeTransform(item);
         } else {
             return {{"type", "imported"}, {"name", QString::fromStdString(item.name)},
                     {"brep", encodeBrep(item.sourceShape)}};
@@ -269,6 +293,25 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
         return document::EdgeTreatment{integer(object.value("body"), "body"), edge, kind,
                                        number(object.value("size"), "size")};
     }
+    if (version >= transformVersion && (type == "linear-array" || type == "polar-array")) {
+        const auto body = integer(object.value("body"), "body");
+        const auto axis = parseName<geometry::ModelAxis>(object.value("axis"), modelAxes, "axis");
+        // An out-of-range instance count is a rebuild error, just like an invalid spacing.
+        const auto count = object.value("count").toInteger(std::numeric_limits<qint64>::min());
+        if (count < std::numeric_limits<int>::min() || count > std::numeric_limits<int>::max()) {
+            fileError(QStringLiteral("Invalid integer for count."));
+        }
+        const auto instances = static_cast<int>(count);
+        if (type == "linear-array") {
+            return document::Transform{body, geometry::LinearArray{axis, instances, number(object.value("spacing"), "spacing")}};
+        }
+        return document::Transform{body, geometry::PolarArray{axis, instances, number(object.value("sweep"), "sweep")}};
+    }
+    if (type == "mirror" && version >= transformVersion) {
+        return document::Transform{integer(object.value("body"), "body"),
+            geometry::Mirror{parseName<geometry::Plane>(object.value("plane"), planes, "plane"),
+                             number(object.value("offset"), "offset")}};
+    }
     if (type == "imported") {
         return document::Imported{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
     }
@@ -286,8 +329,10 @@ void saveProject(const QString& path, const document::Document& document)
     int version = legacyVersion;
     try {
         for (const auto& object : document.objects()) {
-            if (std::holds_alternative<document::Hole>(object.parameters)
-                || std::holds_alternative<document::EdgeTreatment>(object.parameters)) {
+            if (std::holds_alternative<document::Transform>(object.parameters)) {
+                version = transformVersion;
+            } else if (version == legacyVersion && (std::holds_alternative<document::Hole>(object.parameters)
+                || std::holds_alternative<document::EdgeTreatment>(object.parameters))) {
                 version = featureVersion;
             }
             encoded.append(encodeObject(object));
@@ -315,7 +360,7 @@ document::Document openProject(const QString& path)
         fileError(QStringLiteral("This is not a Graph3D project."));
     }
     const auto parsedVersion = root.value("version").toDouble();
-    if ((parsedVersion != legacyVersion && parsedVersion != featureVersion)
+    if ((parsedVersion != legacyVersion && parsedVersion != featureVersion && parsedVersion != transformVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

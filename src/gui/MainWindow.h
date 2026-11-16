@@ -47,6 +47,7 @@ private:
     void makeHole(int id, const geometry::FaceReference& face);
     void makeEdgeTreatment(int id, const geometry::EdgeReference& edge);
     void endMachining(int id);
+    void transformCurrent(const QString& title, const geometry::BodyTransform& defaults);
     void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
@@ -88,6 +89,7 @@ private:
     QList<QAction*> machiningActions_;
     std::optional<Machining> pendingMachining_;
     QMenu* booleanMenu_ = nullptr;
+    QMenu* transformMenu_ = nullptr;
     QList<QAction*> fileActions_;
     QString logPath_;
     QString projectPath_;
