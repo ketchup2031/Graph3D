@@ -202,8 +202,9 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
         #startPage QFrame[panel="true"] { background: #ffffff; border: 1px solid #dbe3ee; border-radius: 12px; }
         #startPage QPushButton {
             background: #ffffff; color: #1e3853; border: 1px solid #d4deea;
-            border-radius: 8px; padding: 8px 11px; font-size: 13px;
+            border-radius: 0; padding: 8px 11px; font-size: 13px;
         }
+        #startPage QPushButton[dashed="true"] { border: 2px dashed #5b7fa6; padding: 7px 10px; }
         #startPage QPushButton:hover { background: #eaf3ff; border-color: #91b7e5; }
         #startPage QPushButton:pressed { background: #dceafe; }
         #startPage QPushButton:focus { border: 2px solid #286bb4; padding: 7px 10px; }
@@ -282,6 +283,7 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
         auto* button = new QPushButton(title, createPane_);
         button->setObjectName(QString::fromLatin1(name));
         button->setProperty("card", true);
+        button->setProperty("dashed", true);
         button->setIcon(commandIcon(icon));
         button->setIconSize(QSize(26, 26));
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -316,6 +318,7 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
     create->addWidget(exampleDescription_);
     auto* openExample = new QPushButton(tr("Open example"), createPane_);
     openExample->setObjectName(QStringLiteral("startOpenExample"));
+    openExample->setProperty("dashed", true);
     create->addWidget(openExample, 0, Qt::AlignLeft);
     connect(openExample, &QPushButton::clicked, this, [this] {
         emit exampleRequested(QString::fromLatin1(examples[exampleIndex_].path));
