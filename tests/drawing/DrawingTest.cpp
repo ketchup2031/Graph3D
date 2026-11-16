@@ -3,6 +3,7 @@
 #include "io/DraftIO.h"
 #include "io/ModelViewsIO.h"
 #include "geometry/SketchModeling.h"
+#include "geometry/SketchConstraints.h"
 #include "io/ProjectIO.h"
 
 #include <BRepGProp.hxx>
@@ -307,6 +308,132 @@ void verifyMultiSheetDrawing(const QDir& source, const QDir& output)
           "Drawing PDF did not contain two pages");
 }
 
+void verifyParametricBracket(const QDir& output)
+{
+    const auto path = output.filePath("parametric-bracket.graph3d");
+    const auto drawingPath = output.filePath("parametric-bracket.g3draw");
+    graph3d::document::Document initial;
+    geom::Sketch sketch{geom::Plane::XY, {
+        geom::Line{{0, 0}, {60, 0}}, geom::Line{{60, 0}, {60, 25}},
+        geom::Line{{60, 25}, {28, 25}}, geom::Line{{28, 25}, {28, 45}},
+        geom::Line{{28, 45}, {0, 45}}, geom::Line{{0, 45}, {0, 0}},
+        geom::Circle{{14, 18}, 5}
+    }};
+    using enum geom::ConstraintKind;
+    sketch.constraints = {{Length, {0, 0}, {}, 60}, {Diameter, {6, 0}, {}, 10},
+                          {Length, {1, 0}, {}, 25}, {Length, {4, 0}, {}, 28},
+                          {Length, {5, 0}, {}, 45}, {Perpendicular, {0, 0}, {1, 0}}};
+    for (int i = 0; i < 6; ++i) {
+        sketch.constraints.push_back({i % 2 == 0 ? Horizontal : Vertical, {i, 0}});
+    }
+    const auto sketchId = initial.addSketch(sketch);
+    const auto body = initial.addExtrude(sketchId, 12);
+    io::saveProject(path, initial);
+    const auto firstSource = io::openModelSource(path);
+    auto document = io::openProject(path);
+    check(std::get<geom::Sketch>(document.find(sketchId)->parameters) == sketch,
+          "The parametric sketch did not survive project save and reopen");
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(document.find(body)->shape, properties);
+    const auto volume = (60 * 25 + 28 * 20 - 25 * std::numbers::pi) * 12;
+    check(std::abs(properties.Mass() - volume) < .001, "The bracket's through cut was lost");
+
+    draw::Draft draft;
+    draft.a3 = true;
+    draft.title = QStringLiteral("Parametric angle bracket");
+    draft.number = QStringLiteral("G3D-014");
+    draft.modelViews = io::buildModelViews(firstSource, body, {}, draw::draftSize(draft));
+    const auto width = [](const draw::ModelViews& views) { return views.geometry->views.front.width; };
+    check(std::abs(width(*draft.modelViews) - 60) < 1.e-5, "Initial linked drawing width is wrong");
+    io::saveDraft(drawingPath, draft);
+
+    auto edited = sketch;
+    edited.constraints[0].value = 80;
+    check(document.editSketch(sketchId, edited), "Driving width could not be edited");
+    check(document.find(body)->status == graph3d::document::Status::Ready,
+          "Dependent extrusion did not rebuild after the sketch edit");
+    io::saveProject(path, document);
+    auto restoredDrawing = io::openDraft(drawingPath);
+    const auto secondSource = io::openModelSource(path);
+    check(secondSource.digest != restoredDrawing.modelViews->sourceDigest, "The linked drawing was not marked outdated");
+    auto updated = io::buildModelViews(secondSource, body, {}, draw::draftSize(draft), &*restoredDrawing.modelViews);
+    check(std::abs(width(updated) - 80) < 1.e-5
+        && std::abs(updated.geometry->views.top.height - 45) < 1.e-5
+        && updated.layout == draft.modelViews->layout && updated.geometry->views.top.circles.size() == 1,
+        "The rebuilt drawing lost its layout, hole, or new width");
+    const auto updatedShape = document.find(body)->shape;
+    check(document.undo() && std::get<geom::Sketch>(document.find(sketchId)->parameters) == sketch,
+          "Undo did not restore the original driving sketch parameters");
+    check(std::abs(draw::project(document.find(body)->shape).front.width - 60) < 1.e-5,
+          "Undo did not restore the original body width");
+    check(document.redo() && document.find(body)->shape.IsSame(updatedShape),
+          "Redo did not restore the updated body");
+    restoredDrawing.modelViews = std::move(updated);
+    io::saveDraft(drawingPath, restoredDrawing);
+    draw::exportDraftPdf(output.filePath("parametric-bracket.pdf"), io::openDraft(drawingPath));
+
+    edited.constraints.push_back({Length, {0, 0}, {}, 100});
+    const auto revision = document.revision();
+    bool rejected = false;
+    try {
+        document.editSketch(sketchId, edited);
+    } catch (const std::invalid_argument& error) {
+        rejected = std::string(error.what()).find("conflict") != std::string::npos;
+    }
+    check(rejected && document.revision() == revision && document.find(body)->shape.IsSame(updatedShape),
+          "An invalid sketch edit modified the committed model");
+}
+
+void verifySketchOnFace(const QDir& output)
+{
+    using graph3d::document::Status;
+    graph3d::document::Document document;
+    const auto base = document.addSketch({geom::Plane::XY, {geom::Rectangle{{0, 0}, {50, 40}}}});
+    const auto support = document.addExtrude(base, 10);
+    geom::Sketch sketch{geom::Plane::XY, {geom::Rectangle{{50, 0}, {65, 12}}}};
+    sketch.support = geom::SketchSupport{support, {{15, 15, 10}, {0, 0, 1}}};
+    const auto context = document.sketchContext(sketch);
+    const auto edge = std::ranges::find_if(context.projections, [](const auto& projection) {
+        return projection.points.front().v == 0 && projection.points.back().v == 0;
+    });
+    check(edge != context.projections.end(), "The bottom edge was not projected from the selected face");
+    const double position = edge->points.front().u > edge->points.back().u ? 0 : 1;
+    sketch.constraints.push_back({geom::ConstraintKind::OnProjection, {0, 0}, {}, position, edge->edge});
+    const auto attached = document.addSketch(sketch);
+    check(document.find(support)->visible, "Adding an attached sketch hid the base body");
+    const auto result = document.addExtrude(attached, 5);
+    check(document.editExtrude(support, 18), "Support height edit failed");
+    auto current = document.sketchContext(sketch);
+    check(std::abs(current.frame.Location().Z() - 18) < 1.e-6 && document.find(result)->status == Status::Ready,
+          "An attached sketch failed to follow its moved support plane");
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(document.find(result)->shape, properties);
+    check(std::abs(properties.CentreOfMass().Z() - 20.5) < 1.e-6,
+          "Attached extrusion used the wrong support orientation");
+    check(document.editSketch(base, {geom::Plane::XY, {geom::Rectangle{{0, 0}, {60, 40}}}}),
+          "Support width edit failed");
+    current = document.sketchContext(sketch);
+    const auto solved = geom::solveSketch(sketch, current.projections);
+    check(solved.conflicts.empty() && std::abs(std::get<geom::Rectangle>(solved.entities[0]).first.u - 60) < 1.e-6,
+          "A projected endpoint failed to follow the remodeled edge");
+    const auto path = output.filePath("face-sketch.graph3d");
+    io::saveProject(path, document);
+    auto restored = io::openProject(path);
+    check(std::get<geom::Sketch>(restored.find(attached)->parameters) == sketch && restored.find(result)->status == Status::Ready,
+          "Face placement or projected edge references did not round trip");
+    check(restored.editSketch(base, {geom::Plane::XY, {geom::Circle{{25, 20}, 24}}}),
+          "Replacing the support outline failed");
+    check(restored.find(attached)->status == Status::Failed && restored.find(result)->status == Status::Blocked
+        && restored.find(attached)->error.find("projected sketch edge") != std::string::npos,
+        "A lost projected edge did not produce a diagnostic and block the dependent solid");
+    const auto brokenPath = output.filePath("face-sketch-lost-projection.graph3d");
+    io::saveProject(brokenPath, restored);
+    check(io::openProject(brokenPath).find(attached)->status == Status::Failed,
+        "A lost projected edge prevented reopening the model");
+    check(restored.undo() && restored.find(result)->status == Status::Ready,
+        "Undo did not restore the lost projection");
+}
+
 void verifyDraft(const QDir& output)
 {
     using enum draw::DraftKind;
@@ -585,6 +712,8 @@ int main(int argc, char** argv)
         }
         verifySections(QDir(args.at(1)), output);
         verifyMultiSheetDrawing(QDir(args.at(1)), output);
+        verifyParametricBracket(output);
+        verifySketchOnFace(output);
         verifyDraft(output);
         verifyAttachedDimensions(output);
         verifyModelViews(output);

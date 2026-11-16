@@ -204,11 +204,11 @@ TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const TopoDS_Edge& edge, 
 
 }  // namespace
 
-FaceReference locateHole(const TopoDS_Face& face, Point3 rayOrigin, Point3 rayDirection)
+FaceReference locateHole(const TopoDS_Face& face, Point3 rayOrigin, Point3 rayDirection, bool sketch)
 {
     const BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane || !finite(rayOrigin) || !finite(rayDirection)) {
-        throw std::invalid_argument("Click a planar face to place the hole.");
+        throw std::invalid_argument(sketch ? "Click a planar face for the sketch." : "Click a planar face to place the hole.");
     }
     const auto plane = surface.Plane();
     const auto outward = outwardNormal(face, plane);
@@ -216,7 +216,7 @@ FaceReference locateHole(const TopoDS_Face& face, Point3 rayOrigin, Point3 rayDi
     const auto origin = point(rayOrigin);
     const auto alignment = outward.XYZ().Dot(direction.XYZ());
     if (std::abs(alignment) < 1.e-8) {
-        throw std::invalid_argument("Rotate the body to face the hole location.");
+        throw std::invalid_argument(sketch ? "Rotate the body to face the sketch plane." : "Rotate the body to face the hole location.");
     }
     const auto t = outward.XYZ().Dot(gp_Vec(origin, plane.Location()).XYZ()) / alignment;
     const auto center = origin.Translated(direction * t);
@@ -241,6 +241,51 @@ EdgeReference referenceEdge(const TopoDS_Edge& edge)
         result.samples[i] = xyz(curve.Value(std::lerp(first, last, t)).XYZ());
     }
     return result;
+}
+
+TopoDS_Face resolveSketchFace(const TopoDS_Shape& body, const FaceReference& reference)
+{
+    const auto solid = singleSolid(body);
+    if (!finite(reference.center) || !finite(reference.outward)
+        || std::abs(std::hypot(reference.outward[0], reference.outward[1], reference.outward[2]) - 1) > tolerance) {
+        throw std::invalid_argument("Invalid planar face reference.");
+    }
+    const auto anchor = point(reference.center);
+    const auto outward = gp_Dir(reference.outward[0], reference.outward[1], reference.outward[2]);
+    TopoDS_Face exact, shifted;
+    int exactCount = 0;
+    int shiftedCount = 0;
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+        const auto face = TopoDS::Face(it.Current());
+        const BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        const auto plane = surface.Plane();
+        if (outwardNormal(face, plane).Dot(outward) < 1 - 1.e-8) {
+            continue;
+        }
+        const double delta = gp_Vec(plane.Location(), anchor).Dot(gp_Vec(outward));
+        if (!insideFace(face, anchor.Translated(gp_Vec(outward) * -delta))) {
+            continue;
+        }
+        shifted = face;
+        ++shiftedCount;
+        if (std::abs(delta) <= tolerance) {
+            exact = face;
+            ++exactCount;
+        }
+    }
+    if (exactCount == 1) {
+        return exact;
+    }
+    if (exactCount == 0 && shiftedCount == 1) {
+        return shifted;
+    }
+    if (shiftedCount > 1) {
+        throw std::invalid_argument("The sketch support face is ambiguous after rebuilding.");
+    }
+    throw std::invalid_argument("The sketch support face could not be matched after rebuilding.");
 }
 
 TopoDS_Shape drillHole(const TopoDS_Shape& body, const FaceReference& reference, HoleSize size)

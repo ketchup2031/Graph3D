@@ -15,6 +15,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/PreviewBox.cpp
     src/geometry/Primitives.cpp
     src/geometry/SketchModeling.cpp
+    src/geometry/SketchConstraints.cpp
     src/geometry/PartFeatures.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp)
@@ -26,7 +27,7 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d)
 
 add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)

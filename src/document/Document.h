@@ -4,7 +4,7 @@
 #include "geometry/BodyTransform.h"
 #include "geometry/PartFeatures.h"
 #include "geometry/Primitive.h"
-#include "geometry/Sketch.h"
+#include "geometry/SketchModeling.h"
 
 #include <TopoDS_Shape.hxx>
 
@@ -69,6 +69,8 @@ public:
     ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
     ObjectId addAssembly(Assembly assembly);
     static Document fromDefinitions(std::vector<Definition> definitions);
+    bool editSketch(ObjectId id, geometry::Sketch sketch);
+    geometry::SketchContext sketchContext(const geometry::Sketch& sketch) const;
     bool editExtrude(ObjectId id, double distance);
     bool editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle);
     bool editHole(ObjectId id, geometry::HoleSize size);

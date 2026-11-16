@@ -258,7 +258,7 @@ bool Viewport::beginSubshapePick(int id, SubshapePick mode)
             object->Attributes()->SetFaceBoundaryDraw(true);
             scene_->context->Redisplay(object, false);
         }
-        const auto type = mode == SubshapePick::Face ? TopAbs_FACE : TopAbs_EDGE;
+        const auto type = mode == SubshapePick::Edge ? TopAbs_EDGE : TopAbs_FACE;
         scene_->context->Activate(object, AIS_Shape::SelectionMode(type));
         scene_->context->UpdateCurrentViewer();
         setCursor(Qt::CrossCursor);
@@ -307,12 +307,12 @@ void Viewport::pickSubshape(const QPoint& point)
     if (owner->HasLocation()) {
         shape = shape.Located(owner->Location() * shape.Location());
     }
-    if (scene_->pickMode == SubshapePick::Face && shape.ShapeType() == TopAbs_FACE) {
+    if (scene_->pickMode != SubshapePick::Edge && shape.ShapeType() == TopAbs_FACE) {
         geometry::Point3 origin;
         geometry::Point3 ray;
         scene_->view->ConvertWithProj(point.x(), point.y(), origin[0], origin[1], origin[2],
                                      ray[0], ray[1], ray[2]);
-        const auto reference = geometry::locateHole(TopoDS::Face(shape), origin, ray);
+        const auto reference = geometry::locateHole(TopoDS::Face(shape), origin, ray, scene_->pickMode == SubshapePick::SketchFace);
         endSubshapePick();
         emit facePicked(id, reference);
     } else if (scene_->pickMode == SubshapePick::Edge && shape.ShapeType() == TopAbs_EDGE) {

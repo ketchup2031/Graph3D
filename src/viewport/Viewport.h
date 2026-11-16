@@ -13,7 +13,7 @@ namespace graph3d::document { class Document; }
 namespace graph3d {
 
 enum class ViewDirection { Front, Top, Right, Isometric };
-enum class SubshapePick { Face, Edge };
+enum class SubshapePick { Face, Edge, SketchFace };
 
 class Viewport final : public QWidget {
     Q_OBJECT

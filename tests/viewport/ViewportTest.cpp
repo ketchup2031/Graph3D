@@ -6,6 +6,7 @@
 #include "viewport/Viewport.h"
 
 #include <QAction>
+#include <QListWidget>
 #include <QAbstractButton>
 #include <array>
 #include <QApplication>
@@ -819,6 +820,58 @@ private slots:
         QCOMPARE(editor.sketch().entities.size(), std::size_t(1));
     }
 
+    void sketchConstraintsInEditor()
+    {
+        using namespace graph3d::geometry;
+        graph3d::SketchEditor editor;
+        editor.resize(760, 620);
+        editor.begin(Sketch{Plane::XY, {Rectangle{{0, 0}, {50, 30}}, Circle{{20, 15}, 5}}}, {});
+        editor.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        auto* canvas = editor.findChild<QWidget*>("sketchCanvas");
+        auto* constraints = editor.findChild<QListWidget*>("sketchConstraints");
+        auto* diagnostic = editor.findChild<QLabel*>("sketchConstraintDiagnostic");
+        QVERIFY(canvas && constraints && diagnostic);
+        const auto click = [canvas](int u, int v) {
+            const QPoint origin(canvas->width() / 2, canvas->height() / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, origin + QPoint(3 * u, -3 * v));
+        };
+        const auto setValue = [](double value) {
+            QTimer::singleShot(0, [value] {
+                if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    dialog->setDoubleValue(value);
+                    dialog->accept();
+                }
+            });
+        };
+        const auto add = [&editor](const char* name) { editor.findChild<QAction*>(name)->trigger(); };
+        add("sketchConstraintLength");
+        setValue(60);
+        click(15, 0);
+        QCOMPARE(constraints->count(), 1);
+        QCOMPARE(editor.sketch().constraints.at(0).value, 60.0);
+        add("sketchConstraintDiameter");
+        setValue(12);
+        click(25, 15);
+        QCOMPARE(constraints->count(), 2);
+        QCOMPARE(editor.sketch().constraints.at(1).value, 12.0);
+
+        constraints->setCurrentRow(0);
+        setValue(65);
+        editor.findChild<QPushButton*>("editSketchDimension")->click();
+        QCOMPARE(editor.sketch().constraints.at(0).value, 65.0);
+        QVERIFY(!diagnostic->isVisible());
+
+        add("sketchConstraintLength");
+        setValue(75);
+        click(15, 0);
+        QCOMPARE(constraints->count(), 3);
+        QVERIFY(diagnostic->isVisible());
+        editor.findChild<QPushButton*>("sketchUndo")->click();
+        QCOMPARE(constraints->count(), 2);
+        QVERIFY(!diagnostic->isVisible());
+    }
+
     void sketchThroughModelTree()
     {
         graph3d::MainWindow window;
@@ -884,8 +937,33 @@ private slots:
             QVERIFY(sketch->child(0)->text(1).contains(QStringLiteral("30 mm")));
         }
 
-        auto* firstBody = tree->topLevelItem(0)->child(0);
-        const auto* secondBody = tree->topLevelItem(1)->child(0);
+        auto* firstSketch = tree->topLevelItem(0);
+        auto* firstBody = firstSketch->child(0);
+        tree->setCurrentItem(firstSketch);
+        action("editSketch")->trigger();
+        QVERIFY(editor->isVisible());
+        QCOMPARE(editor->sketch().entities.size(), std::size_t(1));
+        editor->findChild<QAction*>("sketchConstraintLength")->trigger();
+        QTimer::singleShot(0, [] {
+            if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                dialog->setDoubleValue(45);
+                dialog->accept();
+            }
+        });
+        click(40, 0);
+        QCOMPARE(editor->sketch().constraints.size(), std::size_t(1));
+        button("sketchFinish")->click();
+        QVERIFY(viewport->isVisible());
+        QCOMPARE(firstSketch->child(0), firstBody);
+        QCOMPARE(firstBody->text(2), QString{});
+        action("undoDocument")->trigger();
+        tree->setCurrentItem(firstSketch);
+        action("editSketch")->trigger();
+        QVERIFY(editor->sketch().constraints.empty());
+        button("sketchCancel")->click();
+
+        auto* secondBody = tree->topLevelItem(1)->child(0);
+        tree->setCurrentItem(secondBody);
         QVERIFY(action("booleanUnion")->isEnabled());
         acceptInput();
         action("booleanUnion")->trigger();
@@ -1393,6 +1471,16 @@ private slots:
         tree->setCurrentItem(cube);
         action("viewTop")->trigger();
         action("fitScene")->trigger();
+        QVERIFY(action("newSketchOnFace")->isEnabled());
+        action("newSketchOnFace")->trigger();
+        QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+        auto* sketchEditor = window.findChild<graph3d::SketchEditor*>();
+        QVERIFY(sketchEditor && sketchEditor->isVisible());
+        QVERIFY(sketchEditor->sketch().support.has_value());
+        QCOMPARE(sketchEditor->sketch().support->body, 1);
+        sketchEditor->findChild<QPushButton*>("sketchCancel")->click();
+        QVERIFY(viewport->isVisible());
+        QCOMPARE(cube->childCount(), 0);
         QVERIFY(action("makeHole")->isEnabled());
         action("makeHole")->trigger();
         QVERIFY(!action("makeChamfer")->isEnabled());

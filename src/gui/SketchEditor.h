@@ -3,6 +3,7 @@
 #include "geometry/Sketch.h"
 
 #include <QWidget>
+#include <vector>
 
 class QLabel;
 
@@ -16,6 +17,7 @@ class SketchEditor final : public QWidget {
 public:
     explicit SketchEditor(QWidget* parent = nullptr);
     void begin(geometry::Plane plane);
+    void begin(const geometry::Sketch& sketch, std::vector<geometry::SketchProjection> projections);
     const geometry::Sketch& sketch() const;
     void showError(const QString& message);
 

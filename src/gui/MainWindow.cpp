@@ -13,6 +13,8 @@
 #include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
 
+#include <Standard_Failure.hxx>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -271,6 +273,10 @@ void MainWindow::createMenus()
     planeAction(tr("New on XY"), "newSketchXY", geometry::Plane::XY);
     planeAction(tr("New on XZ"), "newSketchXZ", geometry::Plane::XZ);
     planeAction(tr("New on YZ"), "newSketchYZ", geometry::Plane::YZ);
+    newFaceSketch_ = menuAction(sketchMenu_, tr("New on planar face"), "newSketchOnFace");
+    connect(newFaceSketch_, &QAction::triggered, this, [this] { startMachining(Machining::SketchFace); });
+    editSketch_ = menuAction(sketchMenu_, tr("Edit sketch"), "editSketch");
+    connect(editSketch_, &QAction::triggered, this, [this] { editSketch(selectedId()); });
 
     auto* model = menuBar()->addMenu(tr("&Model"));
     extrude_ = menuAction(model, tr("Extrude sketch…"), "extrudeSketch");
@@ -421,6 +427,9 @@ void MainWindow::createModelTree()
         viewport_->selectObject(selectedId());
         updateSelection();
     });
+    connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
+        editSketch(item->data(0, objectIdRole).toInt());
+    });
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column != 0) {
             return;
@@ -449,7 +458,9 @@ void MainWindow::refreshDocument(int selection)
             auto* item = items_.value(object.id);
             if (!item) {
                 int parentId = 0;
-                if (const auto* extrusion = std::get_if<document::Extrude>(&object.parameters)) {
+                if (const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters); sketch && sketch->support) {
+                    parentId = sketch->support->body;
+                } else if (const auto* extrusion = std::get_if<document::Extrude>(&object.parameters)) {
                     parentId = extrusion->profile;
                 } else if (const auto* revolution = std::get_if<document::Revolve>(&object.parameters)) {
                     parentId = revolution->profile;
@@ -531,8 +542,10 @@ void MainWindow::updateActions()
     sketchMenu_->setEnabled(modeling);
     tree_->setEnabled(modeling);
     properties_->setEnabled(modeling);
-    extrude_->setEnabled(modeling && sketch);
-    revolve_->setEnabled(modeling && sketch);
+    editSketch_->setEnabled(modeling && sketch && !pendingMachining_);
+    newFaceSketch_->setEnabled(modeling && !pendingMachining_ && object && object->visible && validBody(*object));
+    extrude_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
+    revolve_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
     booleanMenu_->setEnabled(modeling && object && validBody(*object) && bodies >= 2);
     transformMenu_->setEnabled(modeling && !pendingMachining_ && object && validBody(*object));
     createAssembly_->setEnabled(modeling && !pendingMachining_ && bodies > 0);
@@ -595,6 +608,9 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return input ? objectName(*input) : QString::number(id);
         };
         if constexpr (std::is_same_v<Type, geometry::Sketch>) {
+            if (operation.support) {
+                return tr("Planar face · %1").arg(source(operation.support->body));
+            }
             switch (operation.plane) {
             case geometry::Plane::XY: return tr("Plane XY");
             case geometry::Plane::XZ: return tr("Plane XZ");
@@ -628,15 +644,58 @@ QString MainWindow::objectDetails(const document::Object& object) const
 
 void MainWindow::beginSketch(geometry::Plane plane)
 {
-    viewport_->cancelSubshapePick();
-    pages_->setCurrentWidget(sketchEditor_);
-    sketchEditor_->begin(plane);
+    beginSketch(geometry::Sketch{plane});
+}
+
+void MainWindow::beginSketch(const geometry::Sketch& sketch, int id)
+{
+    try {
+        auto context = document_.sketchContext(sketch);
+        viewport_->cancelSubshapePick();
+        editingSketch_ = id;
+        pages_->setCurrentWidget(sketchEditor_);
+        sketchEditor_->begin(sketch, std::move(context.projections));
+    } catch (const std::exception& error) {
+        showSceneError(localizedDiagnostic(error.what()));
+        return;
+    } catch (const Standard_Failure& error) {
+        showSceneError(localizedDiagnostic(error.GetMessageString()));
+        return;
+    }
     statusBar()->showMessage(tr("Drawing sketch"));
     updateActions();
 }
 
+void MainWindow::editSketch(int id)
+{
+    const auto* object = document_.find(id);
+    if (pages_->currentWidget() == viewport_ && object) {
+        if (const auto* sketch = std::get_if<geometry::Sketch>(&object->parameters)) {
+            beginSketch(*sketch, id);
+        }
+    }
+}
+
 void MainWindow::finishSketch()
 {
+    if (editingSketch_ != 0) {
+        const int id = editingSketch_;
+        try {
+            const bool modified = document_.editSketch(id, sketchEditor_->sketch());
+            leaveSketch();
+            refreshDocument(id);
+            if (modified) {
+                const auto problems = std::ranges::count_if(document_.objects(),
+                    [](const auto& object) { return object.status != document::Status::Ready; });
+                report(problems ? tr("Rebuilt %1. %2 operations need attention in the model tree.")
+                    .arg(objectName(*document_.find(id))).arg(problems)
+                    : tr("Rebuilt %1 and its dependent operations.").arg(objectName(*document_.find(id))));
+            }
+        } catch (const std::exception& error) {
+            showSceneError(localizedDiagnostic(error.what()));
+        }
+        return;
+    }
     const auto id = addFeature(tr("Finish sketch"), [this] {
         return document_.addSketch(sketchEditor_->sketch());
     });
@@ -648,6 +707,7 @@ void MainWindow::finishSketch()
 
 void MainWindow::leaveSketch()
 {
+    editingSketch_ = 0;
     pages_->setCurrentWidget(viewport_);
     viewport_->update();
     updateActions();
@@ -970,12 +1030,13 @@ void MainWindow::startMachining(Machining operation)
         || std::holds_alternative<geometry::Sketch>(object->parameters)) {
         return;
     }
-    const auto pick = operation == Machining::Hole ? SubshapePick::Face : SubshapePick::Edge;
+    const auto pick = operation == Machining::SketchFace ? SubshapePick::SketchFace
+        : operation == Machining::Hole ? SubshapePick::Face : SubshapePick::Edge;
     if (viewport_->beginSubshapePick(id, pick)) {
         pendingMachining_ = operation;
         updateActions();
-        statusBar()->showMessage(pick == SubshapePick::Face
-            ? tr("Click the hole center on a planar face. Esc cancels.")
+        statusBar()->showMessage(pick == SubshapePick::SketchFace ? tr("Click a planar face for the sketch. Esc cancels.")
+            : pick == SubshapePick::Face ? tr("Click the hole center on a planar face. Esc cancels.")
             : tr("Click an edge of the selected body. Esc cancels."));
     }
 }
@@ -1040,6 +1101,13 @@ void MainWindow::configureAssembly(int id)
 
 void MainWindow::makeHole(int id, const geometry::FaceReference& face)
 {
+    if (pendingMachining_ == Machining::SketchFace) {
+        endMachining(id);
+        geometry::Sketch sketch;
+        sketch.support = geometry::SketchSupport{id, face};
+        beginSketch(sketch);
+        return;
+    }
     if (pendingMachining_ != Machining::Hole) {
         return;
     }
@@ -1080,7 +1148,7 @@ void MainWindow::makeHole(int id, const geometry::FaceReference& face)
 
 void MainWindow::makeEdgeTreatment(int id, const geometry::EdgeReference& edge)
 {
-    if (!pendingMachining_ || pendingMachining_ == Machining::Hole) {
+    if (pendingMachining_ != Machining::Chamfer && pendingMachining_ != Machining::Fillet) {
         return;
     }
     const bool chamfer = pendingMachining_ == Machining::Chamfer;

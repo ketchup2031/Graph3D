@@ -1,7 +1,7 @@
 #include "document/Document.h"
 
 #include "geometry/Primitives.h"
-#include "geometry/SketchModeling.h"
+#include "geometry/SketchConstraints.h"
 
 #include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
@@ -29,6 +29,7 @@ std::vector<ObjectId> inputs(const Parameters& parameters)
             }
             return ids;
         },
+        [](const geometry::Sketch& p) { return p.support ? std::vector{p.support->body} : std::vector<ObjectId>{}; },
         [](const Extrude& p) { return std::vector{p.profile}; },
         [](const Revolve& p) { return std::vector{p.profile}; },
         [](const Boolean& p) { return std::vector{p.first, p.second}; },
@@ -63,18 +64,31 @@ const geometry::Sketch& requireSketch(const Object& object)
     return *sketch;
 }
 
+geometry::SketchContext resolveContext(const std::vector<Object>& state, const geometry::Sketch& sketch)
+{
+    if (!sketch.support) {
+        return geometry::sketchContext(sketch);
+    }
+    const auto& body = objectAt(state, sketch.support->body);
+    requireBody(body);
+    if (body.status != Status::Ready) {
+        throw std::invalid_argument("The sketch support body has an error.");
+    }
+    return geometry::sketchContext(sketch, body.shape);
+}
+
 TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters)
 {
     return std::visit(Visit{
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
-        [](const geometry::Sketch& p) -> TopoDS_Shape { return geometry::makeProfile(p); },
+        [&state](const geometry::Sketch& p) -> TopoDS_Shape { return geometry::makeProfile(p, resolveContext(state, p)); },
         [&state](const Extrude& p) {
             const auto& profile = objectAt(state, p.profile);
-            return geometry::extrude(TopoDS::Face(profile.shape), requireSketch(profile).plane, p.distance);
+            return geometry::extrude(TopoDS::Face(profile.shape), resolveContext(state, requireSketch(profile)).frame, p.distance);
         },
         [&state](const Revolve& p) {
             const auto& profile = objectAt(state, p.profile);
-            return geometry::revolve(TopoDS::Face(profile.shape), requireSketch(profile).plane,
+            return geometry::revolve(TopoDS::Face(profile.shape), resolveContext(state, requireSketch(profile)).frame,
                                      p.axis, p.offset, p.angle);
         },
         [&state](const Boolean& p) {
@@ -121,7 +135,37 @@ ObjectId Document::addPrimitive(geometry::Primitive kind)
 
 ObjectId Document::addSketch(geometry::Sketch sketch)
 {
+    if (sketch.support) {
+        requireBody(objectAt(objects_, sketch.support->body));
+    }
     return append(std::move(sketch));
+}
+
+geometry::SketchContext Document::sketchContext(const geometry::Sketch& sketch) const
+{
+    return resolveContext(objects_, sketch);
+}
+
+bool Document::editSketch(ObjectId id, geometry::Sketch sketch)
+{
+    const auto& original = requireSketch(objectAt(objects_, id));
+    if (original == sketch) {
+        return false;
+    }
+    if (sketch.support) {
+        if (sketch.support->body >= id) {
+            throw std::invalid_argument("A sketch support must precede the sketch.");
+        }
+        requireBody(objectAt(objects_, sketch.support->body));
+    }
+    auto next = objects_;
+    next[id - 1].parameters = std::move(sketch);
+    rebuild(next, id - 1);
+    if (next[id - 1].status != Status::Ready) {
+        throw std::invalid_argument(next[id - 1].error);
+    }
+    commit(std::move(next));
+    return true;
 }
 
 ObjectId Document::addExtrude(ObjectId profile, double distance)
@@ -192,7 +236,12 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
         const auto requirePrior = [&records](ObjectId source) -> const Object& {
             return objectAt(records, source);
         };
-        if (const auto* extrusion = std::get_if<Extrude>(&parameters)) {
+        if (const auto* sketch = std::get_if<geometry::Sketch>(&parameters)) {
+            geometry::validateSketchConstraints(*sketch);
+            if (sketch->support) {
+                requireBody(requirePrior(sketch->support->body));
+            }
+        } else if (const auto* extrusion = std::get_if<Extrude>(&parameters)) {
             requireSketch(requirePrior(extrusion->profile));
         } else if (const auto* revolution = std::get_if<Revolve>(&parameters)) {
             requireSketch(requirePrior(revolution->profile));
@@ -219,7 +268,8 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
     for (const auto& object : records) {
         if (object.status != Status::Ready
             && (std::holds_alternative<Primitive>(object.parameters)
-                || std::holds_alternative<geometry::Sketch>(object.parameters)
+                || (std::holds_alternative<geometry::Sketch>(object.parameters)
+                    && !std::get<geometry::Sketch>(object.parameters).support)
                 || std::holds_alternative<Imported>(object.parameters))) {
             throw std::invalid_argument("Object #" + std::to_string(object.id) + ": " + object.error);
         }
@@ -236,8 +286,10 @@ ObjectId Document::append(Parameters parameters)
     if (next.back().status != Status::Ready) {
         throw std::invalid_argument(next.back().error);
     }
-    for (const auto input : inputs(next.back().parameters)) {
-        next[input - 1].visible = false;
+    if (!std::holds_alternative<geometry::Sketch>(next.back().parameters)) {
+        for (const auto input : inputs(next.back().parameters)) {
+            next[input - 1].visible = false;
+        }
     }
     commit(std::move(next));
     return id;

@@ -26,6 +26,7 @@ constexpr int legacyVersion = 1;
 constexpr int featureVersion = 2;
 constexpr int transformVersion = 3;
 constexpr int assemblyVersion = 4;
+constexpr int sketchVersion = 5;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -35,6 +36,7 @@ constexpr std::array modelAxes{"X", "Y", "Z"};
 constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
+constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection"};
 
 template<class Enum, std::size_t N>
 QString name(Enum value, const std::array<const char*, N>& names)
@@ -182,6 +184,57 @@ geometry::Point3 decodePoint3(const QJsonValue& value)
     return {number(coordinates.at(0), "x"), number(coordinates.at(1), "y"), number(coordinates.at(2), "z")};
 }
 
+QJsonArray encodeSketchRef(geometry::SketchRef ref)
+{
+    return {ref.entity, ref.part};
+}
+
+geometry::SketchRef decodeSketchRef(const QJsonValue& value)
+{
+    const auto array = value.toArray();
+    if (array.size() != 2) {
+        fileError(QStringLiteral("Invalid sketch reference."));
+    }
+    return {signedInteger(array[0], "entity"), signedInteger(array[1], "part")};
+}
+
+QJsonObject encodeConstraint(const geometry::SketchConstraint& constraint)
+{
+    QJsonObject result{{"kind", name(constraint.kind, constraints)}, {"first", encodeSketchRef(constraint.first)},
+        {"second", encodeSketchRef(constraint.second)}, {"value", encodeNumber(constraint.value)}};
+    if (constraint.edge) {
+        QJsonArray samples;
+        for (const auto& point : constraint.edge->samples) {
+            samples.append(encodePoint3(point));
+        }
+        result.insert("edge", QJsonObject{{"curveType", constraint.edge->curveType}, {"samples", samples}});
+    }
+    return result;
+}
+
+geometry::SketchConstraint decodeConstraint(const QJsonValue& value)
+{
+    const auto object = value.toObject();
+    geometry::SketchConstraint result{
+        parseName<geometry::ConstraintKind>(object.value("kind"), constraints, "constraint"),
+        decodeSketchRef(object.value("first")), decodeSketchRef(object.value("second")),
+        number(object.value("value"), "value")};
+    if (object.contains("edge")) {
+        const auto encoded = object.value("edge").toObject();
+        const auto samples = encoded.value("samples").toArray();
+        geometry::EdgeReference edge{};
+        edge.curveType = signedInteger(encoded.value("curveType"), "curveType");
+        if (samples.size() != static_cast<qsizetype>(edge.samples.size()) || edge.curveType < 0 || edge.curveType > 8) {
+            fileError(QStringLiteral("Invalid projected sketch edge reference."));
+        }
+        for (qsizetype i = 0; i < samples.size(); ++i) {
+            edge.samples[i] = decodePoint3(samples[i]);
+        }
+        result.edge = edge;
+    }
+    return result;
+}
+
 QJsonObject encodeTransform(const document::Transform& item)
 {
     auto data = std::visit([](const auto& transform) -> QJsonObject {
@@ -215,7 +268,19 @@ QJsonObject encodeObject(const document::Object& object)
             for (const auto& entity : item.entities) {
                 entities.append(encodeEntity(entity));
             }
-            return {{"type", "sketch"}, {"plane", name(item.plane, planes)}, {"entities", entities}};
+            QJsonObject sketch{{"type", "sketch"}, {"plane", name(item.plane, planes)}, {"entities", entities}};
+            if (item.support) {
+                sketch.insert("support", QJsonObject{{"body", item.support->body},
+                    {"point", encodePoint3(item.support->face.center)}, {"normal", encodePoint3(item.support->face.outward)}});
+            }
+            if (!item.constraints.empty()) {
+                QJsonArray relations;
+                for (const auto& constraint : item.constraints) {
+                    relations.append(encodeConstraint(constraint));
+                }
+                sketch.insert("constraints", relations);
+            }
+            return sketch;
         } else if constexpr (std::is_same_v<Type, document::Extrude>) {
             return {{"type", "extrude"}, {"profile", item.profile}, {"distance", encodeNumber(item.distance)}};
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
@@ -270,6 +335,25 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
         sketch.entities.reserve(static_cast<std::size_t>(entities.size()));
         for (const auto entry : entities) {
             sketch.entities.push_back(decodeEntity(entry));
+        }
+        if (version < sketchVersion && (object.contains("support") || object.contains("constraints"))) {
+            fileError(QStringLiteral("This sketch requires project format version 5."));
+        }
+        if (version >= sketchVersion) {
+            if (object.contains("support")) {
+                const auto support = object.value("support").toObject();
+                sketch.support = geometry::SketchSupport{integer(support.value("body"), "body"),
+                    {decodePoint3(support.value("point")), decodePoint3(support.value("normal"))}};
+            }
+            if (object.contains("constraints")) {
+                const auto relations = object.value("constraints").toArray();
+                if (!object.value("constraints").isArray() || relations.size() > 2000) {
+                    fileError(QStringLiteral("Invalid sketch constraints."));
+                }
+                for (const auto relation : relations) {
+                    sketch.constraints.push_back(decodeConstraint(relation));
+                }
+            }
         }
         return sketch;
     }
@@ -358,7 +442,10 @@ void saveProject(const QString& path, const document::Document& document)
     int version = legacyVersion;
     try {
         for (const auto& object : document.objects()) {
-            if (std::holds_alternative<document::Assembly>(object.parameters)) {
+            const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
+            if (sketch && (sketch->support || !sketch->constraints.empty())) {
+                version = sketchVersion;
+            } else if (version < assemblyVersion && std::holds_alternative<document::Assembly>(object.parameters)) {
                 version = assemblyVersion;
             } else if (version < transformVersion && std::holds_alternative<document::Transform>(object.parameters)) {
                 version = transformVersion;
@@ -397,7 +484,7 @@ document::Document decodeProject(const QByteArray& data)
     }
     const auto parsedVersion = root.value("version").toDouble();
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
-         && parsedVersion != transformVersion && parsedVersion != assemblyVersion)
+         && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
