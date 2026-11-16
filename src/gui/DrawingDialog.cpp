@@ -1,6 +1,7 @@
 #include "gui/DrawingDialog.h"
 
 #include "drawing/DrawingSheet.h"
+#include "gui/UserPreferences.h"
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -106,6 +107,7 @@ DrawingDialog::DrawingDialog(drawing::Projections projections, const QString& ob
 void DrawingDialog::exportPdf()
 {
     QFileDialog dialog(this, tr("Save drawing"), {}, tr("PDF files (*.pdf)"));
+    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix(QStringLiteral("pdf"));
     dialog.selectFile(QStringLiteral("Graph3D-drawing.pdf"));

@@ -6,6 +6,7 @@
 #include "gui/SketchEditor.h"
 #include "gui/StartPage.h"
 #include "gui/TransformEditor.h"
+#include "gui/UserPreferences.h"
 #include "io/Exchange.h"
 #include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
@@ -333,6 +334,18 @@ void MainWindow::createMenus()
     axes->setCheckable(true);
     axes->setChecked(true);
     connect(axes, &QAction::toggled, viewport_, &Viewport::setAxesVisible);
+
+    auto* settings = menuBar()->addMenu(tr("Sett&ings"));
+    auto* theme = menuAction(settings, tr("Dark theme"), "darkTheme");
+    theme->setCheckable(true);
+    theme->setChecked(darkThemeEnabled());
+    applyTheme(theme->isChecked());
+    startPage_->setDarkTheme(theme->isChecked());
+    connect(theme, &QAction::toggled, this, [this](bool dark) {
+        userSettings().setValue(QStringLiteral("appearance/darkTheme"), dark);
+        applyTheme(dark);
+        startPage_->setDarkTheme(dark);
+    });
 
     auto* help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("Mouse controls"), this, &MainWindow::showMouseControls);
@@ -761,6 +774,7 @@ bool MainWindow::saveProject(bool choosePath)
     auto path = projectPath_;
     if (choosePath || path.isEmpty()) {
         QFileDialog dialog(this, tr("Save Graph3D project"), path, tr("Graph3D projects (*.graph3d)"));
+        dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
         dialog.setAcceptMode(QFileDialog::AcceptSave);
         dialog.setDefaultSuffix(QStringLiteral("graph3d"));
         if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
@@ -816,7 +830,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
 void MainWindow::openProject()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
-                                                  tr("Graph3D projects (*.graph3d)"));
+                                                  tr("Graph3D projects (*.graph3d)"), nullptr,
+                                                  darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openProjectPath(path);
     }
@@ -859,7 +874,8 @@ void MainWindow::openProjectPath(const QString& path, bool example)
 void MainWindow::importStep()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Import STEP"), projectPath_,
-                                                  tr("STEP files (*.step *.stp)"));
+                                                  tr("STEP files (*.step *.stp)"), nullptr,
+                                                  darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         addFeature(tr("Import STEP"), [this, &path] {
             const auto name = QFileInfo(path).fileName().toUtf8().toStdString();
@@ -878,6 +894,7 @@ void MainWindow::exportModel(io::ExchangeFormat format)
         path = info.dir().filePath(info.completeBaseName());
     }
     QFileDialog dialog(this, tr("Export visible bodies"), path, filter);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix(step ? QStringLiteral("step") : QStringLiteral("stl"));
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {

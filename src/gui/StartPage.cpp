@@ -1,10 +1,10 @@
 #include "gui/StartPage.h"
 
 #include "drawing/Projection.h"
+#include "gui/UserPreferences.h"
 #include "io/ProjectIO.h"
 
 #include <QApplication>
-#include <QCoreApplication>
 #include <QIcon>
 #include <QDir>
 #include <QFileInfo>
@@ -17,7 +17,6 @@
 #include <QResizeEvent>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QSettings>
 #include <QStyle>
 #include <QVBoxLayout>
 
@@ -44,12 +43,6 @@ constexpr std::array examples{
             QT_TRANSLATE_NOOP("graph3d::StartPage", "A support bracket made from a sketch and solid operations.")},
 };
 
-QSettings recentSettings()
-{
-    return {QSettings::IniFormat, QSettings::UserScope, QStringLiteral("Graph3D"),
-            QCoreApplication::applicationName()};
-}
-
 constexpr auto recentKey = "recentProjects";
 constexpr int maxRecents = 8;
 
@@ -64,15 +57,15 @@ QLabel* label(const QString& text, const char* name, QWidget* parent)
 
 enum class CommandIcon { Part, Sketch, Cube };
 
-QIcon commandIcon(CommandIcon kind)
+QIcon commandIcon(CommandIcon kind, bool dark)
 {
     QPixmap tile(52, 52);
     tile.setDevicePixelRatio(2);
     tile.fill(Qt::transparent);
     QPainter painter(&tile);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(QPen(QColor("#2667a3"), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.setBrush(QColor("#e2efff"));
+    painter.setPen(QPen(QColor(dark ? "#90caff" : "#2667a3"), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(QColor(dark ? "#2a4663" : "#e2efff"));
     switch (kind) {
     case CommandIcon::Part:
         painter.drawPolygon(QPolygonF{{5, 3}, {15, 3}, {21, 9}, {21, 23}, {5, 23}});
@@ -95,7 +88,7 @@ QIcon commandIcon(CommandIcon kind)
     return QIcon(tile);
 }
 
-void drawView(QPainter& painter, const drawing::View& view, const QRectF& area)
+void drawView(QPainter& painter, const drawing::View& view, const QRectF& area, bool dark)
 {
     const auto scale = std::min(area.width() / view.width, area.height() / view.height);
     const auto paintLines = [&](const drawing::Linework& lines) {
@@ -108,9 +101,9 @@ void drawView(QPainter& painter, const drawing::View& view, const QRectF& area)
             painter.drawPolyline(points);
         }
     };
-    painter.setPen(QPen(QColor("#adc5e0"), 0.85, Qt::DashLine));
+    painter.setPen(QPen(QColor(dark ? "#537999" : "#adc5e0"), 0.85, Qt::DashLine));
     paintLines(view.hidden);
-    painter.setPen(QPen(QColor("#2c608f"), 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setPen(QPen(QColor(dark ? "#9acdf3" : "#2c608f"), 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     paintLines(view.visible);
 }
 
@@ -122,6 +115,12 @@ public:
     {
         setMinimumHeight(166);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    void setDarkTheme(bool dark)
+    {
+        dark_ = dark;
+        update();
     }
 
     void setExample(int index)
@@ -153,10 +152,10 @@ protected:
         const QRectF paper = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
         QPainterPath clip;
         clip.addRoundedRect(paper, 8, 8);
-        painter.fillPath(clip, QColor("#f2f7fd"));
+        painter.fillPath(clip, QColor(dark_ ? "#17232f" : "#f2f7fd"));
         painter.save();
         painter.setClipPath(clip);
-        painter.setPen(QColor("#e1ecf7"));
+        painter.setPen(QColor(dark_ ? "#263b4e" : "#e1ecf7"));
         for (int x = 12; x < width(); x += 16) {
             painter.drawLine(x, 0, x, height());
         }
@@ -168,14 +167,14 @@ protected:
             const qreal mid = width() / 2.0;
             const QRectF front(22, 27, mid - 44, height() - 59);
             const QRectF top(mid + 22, 27, mid - 44, height() - 59);
-            drawView(painter, views->front, front);
-            drawView(painter, views->top, top);
-            painter.setPen(QColor("#4d6781"));
+            drawView(painter, views->front, front, dark_);
+            drawView(painter, views->top, top, dark_);
+            painter.setPen(QColor(dark_ ? "#b4c8da" : "#4d6781"));
             painter.drawText(QRectF(0, height() - 27, mid, 20), Qt::AlignCenter, tr("Front"));
             painter.drawText(QRectF(mid, height() - 27, mid, 20), Qt::AlignCenter, tr("Top"));
         }
         painter.restore();
-        painter.setPen(QColor("#d9e5f2"));
+        painter.setPen(QColor(dark_ ? "#39526a" : "#d9e5f2"));
         painter.drawPath(clip);
     }
 
@@ -183,15 +182,12 @@ private:
     std::array<bool, examples.size()> loaded_{};
     std::array<std::optional<drawing::Projections>, examples.size()> projections_{};
     int index_ = 0;
+    bool dark_ = false;
 };
 
-StartPage::StartPage(QWidget* parent) : QWidget(parent)
+void StartPage::setDarkTheme(bool dark)
 {
-    setObjectName(QStringLiteral("startPage"));
-    QFont font = this->font();
-    font.setFamilies({QStringLiteral("Inter"), QStringLiteral("Segoe UI"), font.family()});
-    setFont(font);
-    setStyleSheet(QStringLiteral(R"(
+    auto style = QStringLiteral(R"(
         #startPage, #startScroll, #startCanvas { background: #f1f4f8; }
         #startPage QLabel { background: transparent; color: #26394e; }
         #startPage QLabel#subtitle, #startPage QLabel#detail { color: #465c73; font-size: 13px; }
@@ -213,7 +209,44 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
         #startPage QPushButton[primary="true"]:focus { border-color: #79abeb; }
         #startPage QPushButton[card="true"] { text-align: left; min-height: 55px; }
         #startPage QPushButton:disabled { color: #6e7884; background: #f5f6f8; }
-    )"));
+    )");
+    if (dark) {
+        style += QStringLiteral(R"(
+            #startPage, #startScroll, #startCanvas { background: #161d26; }
+            #startPage QLabel { color: #d7e3ef; }
+            #startPage QLabel#subtitle, #startPage QLabel#detail { color: #b4c5d6; }
+            #startPage QLabel#brand, #startPage QLabel#section, #startPage QLabel#exampleName { color: #eff5fc; }
+            #startPage QLabel#tip { color: #deebf8; }
+            #startPage QFrame[panel="true"] { background: #202a36; border-color: #344557; }
+            #startPage QPushButton { background: #253342; color: #e6eff8; border-color: #465e77; }
+            #startPage QPushButton[dashed="true"] { border-color: #678caf; }
+            #startPage QPushButton:hover { background: #2c4053; border-color: #8fb9df; }
+            #startPage QPushButton:pressed { background: #344d65; }
+            #startPage QPushButton:focus { border-color: #a1cbf1; }
+            #startPage QPushButton[primary="true"] { background: #2c649a; border-color: #2c649a; }
+            #startPage QPushButton[primary="true"]:hover { background: #3677b2; border-color: #3677b2; }
+            #startPage QPushButton[primary="true"]:focus { border-color: #a1cbf1; }
+            #startPage QPushButton:disabled { color: #9aa9ba; background: #222c37; border-color: #3b4b5c; }
+        )");
+    }
+    setStyleSheet(style);
+    preview_->setDarkTheme(dark);
+    const std::array commands{
+        std::pair{"startNewPart", CommandIcon::Part},
+        std::pair{"startSketch", CommandIcon::Sketch},
+        std::pair{"startCube", CommandIcon::Cube},
+    };
+    for (const auto& [name, icon] : commands) {
+        findChild<QPushButton*>(QString::fromLatin1(name))->setIcon(commandIcon(icon, dark));
+    }
+}
+
+StartPage::StartPage(QWidget* parent) : QWidget(parent)
+{
+    setObjectName(QStringLiteral("startPage"));
+    QFont font = this->font();
+    font.setFamilies({QStringLiteral("Inter"), QStringLiteral("Segoe UI"), font.family()});
+    setFont(font);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     auto* scroll = new QScrollArea(this);
@@ -279,20 +312,19 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
 
     auto* create = buildPanel(tr("Create"), createPane_);
     auto* commands = new QHBoxLayout;
-    const auto addCommand = [&](const QString& title, const char* name, CommandIcon icon, auto signal) {
+    const auto addCommand = [&](const QString& title, const char* name, auto signal) {
         auto* button = new QPushButton(title, createPane_);
         button->setObjectName(QString::fromLatin1(name));
         button->setProperty("card", true);
         button->setProperty("dashed", true);
-        button->setIcon(commandIcon(icon));
         button->setIconSize(QSize(26, 26));
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         connect(button, &QPushButton::clicked, this, signal);
         commands->addWidget(button);
     };
-    addCommand(tr("New part"), "startNewPart", CommandIcon::Part, &StartPage::newProjectRequested);
-    addCommand(tr("XY sketch"), "startSketch", CommandIcon::Sketch, &StartPage::sketchRequested);
-    addCommand(tr("Demo cube"), "startCube", CommandIcon::Cube, &StartPage::cubeRequested);
+    addCommand(tr("New part"), "startNewPart", &StartPage::newProjectRequested);
+    addCommand(tr("XY sketch"), "startSketch", &StartPage::sketchRequested);
+    addCommand(tr("Demo cube"), "startCube", &StartPage::cubeRequested);
     create->addLayout(commands);
     create->addSpacing(8);
     auto* exampleHeader = new QHBoxLayout;
@@ -394,7 +426,7 @@ void StartPage::rememberProject(const QString& path)
     const QFileInfo file(path);
     const auto canonical = file.canonicalFilePath();
     const auto absolute = canonical.isEmpty() ? file.absoluteFilePath() : canonical;
-    auto settings = recentSettings();
+    auto settings = userSettings();
     auto paths = settings.value(QLatin1String(recentKey)).toStringList();
     paths.removeAll(absolute);
     paths.prepend(absolute);
@@ -410,7 +442,7 @@ void StartPage::refreshRecents()
         item->widget()->deleteLater();
         delete item;
     }
-    const auto paths = recentSettings().value(QLatin1String(recentKey)).toStringList().mid(0, maxRecents);
+    const auto paths = userSettings().value(QLatin1String(recentKey)).toStringList().mid(0, maxRecents);
     if (paths.isEmpty()) {
         recentLayout_->addWidget(label(tr("Saved and opened projects will appear here."), "detail", recentPane_));
     }

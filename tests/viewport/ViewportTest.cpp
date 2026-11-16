@@ -141,6 +141,36 @@ private slots:
         QCOMPARE(saved->accessibleName(), QStringLiteral("welcome-project.graph3d"));
     }
 
+    void darkThemePreference()
+    {
+        const auto originalWindowColor = QApplication::palette().color(QPalette::Window);
+        graph3d::MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* theme = window.findChild<QAction*>("darkTheme");
+        auto* preview = window.findChild<QWidget*>("startPreview");
+        QVERIFY(theme && preview);
+        QVERIFY(!theme->isChecked());
+        const auto lightPixel = preview->grab().toImage().pixelColor(15, 15);
+        theme->trigger();
+        QVERIFY(theme->isChecked());
+        QVERIFY(QApplication::palette().color(QPalette::Window).lightness() < 100);
+        QVERIFY(preview->grab().toImage().pixelColor(15, 15).lightness() < lightPixel.lightness());
+
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        QVERIFY(tree && tree->isVisible());
+        QTRY_VERIFY(tree->palette().color(QPalette::Base).lightness() < 100);
+        QVERIFY(tree->palette().color(QPalette::Text).lightness() > 180);
+
+        graph3d::MainWindow restarted;
+        auto* savedTheme = restarted.findChild<QAction*>("darkTheme");
+        QVERIFY(savedTheme && savedTheme->isChecked());
+        savedTheme->trigger();
+        QVERIFY(!savedTheme->isChecked());
+        QCOMPARE(QApplication::palette().color(QPalette::Window), originalWindowColor);
+    }
+
     void sceneAndCamera()
     {
         graph3d::MainWindow window;

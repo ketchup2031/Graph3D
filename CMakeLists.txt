@@ -56,6 +56,7 @@ add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/TransformEditor.cpp
     src/gui/AssemblyDialog.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
+    src/gui/UserPreferences.cpp
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 qt_add_resources(graph3d_ui start_examples PREFIX "/" FILES

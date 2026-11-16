@@ -17,6 +17,7 @@ class StartPage final : public QWidget {
 public:
     explicit StartPage(QWidget* parent = nullptr);
     void rememberProject(const QString& path);
+    void setDarkTheme(bool dark);
     void setWorkspaceAvailable(bool available);
 
 protected:
