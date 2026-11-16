@@ -1,5 +1,7 @@
 #pragma once
 
+#include "drawing/ModelViews.h"
+
 #include <QHash>
 #include <QPointF>
 #include <QSizeF>
@@ -44,6 +46,7 @@ struct Draft {
     QString author;
     bool a3 = false;
     std::vector<DraftItem> items;
+    std::optional<ModelViews> modelViews;
 };
 
 std::span<const DraftAnchor> draftAnchors(DraftKind kind);

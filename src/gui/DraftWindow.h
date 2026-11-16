@@ -7,6 +7,10 @@
 
 #include <optional>
 
+class QAction;
+class QFileSystemWatcher;
+class QLabel;
+
 namespace graph3d {
 
 class DraftCanvas;
@@ -31,6 +35,11 @@ private:
     void exportPdf();
     void editSheet();
     void editSelected();
+    void chooseModel();
+    void refreshModel();
+    void editModelViews();
+    void updateModelStatus(const QString& failure = {});
+    void setModelViews(std::optional<drawing::ModelViews> model, const QString& description);
     void removeItem(int index);
     bool confirmSave();
     void replaceDrawing(drawing::Draft draft, const QString& path = {});
@@ -41,6 +50,11 @@ private:
     QUndoStack history_;
     QString path_;
     DraftCanvas* canvas_;
+    QFileSystemWatcher* sourceWatch_;
+    QLabel* modelStatus_;
+    QAction* modelRefresh_;
+    QAction* modelSettings_;
+    QAction* modelRemove_;
 };
 
 }  // namespace graph3d

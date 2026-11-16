@@ -381,8 +381,13 @@ void saveProject(const QString& path, const document::Document& document)
 
 document::Document openProject(const QString& path)
 {
+    return decodeProject(readFile(path));
+}
+
+document::Document decodeProject(const QByteArray& data)
+{
     QJsonParseError error;
-    const auto json = QJsonDocument::fromJson(readFile(path), &error);
+    const auto json = QJsonDocument::fromJson(data, &error);
     if (error.error != QJsonParseError::NoError || !json.isObject()) {
         fileError(QCoreApplication::translate("Diagnostic", "Invalid project JSON: %1").arg(error.errorString()));
     }

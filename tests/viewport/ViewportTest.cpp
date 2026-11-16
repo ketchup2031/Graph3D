@@ -1,6 +1,7 @@
 #include "gui/MainWindow.h"
 #include "gui/InterfaceLanguage.h"
 #include "gui/SketchEditor.h"
+#include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
@@ -358,6 +359,144 @@ private slots:
         auto* restored = main.findChild<QMainWindow*>("draftWindow");
         QVERIFY(restored && restored->windowTitle().startsWith(QStringLiteral("plate.g3draw")));
         QVERIFY(!restored->isWindowModified());
+    }
+
+    void linkedModelDrawingWorkflow()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        const auto modelPath = folder.filePath("flange.graph3d");
+        const auto drawingPath = folder.filePath("flange.g3draw");
+        const auto newModelPath = folder.filePath("flange-moved.graph3d");
+        const auto pdfPath = folder.filePath("flange.pdf");
+        using namespace graph3d;
+        document::Document model;
+        const auto profile = model.addSketch({geometry::Plane::XY, {geometry::Circle{{0, 0}, 40}}});
+        const auto flange = model.addExtrude(profile, 15);
+        const auto hole = model.addHole(flange, {{0, 0, 15}, {0, 0, 1}}, {10, 15, true});
+        io::saveProject(modelPath, model);
+
+        MainWindow main;
+        main.show();
+        main.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&main));
+        main.findChild<QPushButton*>("startNewDrawing")->click();
+        auto* draft = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(draft && QTest::qWaitForWindowExposed(draft));
+        const auto action = [&draft](const char* name) { return draft->findChild<QAction*>(name); };
+        const auto chooseFile = [](const QString& path, bool chooseBody = false) {
+            QTimer::singleShot(0, [path, chooseBody] {
+                if (auto* chooser = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    chooser->selectFile(path);
+                    static_cast<QDialog*>(chooser)->accept();
+                    if (chooseBody) {
+                        QTimer::singleShot(0, [] {
+                            if (auto* body = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                                body->accept();
+                            }
+                        });
+                    }
+                }
+            });
+        };
+        auto* canvas = draft->findChild<QWidget*>("draftCanvas");
+        QVERIFY(canvas);
+        action("draftText")->trigger();
+        QTimer::singleShot(0, [] {
+            if (auto* note = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                note->setTextValue(QStringLiteral("Keep this note"));
+                note->accept();
+            }
+        });
+        const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+        const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + QPointF(35, 156) * scale).toPoint());
+
+        chooseFile(modelPath, true);
+        action("linkedViewsSource")->trigger();
+        auto* status = draft->findChild<QLabel*>("linkedViewsStatus");
+        QVERIFY(status && status->isVisible());
+        QVERIFY(status->text().contains(QStringLiteral("body #3")));
+        QTimer::singleShot(0, [] {
+            if (auto* settings = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                settings->findChild<QDoubleSpinBox*>("linkedViewX0")->setValue(199.5);
+                settings->findChild<QDoubleSpinBox*>("linkedViewScale0")->setValue(0.75);
+                settings->findChild<QComboBox*>("linkedSectionPlane")->setCurrentIndex(1);
+                settings->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                if (settings->isVisible()) {
+                    settings->reject();
+                }
+            }
+        });
+        action("linkedViewsSettings")->trigger();
+        chooseFile(drawingPath);
+        action("saveDraft")->trigger();
+        const auto readSaved = [&] {
+            QFile saved(drawingPath);
+            return saved.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(saved.readAll()).object() : QJsonObject{};
+        };
+        const auto saved = readSaved();
+        const auto before = saved.value("modelViews").toObject();
+        QCOMPARE(saved.value("version").toInt(), 3);
+        QCOMPARE(before.value("body").toInt(), hole);
+        QCOMPARE(before.value("section").toObject().value("plane").toString(), QStringLiteral("XZ"));
+        const auto hasRadius = [](const QJsonObject& views, double radius) {
+            const auto circles = views.value("top").toObject().value("circles").toArray();
+            return std::ranges::any_of(circles, [radius](const auto& circle) {
+                return std::abs(circle.toObject().value("radius").toDouble() - radius) < .001;
+            });
+        };
+        QVERIFY(hasRadius(before, 5));
+        QVERIFY(draft->close());
+        QTRY_VERIFY(!main.findChild<QMainWindow*>("draftWindow"));
+
+        QVERIFY(model.editHole(hole, {12, 15, true}));
+        io::saveProject(modelPath, model);
+        const auto recent = main.findChildren<QPushButton*>("startRecent");
+        const auto button = std::ranges::find_if(recent, [](const auto* item) {
+            return item->accessibleName() == "flange.g3draw";
+        });
+        QVERIFY(button != recent.end());
+        (*button)->click();
+        draft = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(draft);
+        status = draft->findChild<QLabel*>("linkedViewsStatus");
+        QVERIFY(status->text().contains(QStringLiteral("stale views")));
+        action("linkedViewsRefresh")->trigger();
+        QVERIFY(!status->text().contains(QStringLiteral("stale views")));
+        action("saveDraft")->trigger();
+        const auto after = readSaved();
+        const auto afterViews = after.value("modelViews").toObject();
+        QVERIFY(hasRadius(afterViews, 6) && !hasRadius(afterViews, 5));
+        QCOMPARE(afterViews.value("layout"), before.value("layout"));
+        QCOMPARE(after.value("items"), saved.value("items"));
+        QCOMPARE(after.value("items").toArray().at(0).toObject().value("text").toString(), QStringLiteral("Keep this note"));
+
+        QVERIFY(model.editHole(hole, {200, 15, true}));
+        io::saveProject(modelPath, model);
+        action("linkedViewsRefresh")->trigger();
+        QVERIFY(status->text().contains(QStringLiteral("stale views")));
+        QVERIFY(!draft->isWindowModified());
+        QVERIFY(model.undo());
+        io::saveProject(modelPath, model);
+        QVERIFY(QFile::rename(modelPath, newModelPath));
+        action("linkedViewsRefresh")->trigger();
+        QVERIFY(status->text().contains(QStringLiteral("stale views")));
+        QVERIFY(action("exportDraftPdf")->isEnabled());
+        chooseFile(pdfPath);
+        action("exportDraftPdf")->trigger();
+        QFile pdf(pdfPath);
+        QVERIFY(pdf.open(QIODevice::ReadOnly) && pdf.read(5) == "%PDF-");
+        chooseFile(newModelPath, true);
+        action("linkedViewsSource")->trigger();
+        QVERIFY(status->text().contains(QStringLiteral("flange-moved.graph3d")));
+        QVERIFY(!status->text().contains(QStringLiteral("stale views")));
+        action("saveDraft")->trigger();
+        const auto relinked = readSaved().value("modelViews").toObject();
+        QCOMPARE(relinked.value("source").toString(), QStringLiteral("flange-moved.graph3d"));
+        QCOMPARE(relinked.value("layout"), before.value("layout"));
+        QVERIFY(hasRadius(relinked, 6));
     }
 
     void darkThemePreference()

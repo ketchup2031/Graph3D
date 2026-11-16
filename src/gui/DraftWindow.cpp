@@ -5,15 +5,22 @@
 #include "gui/LineInput.h"
 #include "gui/UserPreferences.h"
 #include "io/DraftIO.h"
+#include "io/ModelViewsIO.h"
 
 #include <QActionGroup>
+#include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFormLayout>
+#include <QGridLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenuBar>
@@ -23,6 +30,8 @@
 #include <QUndoCommand>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <array>
 #include <exception>
 #include <functional>
 
@@ -65,7 +74,8 @@ QString chooseSavePath(QWidget* parent, const QString& title, const QString& pat
 }  // namespace
 
 DraftWindow::DraftWindow(QWidget* parent)
-    : QMainWindow(parent, Qt::Window)
+    : QMainWindow(parent, Qt::Window), sourceWatch_(new QFileSystemWatcher(this)),
+      modelStatus_(new QLabel(this))
 {
     setObjectName(QStringLiteral("draftWindow"));
     setAttribute(Qt::WA_DeleteOnClose);
@@ -124,6 +134,23 @@ DraftWindow::DraftWindow(QWidget* parent)
     grid->setCheckable(true);
     grid->setChecked(true);
     connect(grid, &QAction::toggled, canvas_, &DraftCanvas::setGrid);
+
+    auto* views = menuBar()->addMenu(tr("Model &views"));
+    auto* insert = views->addAction(tr("Insert from model or change source…"), this, &DraftWindow::chooseModel);
+    insert->setObjectName(QStringLiteral("linkedViewsSource"));
+    modelRefresh_ = views->addAction(tr("Update from model"), this, &DraftWindow::refreshModel);
+    modelRefresh_->setObjectName(QStringLiteral("linkedViewsRefresh"));
+    modelSettings_ = views->addAction(tr("View layout and section…"), this, &DraftWindow::editModelViews);
+    modelSettings_->setObjectName(QStringLiteral("linkedViewsSettings"));
+    modelRemove_ = views->addAction(tr("Remove model views"), this, [this] {
+        setModelViews({}, tr("Remove model views"));
+    });
+    modelStatus_->setObjectName(QStringLiteral("linkedViewsStatus"));
+    modelStatus_->setTextFormat(Qt::PlainText);
+    modelStatus_->setWordWrap(true);
+    layout->addWidget(modelStatus_);
+    connect(sourceWatch_, &QFileSystemWatcher::fileChanged, this, [this] { updateModelStatus(); });
+    updateModelStatus();
 
     auto* bar = addToolBar(tr("Drawing tools"));
     bar->setMovable(false);
@@ -247,6 +274,7 @@ void DraftWindow::replaceDrawing(drawing::Draft draft, const QString& path)
     path_ = path;
     history_.clear();
     canvas_->fit();
+    updateModelStatus();
     updateTitle();
 }
 
@@ -325,6 +353,238 @@ void DraftWindow::exportPdf()
         statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
         QMessageBox::warning(this, tr("Export drawing PDF"), localizedDiagnostic(error.what()));
+    }
+}
+
+void DraftWindow::chooseModel()
+{
+    const auto* current = draft_.modelViews ? &*draft_.modelViews : nullptr;
+    const auto path = QFileDialog::getOpenFileName(this, tr("Select the source model"),
+        current ? current->sourcePath : path_, tr("Graph3D projects (*.graph3d)"), nullptr,
+        darkThemeEnabled() || russianInterface() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+    if (path.isEmpty()) {
+        return;
+    }
+    try {
+        const auto source = io::openModelSource(path);
+        QStringList labels;
+        std::vector<int> ids;
+        int selected = 0;
+        for (const auto& object : source.document.objects()) {
+            if (io::canProjectBody(object)) {
+                if (object.visible) {
+                    selected = static_cast<int>(ids.size());
+                }
+                labels.append(tr("Body #%1").arg(object.id));
+                ids.push_back(object.id);
+            }
+        }
+        if (ids.empty()) {
+            throw std::runtime_error("The source model contains no available solid bodies.");
+        }
+        if (current) {
+            const auto same = std::ranges::find(ids, current->bodyId);
+            if (same != ids.end()) {
+                selected = static_cast<int>(same - ids.begin());
+            }
+        }
+        if (ids.size() > 1) {
+            bool accepted = false;
+            const auto body = QInputDialog::getItem(this, tr("Select source body"), tr("Body"),
+                                                    labels, selected, false, &accepted);
+            if (!accepted) {
+                return;
+            }
+            selected = labels.indexOf(body);
+        }
+        const auto cut = current ? drawing::sectionSettings(*current) : std::nullopt;
+        setModelViews(io::buildModelViews(source, ids.at(selected), cut, drawing::draftSize(draft_), current),
+                      tr("Link model views"));
+    } catch (const std::exception& error) {
+        const auto details = localizedDiagnostic(error.what());
+        updateModelStatus();
+        QMessageBox::warning(this, tr("Select the source model"), details);
+    }
+}
+
+void DraftWindow::refreshModel()
+{
+    if (!draft_.modelViews) {
+        return;
+    }
+    const auto& current = *draft_.modelViews;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    try {
+        const auto source = io::openModelSource(current.sourcePath);
+        if (source.digest != current.sourceDigest) {
+            setModelViews(io::buildModelViews(source, current.bodyId, drawing::sectionSettings(current),
+                                             drawing::draftSize(draft_), &current), tr("Update from model"));
+        } else {
+            updateModelStatus();
+        }
+    } catch (const std::exception& error) {
+        updateModelStatus(localizedDiagnostic(error.what()));
+    }
+    QApplication::restoreOverrideCursor();
+}
+
+void DraftWindow::updateModelStatus(const QString& failure)
+{
+    const bool linked = draft_.modelViews.has_value();
+    for (auto* action : {modelRefresh_, modelSettings_, modelRemove_}) {
+        action->setEnabled(linked);
+    }
+    modelStatus_->setVisible(linked);
+    const auto path = linked ? draft_.modelViews->sourcePath : QString{};
+    const auto watched = sourceWatch_->files();
+    for (const auto& previous : watched) {
+        if (previous != path) {
+            sourceWatch_->removePath(previous);
+        }
+    }
+    if (!linked) {
+        return;
+    }
+    const QFileInfo source(path);
+    if (source.isFile() && !watched.contains(path)) {
+        sourceWatch_->addPath(path);
+    }
+    const auto& model = *draft_.modelViews;
+    QString problem = failure;
+    if (!source.isFile()) {
+        problem = tr("The source model cannot be read. Select it again to restore the link.");
+    }
+    if (problem.isEmpty()) {
+        try {
+            if (io::currentModelDigest(path) != model.sourceDigest) {
+                problem = tr("The model has changed. Update from model to rebuild the views.");
+            }
+        } catch (const std::exception&) {
+            problem = tr("The source model cannot be read. Select it again to restore the link.");
+        }
+    }
+    const auto label = tr("Model: %1 · body #%2").arg(source.fileName()).arg(model.bodyId);
+    modelStatus_->setToolTip(QDir::toNativeSeparators(path));
+    modelStatus_->setText(problem.isEmpty() ? label : tr("%1 — stale views. %2").arg(label, problem));
+}
+
+void DraftWindow::setModelViews(std::optional<drawing::ModelViews> model, const QString& description)
+{
+    const auto apply = [this](const auto& value) {
+        draft_.modelViews = value;
+        updateModelStatus();
+    };
+    history_.push(new DraftEdit(description, [apply, model = std::move(model)] { apply(model); },
+        [apply, model = draft_.modelViews] { apply(model); }));
+}
+
+void DraftWindow::editModelViews()
+{
+    if (!draft_.modelViews) {
+        return;
+    }
+    auto next = *draft_.modelViews;
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("linkedViewsDialog"));
+    dialog.setWindowTitle(tr("View layout and section"));
+    auto* content = new QVBoxLayout(&dialog);
+    auto* grid = new QGridLayout;
+    content->addLayout(grid);
+    const std::array columns{tr("View"), tr("Center X (mm)"), tr("Center Y (mm)"), tr("Scale factor")};
+    for (int i = 0; i < 4; ++i) {
+        grid->addWidget(new QLabel(columns[i], &dialog), 0, i);
+    }
+    const std::array names{tr("Front"), tr("Right"), tr("Top")};
+    std::array<QDoubleSpinBox*, 3> xs{}, ys{}, scales{};
+    for (int i = 0; i < 3; ++i) {
+        grid->addWidget(new QLabel(names[i], &dialog), i + 1, 0);
+        const auto spin = [&](const QString& name, int column, double low, double high, double value, int decimals) {
+            auto* field = new QDoubleSpinBox(&dialog);
+            field->setObjectName(name.arg(i));
+            field->setAccessibleName(names[i] + QLatin1Char(' ') + columns[column]);
+            field->setDecimals(decimals);
+            field->setRange(low, high);
+            field->setValue(value);
+            grid->addWidget(field, i + 1, column);
+            return field;
+        };
+        xs[i] = spin(QStringLiteral("linkedViewX%1"), 1, -10000, 10000, next.layout[i].center.x(), 3);
+        ys[i] = spin(QStringLiteral("linkedViewY%1"), 2, -10000, 10000, next.layout[i].center.y(), 3);
+        scales[i] = spin(QStringLiteral("linkedViewScale%1"), 3, 0.00000001, 1000, next.layout[i].scale, 8);
+        scales[i]->setToolTip(tr("1 = 1:1, 0.5 = 1:2, 2 = 2:1"));
+    }
+    auto* form = new QFormLayout;
+    content->addLayout(form);
+    auto* plane = new QComboBox(&dialog);
+    plane->setObjectName(QStringLiteral("linkedSectionPlane"));
+    using geometry::Plane;
+    plane->addItem(tr("None"));
+    plane->addItem(tr("XZ — front"), static_cast<int>(Plane::XZ));
+    plane->addItem(tr("XY — top"), static_cast<int>(Plane::XY));
+    plane->addItem(tr("YZ — right"), static_cast<int>(Plane::YZ));
+    form->addRow(tr("Section plane"), plane);
+    auto* offset = new QDoubleSpinBox(&dialog);
+    offset->setObjectName(QStringLiteral("linkedSectionOffset"));
+    offset->setDecimals(3);
+    offset->setRange(-100000000, 100000000);
+    offset->setSuffix(tr(" mm"));
+    const auto oldCut = drawing::sectionSettings(next);
+    if (oldCut) {
+        plane->setCurrentIndex(plane->findData(static_cast<int>(oldCut->plane)));
+        offset->setValue(oldCut->offset);
+    }
+    form->addRow(tr("Offset from center"), offset);
+    offset->setEnabled(plane->currentIndex() > 0);
+    connect(plane, &QComboBox::currentIndexChanged, offset, [offset](int index) { offset->setEnabled(index > 0); });
+    auto* dimensions = new QCheckBox(tr("Dimensions and center marks"), &dialog);
+    dimensions->setChecked(next.dimensions);
+    form->addRow(dimensions);
+    auto* hidden = new QCheckBox(tr("Hidden edges"), &dialog);
+    hidden->setChecked(next.hiddenLines);
+    form->addRow(hidden);
+    auto* errorLabel = new QLabel(&dialog);
+    errorLabel->setTextFormat(Qt::PlainText);
+    errorLabel->setWordWrap(true);
+    errorLabel->hide();
+    content->addWidget(errorLabel);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    content->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        auto updated = next;
+        for (int i = 0; i < 3; ++i) {
+            updated.layout[i] = {{xs[i]->value(), ys[i]->value()}, scales[i]->value()};
+        }
+        updated.dimensions = dimensions->isChecked();
+        updated.hiddenLines = hidden->isChecked();
+        std::optional<drawing::SectionSettings> cut;
+        if (plane->currentIndex() > 0) {
+            cut = drawing::SectionSettings{static_cast<Plane>(plane->currentData().toInt()), offset->value()};
+        }
+        try {
+            if (cut != oldCut) {
+                if (cut) {
+                    const auto source = io::openModelSource(updated.sourcePath);
+                    updated = io::buildModelViews(source, updated.bodyId, cut, drawing::draftSize(draft_), &updated);
+                } else {
+                    auto snapshot = std::make_shared<drawing::ModelProjection>(*updated.geometry);
+                    snapshot->section.reset();
+                    updated.geometry = std::move(snapshot);
+                }
+            }
+            next = std::move(updated);
+            dialog.accept();
+        } catch (const std::exception& error) {
+            errorLabel->setText(localizedDiagnostic(error.what()));
+            errorLabel->show();
+        }
+    });
+    if (dialog.exec() == QDialog::Accepted) {
+        const auto& old = *draft_.modelViews;
+        if (next.layout != old.layout || next.geometry != old.geometry || next.dimensions != old.dimensions
+            || next.hiddenLines != old.hiddenLines) {
+            setModelViews(std::move(next), tr("Edit model views"));
+        }
     }
 }
 

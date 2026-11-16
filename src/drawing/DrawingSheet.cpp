@@ -1,4 +1,5 @@
 #include "drawing/DrawingSheet.h"
+#include "drawing/ModelViews.h"
 
 #include <QCoreApplication>
 #include <QFontMetrics>
@@ -157,6 +158,8 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
         }
     }
 
+    const double bendX = origin.x() - std::max(75.0, view.width * scale / 2 + 12);
+    const double textX = bendX - 32;
     // Reserve the lower-left quadrant for callouts. Largest circles take the
     // upper rows; stagger the touch points so concentric leaders do not coincide.
     std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
@@ -170,7 +173,7 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
         const auto radius = entry.representative.radius * scale;
         const double relative = static_cast<double>(i) - (rows - 1) / 2.0;
         const double angle = rows == 1 ? 0 : relative * 0.82 / (rows - 1);
-        const QPointF bend(136, origin.y() + 10 * relative);
+        const QPointF bend(bendX, origin.y() + 10 * relative);
         const auto onCircle = [center, radius](double direction) {
             return center + QPointF(-std::cos(direction), std::sin(direction)) * radius;
         };
@@ -196,11 +199,12 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
             }
         }
         pen(p, 0.16);
-        p.drawLine(QPointF(104, bend.y()), bend);
+        p.drawLine(QPointF(textX, bend.y()), bend);
         p.drawLine(bend, tip);
 
         const auto ray = tip - bend;
-        const auto direction = ray / std::hypot(ray.x(), ray.y());
+        const double length = std::hypot(ray.x(), ray.y());
+        const auto direction = length > 0 ? ray / length : QPointF(1, 0);
         const auto normal = QPointF(-direction.y(), direction.x());
         const auto wing = tip - direction * 2.3;
         p.setBrush(Qt::black);
@@ -209,10 +213,10 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
 
         const auto diameter = QStringLiteral("⌀%1").arg(digits(entry.representative.radius * 2));
         const auto label = entry.quantity > 1 ? QStringLiteral("%1× %2").arg(entry.quantity).arg(diameter) : diameter;
-        text(p, {104, bend.y() - 6, 32, 5.5}, label, 4, Qt::AlignHCenter | Qt::AlignVCenter);
+        text(p, {textX, bend.y() - 6, 32, 5.5}, label, 4, Qt::AlignHCenter | Qt::AlignVCenter);
     }
     if (groups.size() > maxRows) {
-        text(p, {104, origin.y() + 25, 46, 5}, QCoreApplication::translate("DrawingSheet", "More diameters omitted"), 3, Qt::AlignLeft);
+        text(p, {textX, origin.y() + 25, 46, 5}, QCoreApplication::translate("DrawingSheet", "More diameters omitted"), 3, Qt::AlignLeft);
     }
 }
 
@@ -233,7 +237,7 @@ void paintHatch(QPainter& p, const Section& section, QPointF center, double scal
         p.save();
         p.setClipPath(mask, Qt::IntersectClip);
         pen(p, 0.15);
-        const auto box = mask.boundingRect();
+        const auto box = p.clipBoundingRect();
         constexpr double pitch = 3;
         const double first = std::floor((box.left() + box.top()) / pitch) * pitch - box.bottom();
         for (double x = first; x <= box.right(); x += pitch) {
@@ -244,12 +248,14 @@ void paintHatch(QPainter& p, const Section& section, QPointF center, double scal
 }
 
 void paintCutLine(QPainter& p, const Section& section, const Projections& views,
-                  QPointF front, QPointF top, double scale)
+                  const ViewLayout& layout)
 {
     using geometry::Plane;
     const bool vertical = section.plane == Plane::YZ;
     const bool onTop = section.plane == Plane::XZ;
-    const auto origin = onTop ? top : front;
+    const auto& placement = layout[onTop ? 2 : 0];
+    const auto origin = placement.center;
+    const auto scale = placement.scale;
     const auto& view = onTop ? views.top : views.front;
     const QPointF center = origin + (vertical ? QPointF(section.offset * scale, 0)
                                                : QPointF(0, -section.offset * scale));
@@ -293,6 +299,101 @@ void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
 
 }  // namespace
 
+namespace {
+
+void paintViews(QPainter& painter, const Projections& views, const ViewLayout& layout,
+                bool dimensions, bool hiddenLines, const Section* section, bool showScales)
+{
+    const auto& [front, right, top] = layout;
+    using geometry::Plane;
+    const bool cutFront = section && section->plane == Plane::XZ;
+    const bool cutRight = section && section->plane == Plane::YZ;
+    const bool cutTop = section && section->plane == Plane::XY;
+    const auto paint = [&](const View& view, const ViewPlacement& place, bool cut) {
+        if (cut) {
+            paintHatch(painter, *section, place.center, place.scale);
+            paintView(painter, section->view, place.center, place.scale, false);
+        } else {
+            paintView(painter, view, place.center, place.scale, hiddenLines);
+        }
+    };
+    paint(views.front, front, cutFront);
+    paint(views.right, right, cutRight);
+    paint(views.top, top, cutTop);
+    if (section) {
+        paintCutLine(painter, *section, views, layout);
+    }
+    if (dimensions) {
+        const auto width = [&](const View& view, const ViewPlacement& place) {
+            const double halfWidth = view.width * place.scale / 2;
+            const double lower = place.center.y() + view.height * place.scale / 2;
+            dimension(painter, place.center.x() - halfWidth, place.center.x() + halfWidth,
+                      lower, lower + 8, view.width);
+        };
+        if (!cutRight) {
+            width(views.right, right);
+        }
+        if (!cutFront) {
+            width(views.front, front);
+            const double halfX = views.front.width * front.scale / 2;
+            const double halfZ = views.front.height * front.scale / 2;
+            painter.save();
+            painter.translate(front.center + QPointF(halfX, 0));
+            painter.rotate(-90);
+            dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
+            painter.restore();
+        }
+        if (showScales || (!cutTop && !cutFront)) {
+            roundDimensions(painter, cutTop ? section->view : views.top, top.center, top.scale);
+        }
+    }
+    const auto label = [&](const View& view, const ViewPlacement& place, const QString& name,
+                           bool cut, bool dimensioned) {
+        const double offset = dimensions && dimensioned && !cut ? 11 : 4;
+        const double y = place.center.y() + view.height * place.scale / 2 + offset;
+        auto caption = cut ? QCoreApplication::translate("DrawingSheet", "A–A") : name;
+        if (showScales) {
+            const auto ratio = place.scale >= 1 ? QStringLiteral("%1:1").arg(digits(place.scale))
+                                                : QStringLiteral("1:%1").arg(digits(1 / place.scale));
+            caption += QStringLiteral("  ·  ") + ratio;
+        }
+        text(painter, {place.center.x() - 29, y, 58, 6}, caption, 4, Qt::AlignCenter, cut);
+    };
+    label(views.right, right, QCoreApplication::translate("DrawingSheet", "Right"), cutRight, true);
+    label(views.front, front, QCoreApplication::translate("DrawingSheet", "Front"), cutFront, true);
+    label(views.top, top, QCoreApplication::translate("DrawingSheet", "Top"), cutTop, false);
+}
+
+}  // namespace
+
+ViewLayout defaultViewLayout(const Projections& views, QSizeF paper)
+{
+    const double scale = chooseScale(views).factor;
+    const auto point = [paper](double x, double y) {
+        return QPointF(x * paper.width() / sheetWidth, y * paper.height() / sheetHeight);
+    };
+    return {{{point(211, 51), scale}, {point(77, 51), scale}, {point(211, 126), scale}}};
+}
+
+std::optional<SectionSettings> sectionSettings(const ModelViews& model)
+{
+    if (model.geometry && model.geometry->section) {
+        const auto& section = model.geometry->section;
+        return SectionSettings{section->plane, section->offset};
+    }
+    return std::nullopt;
+}
+
+void paintModelViews(QPainter& painter, const ModelViews& model)
+{
+    if (!model.geometry) {
+        return;
+    }
+    const auto& cut = model.geometry->section;
+    paintViews(painter, model.geometry->views, model.layout, model.dimensions, model.hiddenLines,
+               cut ? &*cut : nullptr, true);
+}
+
 void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options,
                 const Section* section)
 {
@@ -303,59 +404,10 @@ void paintSheet(QPainter& painter, const QRectF& area, const Projections& views,
     painter.fillRect(QRectF(0, 0, sheetWidth, sheetHeight), Qt::white);
     pen(painter, 0.5);
     painter.drawRect(QRectF(10, 10, 277, 190));
-
+    painter.setClipRect(QRectF(10, 10, 277, 190), Qt::IntersectClip);
     const auto scale = chooseScale(views);
-    constexpr QPointF front{211, 51};
-    constexpr QPointF right{77, 51};
-    constexpr QPointF top{211, 126};
-    using geometry::Plane;
-    const bool cutFront = section && section->plane == Plane::XZ;
-    const bool cutRight = section && section->plane == Plane::YZ;
-    const bool cutTop = section && section->plane == Plane::XY;
-    const auto paint = [&](const View& view, QPointF origin, bool cut) {
-        if (cut) {
-            paintHatch(painter, *section, origin, scale.factor);
-            paintView(painter, section->view, origin, scale.factor, false);
-        } else {
-            paintView(painter, view, origin, scale.factor, options.hiddenLines);
-        }
-    };
-    paint(views.front, front, cutFront);
-    paint(views.right, right, cutRight);
-    paint(views.top, top, cutTop);
-    if (section) {
-        paintCutLine(painter, *section, views, front, top, scale.factor);
-    }
-    if (options.dimensions) {
-        const double halfX = views.front.width * scale.factor / 2;
-        const double halfY = views.right.width * scale.factor / 2;
-        const double halfZ = views.front.height * scale.factor / 2;
-        const double lower = front.y() + halfZ;
-        if (!cutRight) {
-            dimension(painter, right.x() - halfY, right.x() + halfY, lower, lower + 8, views.right.width);
-        }
-        if (!cutFront) {
-            dimension(painter, front.x() - halfX, front.x() + halfX, lower, lower + 8, views.front.width);
-            // Rotate the dimension frame so its extension lines reach to the right of the front view.
-            painter.save();
-            painter.translate(front + QPointF(halfX, 0));
-            painter.rotate(-90);
-            dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
-            painter.restore();
-        }
-        if (!cutTop && !cutFront) {
-            roundDimensions(painter, views.top, top, scale.factor);
-        }
-    }
-    const auto label = [&](const View& view, QPointF origin, const QString& name, bool cut, bool dimensioned) {
-        const double offset = options.dimensions && dimensioned && !cut ? 11 : 4;
-        const double y = origin.y() + view.height * scale.factor / 2 + offset;
-        text(painter, {origin.x() - 25, y, 50, 6}, cut ? QCoreApplication::translate("DrawingSheet", "A–A") : name,
-             4, Qt::AlignCenter, cut);
-    };
-    label(views.right, right, QCoreApplication::translate("DrawingSheet", "Right"), cutRight, true);
-    label(views.front, front, QCoreApplication::translate("DrawingSheet", "Front"), cutFront, true);
-    label(views.top, top, QCoreApplication::translate("DrawingSheet", "Top"), cutTop, false);
+    const auto layout = defaultViewLayout(views, QSizeF(sheetWidth, sheetHeight));
+    paintViews(painter, views, layout, options.dimensions, options.hiddenLines, section, false);
     titleBlock(painter, options, scale);
     painter.restore();
 }

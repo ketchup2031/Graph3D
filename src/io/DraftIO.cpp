@@ -1,6 +1,7 @@
 #include "io/DraftIO.h"
 
 #include "io/FileIO.h"
+#include "io/ModelViewsIO.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -101,7 +102,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const auto version = root.value("version").toDouble();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || (version != 1 && version != 2)
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || (version != 1 && version != 2 && version != 3)
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }
@@ -121,15 +122,18 @@ drawing::Draft openDraft(const QString& path)
         if (!drawing::validItem(item)) {
             fileError(QStringLiteral("Invalid drawing geometry."));
         }
-        item.id = version == 2 ? readId(entry.value("id")) : QUuid::createUuid();
-        if (version == 2) {
+        item.id = version >= 2 ? readId(entry.value("id")) : QUuid::createUuid();
+        if (version >= 2) {
             item.anchorA = readAnchor(entry.value("anchorA"));
             item.anchorB = readAnchor(entry.value("anchorB"));
         }
         draft.items.push_back(std::move(item));
     }
-    if (version == 2) {
+    if (version >= 2) {
         validateLinks(draft);
+    }
+    if (version == 3) {
+        draft.modelViews = readModelViews(root.value("modelViews").toObject(), path);
     }
     return draft;
 }
@@ -144,6 +148,7 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
     if (linked) {
         validateLinks(draft);
     }
+    const int version = draft.modelViews ? 3 : linked ? 2 : 1;
     QJsonArray items;
     for (const auto& item : draft.items) {
         if (!drawing::validItem(item) || item.text.size() > 200) {
@@ -153,8 +158,9 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
             {"stroke", strokes.at(static_cast<std::size_t>(item.stroke))},
             {"a", writePoint(item.a)}, {"b", writePoint(item.b)}, {"label", writePoint(item.label)},
             {"text", item.text}};
-        if (linked) {
-            entry.insert("id", item.id.toString(QUuid::WithoutBraces));
+        if (version >= 2) {
+            const auto id = item.id.isNull() ? QUuid::createUuid() : item.id;
+            entry.insert("id", id.toString(QUuid::WithoutBraces));
             if (item.anchorA) {
                 entry.insert("anchorA", writeAnchor(*item.anchorA));
             }
@@ -164,10 +170,17 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
         }
         items.append(entry);
     }
-    const QJsonObject root{{"format", "Graph3D Drawing"}, {"version", linked ? 2 : 1}, {"unit", "mm"},
+    QJsonObject root{{"format", "Graph3D Drawing"}, {"version", version}, {"unit", "mm"},
         {"paper", draft.a3 ? "A3" : "A4"}, {"title", draft.title}, {"number", draft.number},
         {"author", draft.author}, {"items", items}};
-    writeFile(path, QJsonDocument(root).toJson());
+    if (draft.modelViews) {
+        root.insert("modelViews", writeModelViews(*draft.modelViews, path));
+    }
+    const auto data = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    if (data.size() > fileLimit) {
+        fileError(QStringLiteral("This drawing exceeds the file limits."));
+    }
+    writeFile(path, data);
 }
 
 }  // namespace graph3d::io

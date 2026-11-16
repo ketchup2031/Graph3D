@@ -1,5 +1,6 @@
 #include "drawing/DrawingSheet.h"
 #include "io/DraftIO.h"
+#include "io/ModelViewsIO.h"
 #include "geometry/SketchModeling.h"
 #include "io/ProjectIO.h"
 
@@ -11,6 +12,8 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPainter>
 #include <QTemporaryDir>
 
@@ -307,6 +310,81 @@ void verifyAttachedDimensions(const QDir& output)
     check(rejected, "A dangling attachment was saved");
 }
 
+void verifyModelViews(const QDir& output)
+{
+    auto project = doc::Document{};
+    const auto profile = project.addSketch({geom::Plane::XY, {geom::Circle{{0, 0}, 40}}});
+    const auto plate = project.addExtrude(profile, 15);
+    const auto hole = project.addHole(plate, {{0, 0, 15}, {0, 0, 1}}, {10, 15, true});
+    QTemporaryDir source;
+    const QString original = source.filePath("flange.graph3d");
+    const QString moved = source.filePath("flange-moved.graph3d");
+    io::saveProject(original, project);
+    const auto cut = draw::SectionSettings{geom::Plane::XZ, 0};
+    draw::Draft draft{"Linked flange", "G3D-011", "Graph3D"};
+    draft.items.push_back({draw::DraftKind::Text, {34, 164}, {}, {}, "Machine edges"});
+    draft.modelViews = io::buildModelViews(io::openModelSource(original), hole, cut, draw::draftSize(draft));
+    draft.modelViews->layout[0] = {{195, 60}, 0.75};
+    draft.modelViews->layout[2] = {{213, 126}, 1};
+    const auto layout = draft.modelViews->layout;
+    const auto draftPath = output.filePath("flange-linked.g3draw");
+    io::saveDraft(draftPath, draft);
+    auto restored = io::openDraft(draftPath);
+
+    const auto hasRadius = [](const draw::ModelViews& model, double radius) {
+        return std::ranges::any_of(model.geometry->views.top.circles,
+            [radius](const auto& circle) { return std::abs(circle.radius - radius) < 0.001; });
+    };
+    check(restored.items.size() == 1 && restored.items.front().text == "Machine edges", "Manual note was lost");
+    check(restored.modelViews && restored.modelViews->bodyId == hole && restored.modelViews->layout == layout
+          && draw::sectionSettings(*restored.modelViews) == cut && hasRadius(*restored.modelViews, 5),
+          "Model view layout, hole, or cut did not survive saving");
+    check(restored.modelViews->sourceDigest == io::currentModelDigest(original), "Saved digest is inconsistent");
+    check(project.editHole(hole, {12, 15, true}), "Could not change the hole diameter");
+    io::saveProject(original, project);
+    const auto sourceV2 = io::openModelSource(original);
+    check(sourceV2.digest != restored.modelViews->sourceDigest, "Edit did not invalidate the saved views");
+    auto updated = io::buildModelViews(sourceV2, hole, cut, draw::draftSize(draft), &*restored.modelViews);
+    check(updated.layout == layout && draw::sectionSettings(updated) == cut && !hasRadius(updated, 5)
+          && hasRadius(updated, 6), "Refresh did not update the hole or preserve placement");
+    const auto& walls = updated.geometry->section->material;
+    check(walls.size() == 2, "Section failed to show the two walls of the hole");
+    double nearest = 40;
+    for (const auto& face : walls) {
+        for (const auto& loop : face) {
+            for (const auto& point : loop) {
+                nearest = std::min(nearest, std::abs(point.x));
+            }
+        }
+    }
+    check(std::abs(nearest - 6) < .001, "Section radius did not update");
+
+    restored.modelViews = updated;
+    io::saveDraft(draftPath, restored);
+    check(QFile::rename(original, moved), "Could not move the source model");
+    auto cached = io::openDraft(draftPath);
+    check(cached.modelViews && hasRadius(*cached.modelViews, 6) && cached.items.front().text == "Machine edges",
+          "Cached geometry or manual note was lost with the model");
+    cached.modelViews = io::buildModelViews(io::openModelSource(moved), hole, cut, draw::draftSize(cached),
+                                            &*cached.modelViews);
+    check(cached.modelViews->sourcePath == moved && cached.modelViews->layout == layout,
+          "Relinking changed the view layout or used the wrong source");
+    const auto demoModel = output.filePath("flange-linked.graph3d");
+    io::saveProject(demoModel, project);
+    cached.modelViews = io::buildModelViews(io::openModelSource(demoModel), hole, cut, draw::draftSize(cached),
+                                            &*cached.modelViews);
+    io::saveDraft(draftPath, cached);
+    QFile native(draftPath);
+    check(native.open(QIODevice::ReadOnly), "Could not read saved drawing");
+    const auto root = QJsonDocument::fromJson(native.readAll()).object();
+    check(root.value("version").toInt() == 3 && root.value("modelViews").toObject().value("source") == "flange-linked.graph3d",
+          "Linked drawing did not store a relative file location");
+    QFile pdf(output.filePath("flange-linked.pdf"));
+    draw::exportDraftPdf(pdf.fileName(), cached);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.size() > 1500 && pdf.read(5) == "%PDF-",
+          "Could not export the combined drawing");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -333,6 +411,7 @@ int main(int argc, char** argv)
         verifySections(QDir(args.at(1)), output);
         verifyDraft(output);
         verifyAttachedDimensions(output);
+        verifyModelViews(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

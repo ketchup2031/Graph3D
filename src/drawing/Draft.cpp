@@ -98,7 +98,7 @@ void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame)
     };
     cell({x + 2, y, 141, 9}, draft.title);
     cell({x + 2, y + 9, 102, 8}, draft.number);
-    cell({x + 108, y + 9, 35, 8}, QCoreApplication::translate("DraftSheet", "1:1   mm"));
+    cell({x + 108, y + 9, 35, 8}, QCoreApplication::translate("DraftSheet", draft.modelViews ? "mm" : "1:1   mm"));
     cell({x + 2, y + 17, 102, 7}, draft.author);
     cell({x + 108, y + 17, 35, 7}, draft.a3 ? QStringLiteral("A3   1/1") : QStringLiteral("A4   1/1"));
 }
@@ -260,6 +260,9 @@ void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const 
     p.drawRect(frame);
     p.save();
     p.setClipRect(frame, Qt::IntersectClip);
+    if (draft.modelViews) {
+        paintModelViews(p, *draft.modelViews);
+    }
     const DraftGeometry geometry(draft, preview);
     for (std::size_t i = 0; i < draft.items.size(); ++i) {
         const bool active = static_cast<int>(i) == selected;
