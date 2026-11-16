@@ -38,7 +38,7 @@ target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core PRIVATE TKDES
 
 add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp)
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase)
+target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
 
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)

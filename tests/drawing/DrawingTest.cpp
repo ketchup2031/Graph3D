@@ -9,6 +9,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QGuiApplication>
+#include <QImage>
+#include <QPainter>
 #include <QTemporaryDir>
 
 #include <algorithm>
@@ -142,6 +144,75 @@ void verifyExample(const QDir& source, const QDir& output, const Example& exampl
               << " ms, projection=" << projectTimes[2] << " ms (median of 5)\n";
 }
 
+double loopArea(const std::vector<draw::Point>& loop)
+{
+    double sum = 0;
+    for (std::size_t i = 0; i < loop.size(); ++i) {
+        const auto& a = loop[i];
+        const auto& b = loop[(i + 1) % loop.size()];
+        sum += a.x * b.y - b.x * a.y;
+    }
+    return std::abs(sum) / 2;
+}
+
+void verifySections(const QDir& source, const QDir& output)
+{
+    const auto model = io::openProject(source.filePath("stepped-bushing.graph3d"));
+    const auto& shape = finishedPart(model).shape;
+    const auto views = draw::project(shape);
+    for (const auto plane : {geom::Plane::XZ, geom::Plane::YZ}) {
+        const auto axial = draw::section(shape, plane, 0);
+        check(axial.material.size() == 2, "Axial section filled the bore or lost a wall");
+        for (const auto& face : axial.material) {
+            check(face.size() == 1 && std::abs(loopArea(face.front()) - 200) < 1.e-5,
+                  "Axial section failed to show the stepped profile");
+        }
+        checkView(axial.view, 40, 30);
+        if (plane == geom::Plane::XZ) {
+            draw::savePdf(output.filePath("stepped-bushing-axial-section.pdf"), views,
+                          {"Stepped bushing", "G3D-002"}, &axial);
+        }
+    }
+
+    const auto transverse = draw::section(shape, geom::Plane::XY, 4);
+    check(transverse.material.size() == 1 && transverse.material.front().size() == 2,
+          "Transverse section did not retain the bore as an inner boundary");
+    const auto& loops = transverse.material.front();
+    check(std::abs(std::abs(loopArea(loops[0]) - loopArea(loops[1])) - 125 * std::numbers::pi) < 1.1,
+          "The offset section was taken at the wrong height");
+
+    QImage image(1188, 840, QImage::Format_RGB32);
+    const draw::SheetOptions options{"Section test", "A-A", false, false};
+    QPainter painter(&image);
+    draw::paintSheet(painter, QRectF(image.rect()), views, options, &transverse);
+    painter.end();
+    // Top view is centered at (211, 126) mm. The bore is empty inside R10.
+    for (int y = 499; y < 509; ++y) {
+        for (int x = 839; x < 849; ++x) {
+            check(image.pixelColor(x, y) == Qt::white, "Hatch escaped into the bore");
+        }
+    }
+    int dark = 0;
+    for (int y = 495; y < 513; ++y) {
+        for (int x = 888; x < 897; ++x) {
+            dark += image.pixelColor(x, y).lightness() < 190;
+        }
+    }
+    check(dark > 5, "Cut material was not hatched");
+    QFile pdf(output.filePath("stepped-bushing-section.pdf"));
+    draw::savePdf(pdf.fileName(), views, options, &transverse);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.size() > 1000 && pdf.read(5) == "%PDF-",
+          "Section PDF was not written");
+
+    bool rejected = false;
+    try {
+        draw::section(shape, geom::Plane::XY, 15);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "A section on the body boundary was accepted");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -165,6 +236,7 @@ int main(int argc, char** argv)
         for (const auto& example : examples) {
             verifyExample(QDir(args.at(1)), output, example);
         }
+        verifySections(QDir(args.at(1)), output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

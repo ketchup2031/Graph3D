@@ -1,6 +1,6 @@
 #pragma once
 
-#include <array>
+#include "geometry/Sketch.h"
 #include <vector>
 
 class TopoDS_Shape;
@@ -25,6 +25,14 @@ struct Projections {
     View right;
 };
 
+struct Section {
+    geometry::Plane plane;
+    double offset;
+    View view;
+    std::vector<Linework> material;
+};
+
 Projections project(const TopoDS_Shape& solid);
+Section section(const TopoDS_Shape& solid, geometry::Plane plane, double offset);
 
 }  // namespace graph3d::drawing

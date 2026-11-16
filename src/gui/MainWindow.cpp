@@ -1063,7 +1063,7 @@ void MainWindow::showDrawing()
             } cursor;
             return drawing::project(object->shape);
         };
-        DrawingDialog dialog(create(), objectName(*object), object->id, this);
+        DrawingDialog dialog(object->shape, create(), objectName(*object), object->id, this);
         dialog.exec();
     } catch (const std::exception& error) {
         const auto message = tr("Could not create drawing: %1").arg(QString::fromUtf8(error.what()));

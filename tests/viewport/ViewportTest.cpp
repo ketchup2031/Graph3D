@@ -504,6 +504,8 @@ private slots:
         const auto file = folder.filePath(QStringLiteral("чертёж.pdf"));
         bool sawDrawing = false;
         bool dimensionsChangedPreview = false;
+        bool sectionChangedPreview = false;
+        bool invalidSectionDisabledExport = false;
         QTimer::singleShot(0, [&] {
             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if (!dialog) {
@@ -513,13 +515,22 @@ private slots:
             auto* canvas = dialog->findChild<QWidget*>("drawingPreviewCanvas");
             auto* dimensions = dialog->findChild<QCheckBox*>("drawingDimensions");
             auto* save = dialog->findChild<QPushButton*>("drawingSavePdf");
-            sawDrawing = dialog->objectName() == "drawingDialog" && title && canvas && dimensions && save;
+            auto* plane = dialog->findChild<QComboBox*>("drawingSectionPlane");
+            auto* offset = dialog->findChild<QDoubleSpinBox*>("drawingSectionOffset");
+            sawDrawing = dialog->objectName() == "drawingDialog" && title && canvas && dimensions
+                && plane && offset && save;
             if (sawDrawing) {
                 title->setText(QStringLiteral("Куб"));
                 const auto before = canvas->grab().toImage();
                 dimensions->setChecked(false);
                 dimensionsChangedPreview = !before.isNull() && canvas->grab().toImage() != before;
                 dimensions->setChecked(true);
+                plane->setCurrentIndex(1);
+                sectionChangedPreview = offset->isEnabled() && save->isEnabled()
+                    && canvas->grab().toImage() != before;
+                offset->setValue(offset->maximum());
+                invalidSectionDisabledExport = !save->isEnabled();
+                offset->setValue(0);
                 QTimer::singleShot(0, [&] {
                     if (auto* chooser = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
                         chooser->selectFile(file);
@@ -533,6 +544,8 @@ private slots:
         action->trigger();
         QVERIFY(sawDrawing);
         QVERIFY(dimensionsChangedPreview);
+        QVERIFY(sectionChangedPreview);
+        QVERIFY(invalidSectionDisabledExport);
         QFile pdf(file);
         QVERIFY(pdf.open(QIODevice::ReadOnly));
         QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));

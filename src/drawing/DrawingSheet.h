@@ -19,7 +19,9 @@ struct SheetOptions {
 inline constexpr double sheetWidth = 297;
 inline constexpr double sheetHeight = 210;
 
-void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options);
-void savePdf(const QString& path, const Projections& views, const SheetOptions& options);
+void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options,
+                const Section* section = nullptr);
+void savePdf(const QString& path, const Projections& views, const SheetOptions& options,
+             const Section* section = nullptr);
 
 }  // namespace graph3d::drawing

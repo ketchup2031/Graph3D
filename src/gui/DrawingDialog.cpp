@@ -3,18 +3,24 @@
 #include "drawing/DrawingSheet.h"
 #include "gui/UserPreferences.h"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
 
 #include <exception>
+#include <optional>
 #include <utility>
 
 namespace graph3d {
@@ -31,6 +37,7 @@ public:
 
     drawing::Projections views;
     drawing::SheetOptions options;
+    std::optional<drawing::Section> section;
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -41,12 +48,13 @@ protected:
             .scaled(QSizeF(width() - 24, height() - 24), Qt::KeepAspectRatio);
         const QRectF paper((width() - size.width()) / 2, (height() - size.height()) / 2,
                            size.width(), size.height());
-        drawing::paintSheet(painter, paper, views, options);
+        drawing::paintSheet(painter, paper, views, options, section ? &*section : nullptr);
     }
 };
 
-DrawingDialog::DrawingDialog(drawing::Projections projections, const QString& object, int id, QWidget* parent)
-    : QDialog(parent), preview_(new Preview(std::move(projections), this))
+DrawingDialog::DrawingDialog(const TopoDS_Shape& body, drawing::Projections projections,
+                             const QString& object, int id, QWidget* parent)
+    : QDialog(parent), body_(body), preview_(new Preview(std::move(projections), this))
 {
     setObjectName(QStringLiteral("drawingDialog"));
     setWindowTitle(tr("Drawing — %1").arg(object));
@@ -78,6 +86,37 @@ DrawingDialog::DrawingDialog(drawing::Projections projections, const QString& ob
     options->addWidget(dimensions);
     options->addStretch();
     layout->addLayout(options);
+    auto* sectionSettings = new QHBoxLayout;
+    auto* plane = new QComboBox(this);
+    plane->setObjectName(QStringLiteral("drawingSectionPlane"));
+    plane->addItem(tr("None"));
+    using geometry::Plane;
+    plane->addItem(tr("XZ — front"), static_cast<int>(Plane::XZ));
+    plane->addItem(tr("XY — top"), static_cast<int>(Plane::XY));
+    plane->addItem(tr("YZ — right"), static_cast<int>(Plane::YZ));
+    auto* offset = new QDoubleSpinBox(this);
+    offset->setObjectName(QStringLiteral("drawingSectionOffset"));
+    offset->setDecimals(3);
+    offset->setSuffix(tr(" mm"));
+    offset->setKeyboardTracking(false);
+    offset->setEnabled(false);
+    offset->setToolTip(tr("Signed distance from the center of the body bounds along the perpendicular world axis."));
+    auto* planeLabel = new QLabel(tr("Section plane"), this);
+    planeLabel->setBuddy(plane);
+    auto* offsetLabel = new QLabel(tr("Offset from center"), this);
+    offsetLabel->setBuddy(offset);
+    sectionSettings->addWidget(planeLabel);
+    sectionSettings->addWidget(plane);
+    sectionSettings->addWidget(offsetLabel);
+    sectionSettings->addWidget(offset);
+    sectionSettings->addStretch();
+    layout->addLayout(sectionSettings);
+    auto* sectionError = new QLabel(this);
+    sectionError->setObjectName(QStringLiteral("drawingSectionError"));
+    sectionError->setTextFormat(Qt::PlainText);
+    sectionError->setWordWrap(true);
+    sectionError->hide();
+    layout->addWidget(sectionError);
     layout->addWidget(preview_, 1);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
@@ -86,6 +125,41 @@ DrawingDialog::DrawingDialog(drawing::Projections projections, const QString& ob
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(pdf, &QPushButton::clicked, this, &DrawingDialog::exportPdf);
+
+    const auto updateSection = [this, plane, offset, sectionError, pdf] {
+        preview_->section.reset();
+        sectionError->hide();
+        pdf->setEnabled(true);
+        if (plane->currentIndex() != 0) {
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            try {
+                const auto orientation = static_cast<Plane>(plane->currentData().toInt());
+                preview_->section = drawing::section(body_, orientation, offset->value());
+            } catch (const std::exception& error) {
+                sectionError->setText(QString::fromUtf8(error.what()));
+                sectionError->show();
+                pdf->setEnabled(false);
+            }
+            QApplication::restoreOverrideCursor();
+        }
+        preview_->update();
+    };
+    connect(plane, &QComboBox::currentIndexChanged, this, [this, plane, offset, updateSection](int index) {
+        {
+            const QSignalBlocker blocked(offset);
+            offset->setEnabled(index != 0);
+            if (index != 0) {
+                const auto orientation = static_cast<Plane>(plane->currentData().toInt());
+                const auto& views = preview_->views;
+                const double span = orientation == Plane::XZ ? views.top.height
+                                  : orientation == Plane::XY ? views.front.height : views.front.width;
+                offset->setRange(-span / 2, span / 2);
+            }
+            offset->setValue(0);
+        }
+        updateSection();
+    });
+    connect(offset, &QDoubleSpinBox::valueChanged, this, updateSection);
     connect(title, &QLineEdit::textChanged, this, [this](const QString& value) {
         preview_->options.title = value;
         preview_->update();
@@ -120,7 +194,8 @@ void DrawingDialog::exportPdf()
         return;
     }
     try {
-        drawing::savePdf(path, preview_->views, preview_->options);
+        drawing::savePdf(path, preview_->views, preview_->options,
+                         preview_->section ? &*preview_->section : nullptr);
     } catch (const std::exception& error) {
         QMessageBox::warning(this, tr("Save drawing"), QString::fromUtf8(error.what()));
     }

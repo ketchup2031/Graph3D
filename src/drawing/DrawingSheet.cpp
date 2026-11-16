@@ -215,6 +215,62 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
     }
 }
 
+void paintHatch(QPainter& p, const Section& section, QPointF center, double scale)
+{
+    for (const auto& face : section.material) {
+        QPainterPath mask;
+        mask.setFillRule(Qt::OddEvenFill);
+        for (const auto& loop : face) {
+            QPolygonF polygon;
+            polygon.reserve(static_cast<qsizetype>(loop.size()));
+            for (const auto& point : loop) {
+                polygon.append(center + QPointF(point.x * scale, -point.y * scale));
+            }
+            mask.addPolygon(polygon);
+            mask.closeSubpath();
+        }
+        p.save();
+        p.setClipPath(mask, Qt::IntersectClip);
+        pen(p, 0.15);
+        const auto box = mask.boundingRect();
+        constexpr double pitch = 3;
+        const double first = std::floor((box.left() + box.top()) / pitch) * pitch - box.bottom();
+        for (double x = first; x <= box.right(); x += pitch) {
+            p.drawLine(QPointF(x, box.bottom()), QPointF(x + box.height(), box.top()));
+        }
+        p.restore();
+    }
+}
+
+void paintCutLine(QPainter& p, const Section& section, const Projections& views,
+                  QPointF front, QPointF top, double scale)
+{
+    using geometry::Plane;
+    const bool vertical = section.plane == Plane::YZ;
+    const bool onTop = section.plane == Plane::XZ;
+    const auto origin = onTop ? top : front;
+    const auto& view = onTop ? views.top : views.front;
+    const QPointF center = origin + (vertical ? QPointF(section.offset * scale, 0)
+                                               : QPointF(0, -section.offset * scale));
+    const double extent = (vertical ? view.height : view.width) * scale / 2 + 5;
+    const QPointF along = vertical ? QPointF(0, 1) : QPointF(1, 0);
+    const QPointF direction = vertical ? QPointF(-1, 0) : QPointF(0, onTop ? -1 : 1);
+    pen(p, 0.22, Qt::DashDotLine);
+    p.drawLine(center - along * extent, center + along * extent);
+    for (const double side : {-extent, extent}) {
+        const auto start = center + along * side;
+        const auto tip = start + direction * 5;
+        pen(p, 0.28);
+        p.drawLine(start, tip);
+        const auto base = tip - direction * 2.4;
+        p.setBrush(Qt::black);
+        p.drawPolygon(QPolygonF{tip, base + along * 0.75, base - along * 0.75});
+        p.setBrush(Qt::NoBrush);
+        const auto labelAt = tip + (vertical ? QPointF(-4, 0) : QPointF(0, onTop ? -3 : 3));
+        text(p, {labelAt.x() - 2, labelAt.y() - 2.5, 4, 5}, QStringLiteral("A"), 3, Qt::AlignCenter, true);
+    }
+}
+
 void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
 {
     pen(p, 0.26);
@@ -236,7 +292,8 @@ void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
 
 }  // namespace
 
-void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options)
+void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options,
+                const Section* section)
 {
     painter.save();
     painter.translate(area.topLeft());
@@ -250,35 +307,60 @@ void paintSheet(QPainter& painter, const QRectF& area, const Projections& views,
     constexpr QPointF front{211, 51};
     constexpr QPointF right{77, 51};
     constexpr QPointF top{211, 126};
-    paintView(painter, views.front, front, scale.factor, options.hiddenLines);
-    paintView(painter, views.right, right, scale.factor, options.hiddenLines);
-    paintView(painter, views.top, top, scale.factor, options.hiddenLines);
+    using geometry::Plane;
+    const bool cutFront = section && section->plane == Plane::XZ;
+    const bool cutRight = section && section->plane == Plane::YZ;
+    const bool cutTop = section && section->plane == Plane::XY;
+    const auto paint = [&](const View& view, QPointF origin, bool cut) {
+        if (cut) {
+            paintHatch(painter, *section, origin, scale.factor);
+            paintView(painter, section->view, origin, scale.factor, false);
+        } else {
+            paintView(painter, view, origin, scale.factor, options.hiddenLines);
+        }
+    };
+    paint(views.front, front, cutFront);
+    paint(views.right, right, cutRight);
+    paint(views.top, top, cutTop);
+    if (section) {
+        paintCutLine(painter, *section, views, front, top, scale.factor);
+    }
     if (options.dimensions) {
         const double halfX = views.front.width * scale.factor / 2;
         const double halfY = views.right.width * scale.factor / 2;
         const double halfZ = views.front.height * scale.factor / 2;
         const double lower = front.y() + halfZ;
-        dimension(painter, front.x() - halfX, front.x() + halfX, lower, lower + 8, views.front.width);
-        dimension(painter, right.x() - halfY, right.x() + halfY, lower, lower + 8, views.right.width);
-        // Rotate the dimension frame so its extension lines reach to the right of the front view.
-        painter.save();
-        painter.translate(front + QPointF(halfX, 0));
-        painter.rotate(-90);
-        dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
-        painter.restore();
-        roundDimensions(painter, views.top, top, scale.factor);
+        if (!cutRight) {
+            dimension(painter, right.x() - halfY, right.x() + halfY, lower, lower + 8, views.right.width);
+        }
+        if (!cutFront) {
+            dimension(painter, front.x() - halfX, front.x() + halfX, lower, lower + 8, views.front.width);
+            // Rotate the dimension frame so its extension lines reach to the right of the front view.
+            painter.save();
+            painter.translate(front + QPointF(halfX, 0));
+            painter.rotate(-90);
+            dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
+            painter.restore();
+        }
+        if (!cutTop && !cutFront) {
+            roundDimensions(painter, views.top, top, scale.factor);
+        }
     }
-    const double frontLabels = front.y() + views.front.height * scale.factor / 2
-                             + (options.dimensions ? 11 : 4);
-    const double topLabel = top.y() + views.top.height * scale.factor / 2 + 4;
-    text(painter, {right.x() - 25, frontLabels, 50, 6}, QStringLiteral("Right"), 4, Qt::AlignCenter);
-    text(painter, {front.x() - 25, frontLabels, 50, 6}, QStringLiteral("Front"), 4, Qt::AlignCenter);
-    text(painter, {top.x() - 25, topLabel, 50, 6}, QStringLiteral("Top"), 4, Qt::AlignCenter);
+    const auto label = [&](const View& view, QPointF origin, const QString& name, bool cut, bool dimensioned) {
+        const double offset = options.dimensions && dimensioned && !cut ? 11 : 4;
+        const double y = origin.y() + view.height * scale.factor / 2 + offset;
+        text(painter, {origin.x() - 25, y, 50, 6}, cut ? QStringLiteral("A–A") : name,
+             4, Qt::AlignCenter, cut);
+    };
+    label(views.right, right, QStringLiteral("Right"), cutRight, true);
+    label(views.front, front, QStringLiteral("Front"), cutFront, true);
+    label(views.top, top, QStringLiteral("Top"), cutTop, false);
     titleBlock(painter, options, scale);
     painter.restore();
 }
 
-void savePdf(const QString& path, const Projections& views, const SheetOptions& options)
+void savePdf(const QString& path, const Projections& views, const SheetOptions& options,
+                const Section* section)
 {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
@@ -295,7 +377,7 @@ void savePdf(const QString& path, const Projections& views, const SheetOptions& 
         if (!painter.begin(&writer)) {
             throw std::runtime_error("Could not open the PDF painting device.");
         }
-        paintSheet(painter, QRectF(0, 0, writer.width(), writer.height()), views, options);
+        paintSheet(painter, QRectF(0, 0, writer.width(), writer.height()), views, options, section);
         if (!painter.end()) {
             throw std::runtime_error("Could not finish the PDF drawing.");
         }
