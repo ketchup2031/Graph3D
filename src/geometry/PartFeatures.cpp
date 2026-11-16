@@ -31,6 +31,8 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <BRepTools.hxx>
+#include <optional>
 #include <stdexcept>
 
 namespace graph3d::geometry {
@@ -188,12 +190,25 @@ TopoDS_Edge findEdge(const TopoDS_Solid& solid, const EdgeReference& reference)
 }
 
 template<class Builder>
-TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const TopoDS_Edge& edge, double size)
+TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const std::vector<TopoDS_Edge>& edges, double size)
 {
     Builder operation(body);
-    operation.Add(size, edge);
-    if (operation.NbContours() != 1 || operation.NbEdges(1) != 1) {
-        throw std::invalid_argument("Select one sharp edge. This operation cannot follow a chain of tangent edges.");
+    for (const auto& edge : edges) {
+        if (operation.Contour(edge) == 0) {
+            operation.Add(size, edge);
+        }
+    }
+    for (const auto& edge : edges) {
+        if (operation.Contour(edge) == 0) {
+            throw std::invalid_argument("Every selected edge must support the edge treatment.");
+        }
+    }
+    for (int i = 1; i <= operation.NbContours(); ++i) {
+        for (int j = 1; j <= operation.NbEdges(i); ++j) {
+            if (std::ranges::none_of(edges, [&](const auto& edge) { return edge.IsSame(operation.Edge(i, j)); })) {
+                throw std::invalid_argument("Select every edge in a tangent chain.");
+            }
+        }
     }
     operation.Build();
     if (!operation.IsDone()) {
@@ -241,6 +256,59 @@ EdgeReference referenceEdge(const TopoDS_Edge& edge)
         result.samples[i] = xyz(curve.Value(std::lerp(first, last, t)).XYZ());
     }
     return result;
+}
+
+std::vector<FaceReference> planarFaces(const TopoDS_Shape& body)
+{
+    const auto solid = singleSolid(body);
+    std::vector<FaceReference> result;
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+        const auto face = TopoDS::Face(it.Current());
+        const BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        double u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        std::optional<gp_Pnt> sample;
+        for (double u : {.5, .2, .8, .1, .9, .35, .65}) {
+            for (double v : {.5, .2, .8, .1, .9, .35, .65}) {
+                const auto p = surface.Value(std::lerp(u0, u1, u), std::lerp(v0, v1, v));
+                if (insideFace(face, p)) {
+                    sample = p;
+                    break;
+                }
+            }
+            if (sample) {
+                break;
+            }
+        }
+        if (sample) {
+            result.push_back({xyz(sample->XYZ()), xyz(outwardNormal(face, surface.Plane()).XYZ())});
+        }
+    }
+    return result;
+}
+
+std::vector<EdgeReference> twoFaceEdges(const TopoDS_Shape& body)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape neighbors;
+    TopExp::MapShapesAndUniqueAncestors(singleSolid(body), TopAbs_EDGE, TopAbs_FACE, neighbors);
+    std::vector<EdgeReference> result;
+    for (int i = 1; i <= neighbors.Extent(); ++i) {
+        const auto edge = TopoDS::Edge(neighbors.FindKey(i));
+        double first = 0, last = 0;
+        if (neighbors.FindFromIndex(i).Size() == 2 && !BRep_Tool::Degenerated(edge)
+            && !BRep_Tool::Curve(edge, first, last).IsNull()) {
+            result.push_back(referenceEdge(edge));
+        }
+    }
+    return result;
+}
+
+TopoDS_Face resolveExactPlanarFace(const TopoDS_Shape& body, const FaceReference& reference)
+{
+    return findFace(singleSolid(body), reference);
 }
 
 TopoDS_Face resolveSketchFace(const TopoDS_Shape& body, const FaceReference& reference)
@@ -343,12 +411,28 @@ TopoDS_Shape drillHole(const TopoDS_Shape& body, const FaceReference& reference,
 
 TopoDS_Shape treatEdge(const TopoDS_Shape& body, const EdgeReference& reference, EdgeTreatmentKind kind, double size)
 {
-    positive(size, "The chamfer distance or fillet radius must be positive.");
+    return treatEdges(body, std::span<const EdgeReference>(&reference, 1), kind, size);
+}
+
+TopoDS_Shape treatEdges(const TopoDS_Shape& body, std::span<const EdgeReference> references,
+                       EdgeTreatmentKind kind, double size)
+{
+    positive(size, "Enter a positive chamfer distance or fillet radius.");
+    if (references.empty() || references.size() > 64) {
+        throw std::invalid_argument("Select between one and 64 edges.");
+    }
     const auto solid = singleSolid(body);
-    const auto edge = findEdge(solid, reference);
+    std::vector<TopoDS_Edge> edges;
+    for (const auto& reference : references) {
+        const auto edge = findEdge(solid, reference);
+        if (std::ranges::any_of(edges, [&](const auto& selected) { return selected.IsSame(edge); })) {
+            throw std::invalid_argument("Select each edge once.");
+        }
+        edges.push_back(edge);
+    }
     switch (kind) {
-    case EdgeTreatmentKind::Chamfer: return finishTreatment<BRepFilletAPI_MakeChamfer>(solid, edge, size);
-    case EdgeTreatmentKind::Fillet: return finishTreatment<BRepFilletAPI_MakeFillet>(solid, edge, size);
+    case EdgeTreatmentKind::Chamfer: return finishTreatment<BRepFilletAPI_MakeChamfer>(solid, edges, size);
+    case EdgeTreatmentKind::Fillet: return finishTreatment<BRepFilletAPI_MakeFillet>(solid, edges, size);
     }
     throw std::invalid_argument("Unknown edge treatment.");
 }

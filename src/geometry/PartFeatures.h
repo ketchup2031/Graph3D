@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <span>
+#include <vector>
 
 class TopoDS_Face;
 class TopoDS_Edge;
@@ -17,6 +19,10 @@ enum class EdgeTreatmentKind { Chamfer, Fillet };
 
 FaceReference locateHole(const TopoDS_Face& face, Point3 rayOrigin, Point3 rayDirection, bool sketch = false);
 EdgeReference referenceEdge(const TopoDS_Edge& edge);
+std::vector<FaceReference> planarFaces(const TopoDS_Shape& body);
+std::vector<EdgeReference> twoFaceEdges(const TopoDS_Shape& body);
+TopoDS_Face resolveExactPlanarFace(const TopoDS_Shape& body, const FaceReference& reference);
+TopoDS_Shape treatEdges(const TopoDS_Shape& body, std::span<const EdgeReference> edges, EdgeTreatmentKind kind, double size);
 TopoDS_Face resolveSketchFace(const TopoDS_Shape& body, const FaceReference& reference);
 
 TopoDS_Shape drillHole(const TopoDS_Shape& body, const FaceReference& face, HoleSize size);

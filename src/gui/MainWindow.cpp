@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "gui/AdvancedDialog.h"
 #include "gui/AssemblyDialog.h"
 #include "gui/DraftWindow.h"
 #include "gui/DrawingDialog.h"
@@ -47,6 +48,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <type_traits>
 
@@ -128,6 +130,20 @@ MainWindow::MainWindow()
     connect(viewport_, &Viewport::operationFailed, this, &MainWindow::showSceneError);
     connect(viewport_, &Viewport::facePicked, this, &MainWindow::makeHole);
     connect(viewport_, &Viewport::edgePicked, this, &MainWindow::makeEdgeTreatment);
+    connect(viewport_, &Viewport::vertexPicked, this, [this](int, const geometry::Point3& point) {
+        if (pendingMachining_ != Machining::MeasureVertices) {
+            return;
+        }
+        if (!pickedVertex_) {
+            pickedVertex_ = point;
+            statusBar()->showMessage(tr("Pick the second vertex on the selected body."));
+            return;
+        }
+        const auto a = *pickedVertex_;
+        const auto distance = std::hypot(a[0] - point[0], a[1] - point[1], a[2] - point[2]);
+        viewport_->cancelSubshapePick();
+        report(tr("Vertex distance: %1 mm").arg(distance, 0, 'g', 10));
+    });
     connect(viewport_, &Viewport::subshapePickCancelled, this, [this] {
         endMachining(selectedId());
         report(tr("Geometry selection cancelled"));
@@ -264,6 +280,11 @@ void MainWindow::createMenus()
     add(tr("Cube"), "createCube", geometry::Primitive::Cube);
     add(tr("Cylinder"), "createCylinder", geometry::Primitive::Cylinder);
     add(tr("Sphere"), "createSphere", geometry::Primitive::Sphere);
+    createMenu_->addSeparator();
+    auto* plane = menuAction(createMenu_, tr("Construction plane…"), "makeDatumPlane");
+    auto* axis = menuAction(createMenu_, tr("Construction axis…"), "makeDatumAxis");
+    connect(plane, &QAction::triggered, this, [this] { configureAdvanced(tr("Construction plane"), geometry::DatumPlane{}); });
+    connect(axis, &QAction::triggered, this, [this] { configureAdvanced(tr("Construction axis"), geometry::DatumAxis{}); });
 
     sketchMenu_ = menuBar()->addMenu(tr("&Sketch"));
     const auto planeAction = [this](const QString& label, const char* name, geometry::Plane plane) {
@@ -275,6 +296,12 @@ void MainWindow::createMenus()
     planeAction(tr("New on YZ"), "newSketchYZ", geometry::Plane::YZ);
     newFaceSketch_ = menuAction(sketchMenu_, tr("New on planar face"), "newSketchOnFace");
     connect(newFaceSketch_, &QAction::triggered, this, [this] { startMachining(Machining::SketchFace); });
+    newDatumSketch_ = menuAction(sketchMenu_, tr("New on construction plane"), "newSketchOnDatum");
+    connect(newDatumSketch_, &QAction::triggered, this, [this] {
+        geometry::Sketch sketch;
+        sketch.datumPlane = selectedId();
+        beginSketch(sketch);
+    });
     editSketch_ = menuAction(sketchMenu_, tr("Edit sketch"), "editSketch");
     connect(editSketch_, &QAction::triggered, this, [this] { editSketch(selectedId()); });
 
@@ -301,6 +328,48 @@ void MainWindow::createMenus()
     machiningAction(tr("Hole…"), "makeHole", Machining::Hole);
     machiningAction(tr("Chamfer…"), "makeChamfer", Machining::Chamfer);
     machiningAction(tr("Fillet…"), "makeFillet", Machining::Fillet);
+    machiningAction(tr("Chamfer multiple edges…"), "makeMultiChamfer", Machining::ChamferSet);
+    machiningAction(tr("Fillet multiple edges…"), "makeMultiFillet", Machining::FilletSet);
+    finishEdgeSet_ = menuAction(model, tr("Finish selecting edges"), "finishEdgeSet");
+    connect(finishEdgeSet_, &QAction::triggered, this, &MainWindow::finishEdgeSet);
+    connect(viewport_, &Viewport::edgeSetFinished, this, &MainWindow::finishEdgeSet);
+    model->addSeparator();
+    sweep_ = menuAction(model, tr("Sweep along path…"), "makeSweep");
+    loft_ = menuAction(model, tr("Loft through sections…"), "makeLoft");
+    shell_ = menuAction(model, tr("Shell…"), "makeShell");
+    draftAngle_ = menuAction(model, tr("Draft angle…"), "makeDraftAngle");
+    editAdvanced_ = menuAction(model, tr("Edit modeling operation…"), "editAdvancedFeature");
+    connect(sweep_, &QAction::triggered, this, [this] {
+        configureAdvanced(tr("Sweep"), document::Sweep{selectedId(), {{0, 0, 0}, {0, 0, 35}, {40, 0, 35}}});
+    });
+    connect(loft_, &QAction::triggered, this, [this] {
+        const auto* object = document_.find(selectedId());
+        std::vector<int> first;
+        if (object && object->status == document::Status::Ready && std::holds_alternative<geometry::Sketch>(object->parameters)) {
+            first.push_back(object->id);
+        }
+        configureAdvanced(tr("Loft"), document::Loft{std::move(first), false});
+    });
+    connect(shell_, &QAction::triggered, this, [this] {
+        configureAdvanced(tr("Shell"), document::Shell{selectedId(), {}, 3});
+    });
+    connect(draftAngle_, &QAction::triggered, this, [this] {
+        configureAdvanced(tr("Draft angle"), document::DraftAngle{selectedId(), {}, {}, 5});
+    });
+    connect(editAdvanced_, &QAction::triggered, this, [this] {
+        const auto* object = document_.find(selectedId());
+        if (object && document::isAdvanced(object->parameters)) {
+            configureAdvanced(objectName(*object), object->parameters, object->id);
+        }
+    });
+    auto* measure = model->addMenu(tr("Measure"));
+    measureBody_ = menuAction(measure, tr("Volume and mass…"), "measureBody");
+    measureDistance_ = menuAction(measure, tr("Distance between bodies…"), "measureBodyDistance");
+    auto* vertices = menuAction(measure, tr("Distance between vertices"), "measureVertices");
+    machiningActions_.append(vertices);
+    connect(measureBody_, &QAction::triggered, this, &MainWindow::measureBody);
+    connect(measureDistance_, &QAction::triggered, this, &MainWindow::measureBodyDistance);
+    connect(vertices, &QAction::triggered, this, [this] { startMachining(Machining::MeasureVertices); });
 
     transformMenu_ = model->addMenu(tr("Transform body"));
     const auto transformAction = [this](const QString& title, const char* name, geometry::BodyTransform defaults) {
@@ -428,7 +497,13 @@ void MainWindow::createModelTree()
         updateSelection();
     });
     connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
-        editSketch(item->data(0, objectIdRole).toInt());
+        const auto id = item->data(0, objectIdRole).toInt();
+        const auto* object = document_.find(id);
+        if (object && document::isAdvanced(object->parameters)) {
+            configureAdvanced(objectName(*object), object->parameters, id);
+        } else {
+            editSketch(id);
+        }
     });
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column != 0) {
@@ -460,6 +535,14 @@ void MainWindow::refreshDocument(int selection)
                 int parentId = 0;
                 if (const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters); sketch && sketch->support) {
                     parentId = sketch->support->body;
+                } else if (const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters); sketch && sketch->datumPlane) {
+                    parentId = sketch->datumPlane;
+                } else if (const auto* sweep = std::get_if<document::Sweep>(&object.parameters)) {
+                    parentId = sweep->profile;
+                } else if (const auto* shell = std::get_if<document::Shell>(&object.parameters)) {
+                    parentId = shell->body;
+                } else if (const auto* draft = std::get_if<document::DraftAngle>(&object.parameters)) {
+                    parentId = draft->body;
                 } else if (const auto* extrusion = std::get_if<document::Extrude>(&object.parameters)) {
                     parentId = extrusion->profile;
                 } else if (const auto* revolution = std::get_if<document::Revolve>(&object.parameters)) {
@@ -525,9 +608,12 @@ void MainWindow::updateActions()
     const bool sketch = object && std::holds_alternative<geometry::Sketch>(object->parameters);
     const auto validBody = [](const document::Object& candidate) {
         return candidate.status == document::Status::Ready
-            && !std::holds_alternative<geometry::Sketch>(candidate.parameters);
+            && document::isBody(candidate.parameters);
     };
     const auto bodies = std::count_if(document_.objects().begin(), document_.objects().end(), validBody);
+    const auto sketches = std::ranges::count_if(document_.objects(), [](const auto& item) {
+        return item.status == document::Status::Ready && std::holds_alternative<geometry::Sketch>(item.parameters);
+    });
     startPageAction_->setEnabled(modeling);
     openAction_->setEnabled(!drawing);
     newScene_->setEnabled(!drawing);
@@ -543,6 +629,19 @@ void MainWindow::updateActions()
     tree_->setEnabled(modeling);
     properties_->setEnabled(modeling);
     editSketch_->setEnabled(modeling && sketch && !pendingMachining_);
+    const bool available = modeling && !pendingMachining_;
+    const bool selectedBody = object && validBody(*object);
+    newDatumSketch_->setEnabled(available && object && object->status == document::Status::Ready
+        && std::holds_alternative<geometry::DatumPlane>(object->parameters));
+    sweep_->setEnabled(available && sketch && object->status == document::Status::Ready);
+    loft_->setEnabled(available && sketches >= 2);
+    shell_->setEnabled(available && selectedBody);
+    draftAngle_->setEnabled(available && selectedBody);
+    editAdvanced_->setEnabled(available && object && document::isAdvanced(object->parameters));
+    measureBody_->setEnabled(available && selectedBody);
+    measureDistance_->setEnabled(available && selectedBody && bodies >= 2);
+    finishEdgeSet_->setEnabled(modeling && !pickedEdges_.empty()
+        && (pendingMachining_ == Machining::ChamferSet || pendingMachining_ == Machining::FilletSet));
     newFaceSketch_->setEnabled(modeling && !pendingMachining_ && object && object->visible && validBody(*object));
     extrude_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
     revolve_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
@@ -567,6 +666,18 @@ QString MainWindow::objectName(const document::Object& object) const
             }
         } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
             return tr("Sketch");
+        } else if constexpr (std::is_same_v<Type, geometry::DatumPlane>) {
+            return tr("Construction plane");
+        } else if constexpr (std::is_same_v<Type, geometry::DatumAxis>) {
+            return tr("Construction axis");
+        } else if constexpr (std::is_same_v<Type, document::Sweep>) {
+            return tr("Sweep");
+        } else if constexpr (std::is_same_v<Type, document::Loft>) {
+            return tr("Loft");
+        } else if constexpr (std::is_same_v<Type, document::Shell>) {
+            return tr("Shell");
+        } else if constexpr (std::is_same_v<Type, document::DraftAngle>) {
+            return tr("Draft angle");
         } else if constexpr (std::is_same_v<Type, document::Extrude>) {
             return tr("Extrude");
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
@@ -611,6 +722,9 @@ QString MainWindow::objectDetails(const document::Object& object) const
             if (operation.support) {
                 return tr("Planar face · %1").arg(source(operation.support->body));
             }
+            if (operation.datumPlane) {
+                return source(operation.datumPlane);
+            }
             switch (operation.plane) {
             case geometry::Plane::XY: return tr("Plane XY");
             case geometry::Plane::XZ: return tr("Plane XZ");
@@ -619,6 +733,9 @@ QString MainWindow::objectDetails(const document::Object& object) const
         } else if constexpr (std::is_same_v<Type, document::Extrude>) {
             return tr("%1 · %2 mm").arg(source(operation.profile)).arg(operation.distance);
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
+            if (operation.datumAxis) {
+                return tr("%1 · %2° · %3").arg(source(operation.profile)).arg(operation.angle).arg(source(operation.datumAxis));
+            }
             return tr("%1 · %2° · %3 axis, offset %4 mm").arg(source(operation.profile)).arg(operation.angle)
                 .arg(operation.axis == geometry::Axis::U ? "U" : "V").arg(operation.offset);
         } else if constexpr (std::is_same_v<Type, document::Boolean>) {
@@ -632,7 +749,15 @@ QString MainWindow::objectDetails(const document::Object& object) const
         } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
             const auto size = operation.kind == geometry::EdgeTreatmentKind::Chamfer
                 ? tr("Distance %1 mm").arg(operation.size) : tr("Radius %1 mm").arg(operation.size);
-            return tr("%1 · %2").arg(source(operation.body), size);
+            return tr("%1 · %2 · %3 edges").arg(source(operation.body), size).arg(operation.additionalEdges.size() + 1);
+        } else if constexpr (std::is_same_v<Type, document::Sweep>) {
+            return tr("%1 · %2 path points").arg(source(operation.profile)).arg(operation.path.size());
+        } else if constexpr (std::is_same_v<Type, document::Loft>) {
+            return tr("Sections: %1").arg(operation.profiles.size());
+        } else if constexpr (std::is_same_v<Type, document::Shell>) {
+            return tr("%1 · %2 mm wall").arg(source(operation.body)).arg(operation.thickness);
+        } else if constexpr (std::is_same_v<Type, document::DraftAngle>) {
+            return tr("%1 · %2°").arg(source(operation.body)).arg(operation.degrees);
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
             return source(operation.body);
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
@@ -789,13 +914,20 @@ void MainWindow::revolveCurrent()
     auto* form = new QFormLayout(&dialog);
     auto* axis = new QComboBox(&dialog);
     axis->setObjectName(QStringLiteral("revolveAxis"));
-    axis->addItems({tr("U axis (horizontal)"), tr("V axis (vertical)")});
+    axis->addItem(tr("U axis (horizontal)"), 0);
+    axis->addItem(tr("V axis (vertical)"), 0);
+    for (const auto& item : document_.objects()) {
+        if (item.status == document::Status::Ready && std::holds_alternative<geometry::DatumAxis>(item.parameters)) {
+            axis->addItem(objectName(item), item.id);
+        }
+    }
     form->addRow(tr("Axis"), axis);
     auto* offset = new QDoubleSpinBox(&dialog);
     offset->setObjectName(QStringLiteral("revolveOffset"));
     offset->setRange(-100000, 100000);
     offset->setSuffix(tr(" mm"));
     form->addRow(tr("Offset perpendicular to axis"), offset);
+    connect(axis, &QComboBox::currentIndexChanged, offset, [axis, offset] { offset->setEnabled(axis->currentData().toInt() == 0); });
     auto* angle = new QDoubleSpinBox(&dialog);
     angle->setObjectName(QStringLiteral("revolveAngle"));
     angle->setRange(0.01, 360);
@@ -808,8 +940,8 @@ void MainWindow::revolveCurrent()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() == QDialog::Accepted) {
         const auto direction = axis->currentIndex() == 0 ? geometry::Axis::U : geometry::Axis::V;
-        addFeature(tr("Revolve"), [this, id, direction, offset, angle] {
-            return document_.addRevolve(id, direction, offset->value(), angle->value());
+        addFeature(tr("Revolve"), [this, id, direction, offset, angle, axis] {
+            return document_.addRevolve(id, direction, offset->value(), angle->value(), axis->currentData().toInt());
         });
     }
 }
@@ -819,14 +951,14 @@ void MainWindow::combineCurrent(geometry::BooleanOperation operation)
     const auto first = selectedId();
     const auto* current = document_.find(first);
     if (!current || current->status != document::Status::Ready
-        || std::holds_alternative<geometry::Sketch>(current->parameters)) {
+        || !document::isBody(current->parameters)) {
         return;
     }
     QStringList names;
     QList<int> candidates;
     for (const auto& object : document_.objects()) {
         if (object.id != first && object.status == document::Status::Ready
-            && !std::holds_alternative<geometry::Sketch>(object.parameters)) {
+            && document::isBody(object.parameters)) {
             names.append(objectName(object));
             candidates.append(object.id);
         }
@@ -1027,16 +1159,21 @@ void MainWindow::startMachining(Machining operation)
     const auto id = selectedId();
     const auto* object = document_.find(id);
     if (!object || !object->visible || object->status != document::Status::Ready
-        || std::holds_alternative<geometry::Sketch>(object->parameters)) {
+        || !document::isBody(object->parameters)) {
         return;
     }
     const auto pick = operation == Machining::SketchFace ? SubshapePick::SketchFace
-        : operation == Machining::Hole ? SubshapePick::Face : SubshapePick::Edge;
+        : operation == Machining::Hole ? SubshapePick::Face
+        : operation == Machining::MeasureVertices ? SubshapePick::Vertex
+        : operation == Machining::ChamferSet || operation == Machining::FilletSet ? SubshapePick::EdgeSet
+        : SubshapePick::Edge;
     if (viewport_->beginSubshapePick(id, pick)) {
         pendingMachining_ = operation;
         updateActions();
         statusBar()->showMessage(pick == SubshapePick::SketchFace ? tr("Click a planar face for the sketch. Esc cancels.")
             : pick == SubshapePick::Face ? tr("Click the hole center on a planar face. Esc cancels.")
+            : pick == SubshapePick::Vertex ? tr("Pick the first vertex on the selected body. Esc cancels.")
+            : pick == SubshapePick::EdgeSet ? tr("Select edges and press Enter to confirm. Esc cancels.")
             : tr("Click an edge of the selected body. Esc cancels."));
     }
 }
@@ -1044,6 +1181,8 @@ void MainWindow::startMachining(Machining operation)
 void MainWindow::endMachining(int id)
 {
     pendingMachining_.reset();
+    pickedEdges_.clear();
+    pickedVertex_.reset();
     viewport_->selectObject(id);
     updateActions();
 }
@@ -1080,7 +1219,7 @@ void MainWindow::configureAssembly(int id)
         if (existing && candidate.id >= id) {
             break;
         }
-        if (!std::holds_alternative<geometry::Sketch>(candidate.parameters)
+        if (document::isBody(candidate.parameters)
             && (existing || candidate.status == document::Status::Ready)) {
             sources.append({candidate.id, objectName(candidate)});
         }
@@ -1148,20 +1287,132 @@ void MainWindow::makeHole(int id, const geometry::FaceReference& face)
 
 void MainWindow::makeEdgeTreatment(int id, const geometry::EdgeReference& edge)
 {
+    if (pendingMachining_ == Machining::ChamferSet || pendingMachining_ == Machining::FilletSet) {
+        const auto match = std::ranges::find(pickedEdges_, edge);
+        if (match == pickedEdges_.end()) {
+            pickedEdges_.push_back(edge);
+        } else {
+            pickedEdges_.erase(match);
+        }
+        statusBar()->showMessage(tr("Selected edges: %1. Press Enter to confirm.").arg(pickedEdges_.size()));
+        updateActions();
+        return;
+    }
     if (pendingMachining_ != Machining::Chamfer && pendingMachining_ != Machining::Fillet) {
         return;
     }
-    const bool chamfer = pendingMachining_ == Machining::Chamfer;
+    const auto kind = pendingMachining_ == Machining::Chamfer
+        ? geometry::EdgeTreatmentKind::Chamfer : geometry::EdgeTreatmentKind::Fillet;
     endMachining(id);
+    applyEdgeTreatment(id, kind, {edge});
+}
+
+void MainWindow::finishEdgeSet()
+{
+    if (pickedEdges_.empty() || (pendingMachining_ != Machining::ChamferSet && pendingMachining_ != Machining::FilletSet)) {
+        return;
+    }
+    if (pickedEdges_.size() > 64) {
+        statusBar()->showMessage(tr("Select at most 64 edges."));
+        return;
+    }
+    const auto kind = pendingMachining_ == Machining::ChamferSet
+        ? geometry::EdgeTreatmentKind::Chamfer : geometry::EdgeTreatmentKind::Fillet;
+    auto edges = std::move(pickedEdges_);
+    const int id = selectedId();
+    viewport_->cancelSubshapePick();
+    applyEdgeTreatment(id, kind, std::move(edges));
+}
+
+void MainWindow::applyEdgeTreatment(int id, geometry::EdgeTreatmentKind kind, std::vector<geometry::EdgeReference> edges)
+{
+    const bool chamfer = kind == geometry::EdgeTreatmentKind::Chamfer;
     const auto title = chamfer ? tr("Chamfer") : tr("Fillet");
     bool accepted = false;
     const auto value = QInputDialog::getDouble(this, title,
         chamfer ? tr("Equal distances (mm)") : tr("Radius (mm)"), 2, 0.01, 100000, 2, &accepted);
     if (accepted) {
-        const auto kind = chamfer ? geometry::EdgeTreatmentKind::Chamfer : geometry::EdgeTreatmentKind::Fillet;
-        addFeature(title, [this, id, edge, kind, value] { return document_.addEdgeTreatment(id, edge, kind, value); });
+        addFeature(title, [this, id, &edges, kind, value] {
+            return document_.addEdgeTreatment(id, std::move(edges), kind, value);
+        });
     } else {
         statusBar()->showMessage(tr("%1 cancelled").arg(title));
+    }
+}
+
+void MainWindow::configureAdvanced(const QString& title, const document::Parameters& defaults, int editing)
+{
+    if (pages_->currentWidget() != viewport_ || pendingMachining_) {
+        return;
+    }
+    try {
+        const auto result = advancedParameters(this, title, document_, defaults, editing != 0);
+        if (!result) {
+            return;
+        }
+        if (editing) {
+            editFeature(editing, [this, editing, &result] { return document_.editAdvanced(editing, *result); });
+        } else {
+            addFeature(title, [this, &result] { return document_.addAdvanced(*result); });
+        }
+    } catch (const std::exception& error) {
+        showSceneError(localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        showSceneError(localizedDiagnostic(error.GetMessageString()));
+    }
+}
+
+void MainWindow::measureBody()
+{
+    const auto* body = document_.find(selectedId());
+    if (!body || body->status != document::Status::Ready || !document::isBody(body->parameters)) {
+        return;
+    }
+    const int id = body->id;
+    try {
+        if (const auto value = bodyPropertiesDialog(this, *body)) {
+            if (document_.setDensity(id, *value > 0 ? value : std::nullopt)) {
+                refreshDocument(id);
+                report(tr("Material density saved."));
+            }
+        }
+    } catch (const std::exception& error) {
+        showSceneError(localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        showSceneError(localizedDiagnostic(error.GetMessageString()));
+    }
+}
+
+void MainWindow::measureBodyDistance()
+{
+    const auto* selected = document_.find(selectedId());
+    if (!selected || selected->status != document::Status::Ready || !document::isBody(selected->parameters)) {
+        return;
+    }
+    QStringList names;
+    std::vector<int> ids;
+    for (const auto& body : document_.objects()) {
+        if (body.id != selected->id && body.status == document::Status::Ready && document::isBody(body.parameters)) {
+            names << objectName(body);
+            ids.push_back(body.id);
+        }
+    }
+    bool accepted = false;
+    const auto title = tr("Distance between bodies");
+    const auto chosen = QInputDialog::getItem(this, title, tr("Second body"), names, 0, false, &accepted);
+    if (!accepted) {
+        return;
+    }
+    try {
+        const auto* other = document_.find(ids.at(names.indexOf(chosen)));
+        const auto distance = geometry::minimumDistance(selected->shape, other->shape);
+        const auto result = tr("Minimum distance: %1 mm").arg(distance, 0, 'g', 10);
+        report(result);
+        QMessageBox::information(this, title, result);
+    } catch (const std::exception& error) {
+        showSceneError(localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        showSceneError(localizedDiagnostic(error.GetMessageString()));
     }
 }
 
@@ -1169,7 +1420,7 @@ void MainWindow::showDrawing()
 {
     const auto* object = document_.find(selectedId());
     if (!object || object->status != document::Status::Ready
-        || std::holds_alternative<geometry::Sketch>(object->parameters)) {
+        || !document::isBody(object->parameters)) {
         return;
     }
     try {

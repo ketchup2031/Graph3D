@@ -2,7 +2,10 @@
 #include "io/Exchange.h"
 #include "io/ProjectIO.h"
 
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 
@@ -15,6 +18,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -137,6 +141,148 @@ void exports(const QDir& folder)
     rejects([&] { io::readStep(junk); }, "Invalid STEP was accepted");
 }
 
+std::array<double, 3> extents(const TopoDS_Shape& shape)
+{
+    Bnd_Box bounds;
+    BRepBndLib::AddOptimal(shape, bounds, false, false);
+    const auto low = bounds.CornerMin();
+    const auto high = bounds.CornerMax();
+    return {high.X() - low.X(), high.Y() - low.Y(), high.Z() - low.Z()};
+}
+
+bool inside(const TopoDS_Shape& shape, double x, double y, double z)
+{
+    return BRepClass3d_SolidClassifier(shape, gp_Pnt(x, y, z), 1.e-6).State() == TopAbs_IN;
+}
+
+void checkShellAndStep(const QDir& folder)
+{
+    doc::Document document;
+    const auto source = document.addPrimitive(geom::Primitive::Cube);
+    const auto planes = geom::planarFaces(document.find(source)->shape);
+    const auto top = std::ranges::find_if(planes, [](const auto& face) { return face.outward[2] > .99; });
+    check(top != planes.end(), "Shell opening face was not found");
+    const auto shell = document.addAdvanced(doc::Shell{source, {*top}, 4});
+    check(std::abs(volume(document.find(shell)->shape) - 187456) < .01, "Initial shell volume is wrong");
+    check(document.editAdvanced(shell, doc::Shell{source, {*top}, 6}), "Shell edit did not rebuild");
+    check(document.setDensity(shell, 7850), "Density was not saved");
+    const auto project = folder.filePath("wall-thickness.graph3d");
+    io::saveProject(project, document);
+    const auto saved = io::openProject(project);
+    check(saved.find(shell)->densityKgM3 == 7850 && std::get<doc::Shell>(saved.find(shell)->parameters).thickness == 6,
+          "Material density or shell inputs did not round trip");
+    const auto step = folder.filePath("wall-thickness.step");
+    io::exportVisible(step, saved, io::ExchangeFormat::Step);
+    const auto imported = io::readStep(step);
+    for (const auto& shape : {saved.find(shell)->shape, imported}) {
+        const auto stats = geom::massProperties(shape, 7850);
+        check(std::abs(stats.volumeMm3 - 272064) < .01 && std::abs(stats.massKg - 2.1357024) < 1.e-7
+            && std::abs(stats.centerMm[0] - 50) < 1.e-6 && std::abs(stats.centerMm[1] - 50) < 1.e-6
+            && stats.centerMm[2] < 50, "Shell measurements changed");
+        check(inside(shape, 5.9, 50, 50) && !inside(shape, 6.1, 50, 50)
+            && inside(shape, 50, 50, 5.9) && !inside(shape, 50, 50, 6.1), "Wrong shell wall or bottom thickness");
+    }
+    check(document.undo() && document.undo() && std::abs(volume(document.find(shell)->shape) - 187456) < .01,
+          "Shell edit was not undoable");
+    check(document.editAdvanced(shell, doc::Shell{source, {*top}, 60})
+        && document.find(shell)->status == doc::Status::Failed, "Infeasible wall thickness was accepted");
+}
+
+void checkSweepAndStep(const QDir& folder)
+{
+    doc::Document document;
+    const auto datum = document.addAdvanced(geom::DatumPlane{});
+    geom::Sketch circle{geom::Plane::XY, {geom::Circle{{10, 5}, 5}}};
+    circle.datumPlane = datum;
+    const auto profile = document.addSketch(circle);
+    doc::Sweep path{profile, {{10, 5, 0}, {10, 5, 40}, {70, 5, 40}}};
+    const auto result = document.addAdvanced(path);
+    const auto initial = geom::massProperties(document.find(result)->shape, 0);
+    check(std::abs(initial.volumeMm3 - 2500 * std::numbers::pi) < .01, "Sweep did not follow the bend");
+    path.path.back()[0] = 90;
+    check(document.editAdvanced(result, path), "Sweep path did not rebuild");
+    const auto project = folder.filePath("swept-profile.graph3d");
+    io::saveProject(project, document);
+    const auto saved = io::openProject(project);
+    check(std::get<doc::Sweep>(saved.find(result)->parameters) == path && saved.find(datum)->visible,
+          "Sweep or construction plane was lost on reopening");
+    const auto step = folder.filePath("swept-profile.step");
+    io::exportVisible(step, saved, io::ExchangeFormat::Step);
+    const auto imported = io::readStep(step);
+    const auto dimensions = extents(saved.find(result)->shape);
+    const auto dimensionsAfter = extents(imported);
+    check(std::abs(dimensions[0] - 85) < 1.e-5 && std::abs(dimensions[1] - 10) < 1.e-5
+        && std::abs(dimensions[2] - 45) < 1.e-5, "Sweep control dimensions are wrong");
+    for (int i = 0; i < 3; ++i) {
+        check(std::abs(dimensions[i] - dimensionsAfter[i]) < 1.e-5, "STEP changed a sweep control dimension");
+    }
+    check(std::abs(volume(imported) - 3000 * std::numbers::pi) < .01, "STEP changed swept volume");
+}
+
+void checkOtherAdvancedFeatures(const QDir& folder)
+{
+    doc::Document document;
+    const auto datum = document.addAdvanced(geom::DatumPlane{{0, 0, 30}, {0, 0, 1}});
+    const auto lower = document.addSketch({geom::Plane::XY, {geom::Circle{{0, 0}, 10}}});
+    geom::Sketch upperSketch{geom::Plane::XY, {geom::Circle{{0, 0}, 20}}};
+    upperSketch.datumPlane = datum;
+    const auto upper = document.addSketch(upperSketch);
+    const auto loft = document.addAdvanced(doc::Loft{{lower, upper}, true});
+    check(std::abs(volume(document.find(loft)->shape) - 7000 * std::numbers::pi) < .01, "Loft has the wrong volume");
+    check(document.editAdvanced(datum, geom::DatumPlane{{0, 0, 40}, {0, 0, 1}})
+        && std::abs(extents(document.find(loft)->shape)[2] - 40) < 1.e-6,
+        "Loft did not rebuild after editing its construction plane");
+    const auto axis = document.addAdvanced(geom::DatumAxis{{0, 0, 0}, {0, 1, 0}});
+    const auto profile = document.addSketch({geom::Plane::XY, {geom::Rectangle{{10, 0}, {20, 30}}}});
+    const auto revolved = document.addRevolve(profile, geom::Axis::U, 0, 360, axis);
+    check(std::abs(volume(document.find(revolved)->shape) - 9000 * std::numbers::pi) < .01,
+          "Revolve ignored its construction axis");
+    check(document.editAdvanced(axis, geom::DatumAxis{{5, 0, 0}, {0, 1, 0}})
+        && std::abs(volume(document.find(revolved)->shape) - 6000 * std::numbers::pi) < .01,
+        "Revolve did not rebuild after editing its construction axis");
+    const auto a = document.addImported("Box A", geom::makePrimitive(geom::Primitive::Cube, 0, 200));
+    const auto b = document.addImported("Box B", geom::makePrimitive(geom::Primitive::Cube, 140, 200));
+    check(std::abs(geom::minimumDistance(document.find(a)->shape, document.find(b)->shape) - 40) < 1.e-6,
+          "Minimum distance has the wrong value");
+    const auto planes = geom::planarFaces(document.find(a)->shape);
+    const auto select = [&](int i, double direction) {
+        const auto found = std::ranges::find_if(planes, [&](const auto& face) { return face.outward[i] * direction > .99; });
+        check(found != planes.end(), "A draft face was not found");
+        return *found;
+    };
+    const auto neutral = select(2, -1);
+    const auto wall = select(0, 1);
+    const auto draft = document.addAdvanced(doc::DraftAngle{a, neutral, {wall}, 5});
+    const auto draftVolume = volume(document.find(draft)->shape);
+    check(std::abs(std::abs(draftVolume - 1.e6) - 5.e5 * std::tan(5 * std::numbers::pi / 180)) < .01,
+          "Draft did not move the wall by the specified angle");
+    check(document.editAdvanced(draft, doc::DraftAngle{a, neutral, {wall}, 8})
+        && document.find(draft)->status == doc::Status::Ready
+        && std::abs(volume(document.find(draft)->shape) - draftVolume) > 1,
+        "Draft angle edit did not change the result");
+
+    std::vector<geom::EdgeReference> edges;
+    for (const auto& edge : geom::twoFaceEdges(document.find(b)->shape)) {
+        if (std::abs(edge.samples.front()[2] - edge.samples.back()[2]) > 99 && edges.size() < 2) {
+            edges.push_back(edge);
+        }
+    }
+    check(edges.size() == 2, "Test edges were not found");
+    const auto chamfer = document.addEdgeTreatment(b, edges, geom::EdgeTreatmentKind::Chamfer, 3);
+    const auto rounded = document.addEdgeTreatment(b, edges, geom::EdgeTreatmentKind::Fillet, 3);
+    check(std::abs(volume(document.find(chamfer)->shape) - 999100) < .01
+        && std::abs(volume(document.find(rounded)->shape) - (1.e6 - 1800 * (1 - std::numbers::pi / 4))) < .01,
+        "Multi-edge profiling did not process every edge");
+    const auto path = folder.filePath("advanced-operations.graph3d");
+    io::saveProject(path, document);
+    const auto restored = io::openProject(path);
+    check(std::get<doc::EdgeTreatment>(restored.find(chamfer)->parameters).additionalEdges.size() == 1
+        && std::get<doc::Revolve>(restored.find(revolved)->parameters).datumAxis == axis
+        && std::get<doc::Loft>(restored.find(loft)->parameters).profiles == std::vector<int>{lower, upper}
+        && std::get<doc::DraftAngle>(restored.find(draft)->parameters).degrees == 8
+        && restored.find(rounded)->status == doc::Status::Ready, "Advanced operations did not round trip");
+}
+
 void roundTrip(const QDir& folder)
 {
     doc::Document original;
@@ -209,6 +355,9 @@ int main(int argc, char** argv)
         check(folder.exists(), "Fixture directory does not exist");
         exports(folder);
         roundTrip(folder);
+        checkShellAndStep(folder);
+        checkSweepAndStep(folder);
+        checkOtherAdvancedFeatures(folder);
     } catch (const Standard_Failure& error) {
         std::cerr << "Open CASCADE: " << error.GetMessageString() << '\n';
         return 1;

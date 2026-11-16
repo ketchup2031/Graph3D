@@ -9,6 +9,8 @@
 #include <TopoDS.hxx>
 
 #include <algorithm>
+#include <cmath>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -29,9 +31,15 @@ std::vector<ObjectId> inputs(const Parameters& parameters)
             }
             return ids;
         },
-        [](const geometry::Sketch& p) { return p.support ? std::vector{p.support->body} : std::vector<ObjectId>{}; },
+        [](const geometry::Sketch& p) {
+            return p.support ? std::vector{p.support->body} : p.datumPlane ? std::vector{p.datumPlane} : std::vector<ObjectId>{};
+        },
         [](const Extrude& p) { return std::vector{p.profile}; },
-        [](const Revolve& p) { return std::vector{p.profile}; },
+        [](const Revolve& p) { return p.datumAxis ? std::vector{p.profile, p.datumAxis} : std::vector{p.profile}; },
+        [](const Sweep& p) { return std::vector{p.profile}; },
+        [](const Loft& p) { return p.profiles; },
+        [](const Shell& p) { return std::vector{p.body}; },
+        [](const DraftAngle& p) { return std::vector{p.body}; },
         [](const Boolean& p) { return std::vector{p.first, p.second}; },
         [](const Hole& p) { return std::vector{p.body}; },
         [](const EdgeTreatment& p) { return std::vector{p.body}; },
@@ -50,7 +58,7 @@ const Object& objectAt(const std::vector<Object>& state, ObjectId id)
 
 void requireBody(const Object& object)
 {
-    if (std::holds_alternative<geometry::Sketch>(object.parameters)) {
+    if (!isBody(object.parameters)) {
         throw std::invalid_argument("Select a solid body.");
     }
 }
@@ -66,6 +74,17 @@ const geometry::Sketch& requireSketch(const Object& object)
 
 geometry::SketchContext resolveContext(const std::vector<Object>& state, const geometry::Sketch& sketch)
 {
+    if (sketch.datumPlane) {
+        if (sketch.support) {
+            throw std::invalid_argument("A sketch can use only one support.");
+        }
+        const auto& datum = objectAt(state, sketch.datumPlane);
+        const auto* plane = std::get_if<geometry::DatumPlane>(&datum.parameters);
+        if (!plane || datum.status != Status::Ready) {
+            throw std::invalid_argument("Select a valid construction plane.");
+        }
+        return {geometry::datumFrame(*plane), {}};
+    }
     if (!sketch.support) {
         return geometry::sketchContext(sketch);
     }
@@ -75,6 +94,48 @@ geometry::SketchContext resolveContext(const std::vector<Object>& state, const g
         throw std::invalid_argument("The sketch support body has an error.");
     }
     return geometry::sketchContext(sketch, body.shape);
+}
+
+void validateAdvancedInputs(const std::vector<Object>& state, const Parameters& parameters, ObjectId id)
+{
+    const auto prior = [&](ObjectId source) -> const Object& {
+        if (source >= id) {
+            throw std::invalid_argument("An input must precede its operation.");
+        }
+        return objectAt(state, source);
+    };
+    const auto validateAxis = [&](ObjectId source) {
+        if (source && !std::holds_alternative<geometry::DatumAxis>(prior(source).parameters)) {
+            throw std::invalid_argument("Select a construction axis.");
+        }
+    };
+    std::visit(Visit{
+        [&](const geometry::Sketch& p) {
+            if (p.datumPlane && (p.support || !std::holds_alternative<geometry::DatumPlane>(prior(p.datumPlane).parameters))) {
+                throw std::invalid_argument("Select a valid construction plane.");
+            }
+            if (p.support) {
+                requireBody(prior(p.support->body));
+            }
+        },
+        [&](const Revolve& p) { validateAxis(p.datumAxis); },
+        [&](const Sweep& p) { requireSketch(prior(p.profile)); },
+        [&](const Loft& p) {
+            if (p.profiles.size() < 2 || p.profiles.size() > 32) {
+                throw std::invalid_argument("Select two to 32 ordered loft sections.");
+            }
+            std::set<ObjectId> ids;
+            for (auto profile : p.profiles) {
+                requireSketch(prior(profile));
+                if (!ids.insert(profile).second) {
+                    throw std::invalid_argument("Select each loft section once.");
+                }
+            }
+        },
+        [&](const Shell& p) { requireBody(prior(p.body)); },
+        [&](const DraftAngle& p) { requireBody(prior(p.body)); },
+        [](const auto&) {}
+    }, parameters);
 }
 
 TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters)
@@ -88,8 +149,12 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         },
         [&state](const Revolve& p) {
             const auto& profile = objectAt(state, p.profile);
-            return geometry::revolve(TopoDS::Face(profile.shape), resolveContext(state, requireSketch(profile)).frame,
-                                     p.axis, p.offset, p.angle);
+            auto frame = resolveContext(state, requireSketch(profile)).frame;
+            if (p.datumAxis) {
+                frame = geometry::rotationFrame(std::get<geometry::DatumAxis>(objectAt(state, p.datumAxis).parameters), frame);
+                return geometry::revolve(TopoDS::Face(profile.shape), frame, geometry::Axis::U, 0, p.angle);
+            }
+            return geometry::revolve(TopoDS::Face(profile.shape), frame, p.axis, p.offset, p.angle);
         },
         [&state](const Boolean& p) {
             return geometry::booleanResult(objectAt(state, p.first).shape,
@@ -99,7 +164,9 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
             return geometry::drillHole(objectAt(state, p.body).shape, p.face, p.size);
         },
         [&state](const EdgeTreatment& p) {
-            return geometry::treatEdge(objectAt(state, p.body).shape, p.edge, p.kind, p.size);
+            auto edges = p.additionalEdges;
+            edges.insert(edges.begin(), p.edge);
+            return geometry::treatEdges(objectAt(state, p.body).shape, edges, p.kind, p.size);
         },
         [&state](const Transform& p) {
             return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
@@ -112,6 +179,21 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
             }
             return geometry::makeAssembly(bodies);
         },
+        [](const geometry::DatumPlane& p) { return geometry::datumOutline(p); },
+        [](const geometry::DatumAxis& p) { return geometry::datumOutline(p); },
+        [&state](const Sweep& p) {
+            const auto& sketch = objectAt(state, p.profile);
+            return geometry::sweepProfile(TopoDS::Face(sketch.shape), resolveContext(state, requireSketch(sketch)).frame, p.path);
+        },
+        [&state](const Loft& p) {
+            std::vector<TopoDS_Face> sections;
+            for (const auto id : p.profiles) {
+                sections.push_back(TopoDS::Face(objectAt(state, id).shape));
+            }
+            return geometry::loftProfiles(sections, p.ruled);
+        },
+        [&state](const Shell& p) { return geometry::shellBody(objectAt(state, p.body).shape, p.openings, p.thickness); },
+        [&state](const DraftAngle& p) { return geometry::draftBody(objectAt(state, p.body).shape, p.neutral, p.walls, p.degrees); },
         [](const Imported& imported) {
             if (imported.sourceShape.IsNull() || !TopExp_Explorer(imported.sourceShape, TopAbs_SOLID).More()
                 || !BRepCheck_Analyzer(imported.sourceShape).IsValid()) {
@@ -123,6 +205,20 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
 }
 
 }  // namespace
+
+bool isBody(const Parameters& parameters)
+{
+    return !std::holds_alternative<geometry::Sketch>(parameters)
+        && !std::holds_alternative<geometry::DatumPlane>(parameters)
+        && !std::holds_alternative<geometry::DatumAxis>(parameters);
+}
+
+bool isAdvanced(const Parameters& parameters)
+{
+    return std::holds_alternative<geometry::DatumPlane>(parameters) || std::holds_alternative<geometry::DatumAxis>(parameters)
+        || std::holds_alternative<Sweep>(parameters) || std::holds_alternative<Loft>(parameters)
+        || std::holds_alternative<Shell>(parameters) || std::holds_alternative<DraftAngle>(parameters);
+}
 
 ObjectId Document::addPrimitive(geometry::Primitive kind)
 {
@@ -152,6 +248,7 @@ bool Document::editSketch(ObjectId id, geometry::Sketch sketch)
     if (original == sketch) {
         return false;
     }
+    validateAdvancedInputs(objects_, Parameters(sketch), id);
     if (sketch.support) {
         if (sketch.support->body >= id) {
             throw std::invalid_argument("A sketch support must precede the sketch.");
@@ -174,10 +271,10 @@ ObjectId Document::addExtrude(ObjectId profile, double distance)
     return append(Extrude{profile, distance});
 }
 
-ObjectId Document::addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle)
+ObjectId Document::addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle, ObjectId datumAxis)
 {
     requireSketch(objectAt(objects_, profile));
-    return append(Revolve{profile, axis, offset, angle});
+    return append(Revolve{profile, axis, offset, angle, datumAxis});
 }
 
 ObjectId Document::addBoolean(ObjectId first, ObjectId second, geometry::BooleanOperation operation)
@@ -186,7 +283,7 @@ ObjectId Document::addBoolean(ObjectId first, ObjectId second, geometry::Boolean
         throw std::invalid_argument("Choose two different bodies.");
     }
     for (const auto id : {first, second}) {
-        if (std::holds_alternative<geometry::Sketch>(objectAt(objects_, id).parameters)) {
+        if (!isBody(objectAt(objects_, id).parameters)) {
             throw std::invalid_argument("Choose bodies rather than sketches.");
         }
     }
@@ -211,6 +308,71 @@ ObjectId Document::addEdgeTreatment(ObjectId body, geometry::EdgeReference edge,
     return append(EdgeTreatment{body, edge, kind, size});
 }
 
+ObjectId Document::addEdgeTreatment(ObjectId body, std::vector<geometry::EdgeReference> edges,
+                                    geometry::EdgeTreatmentKind kind, double size)
+{
+    requireBody(objectAt(objects_, body));
+    if (edges.empty() || edges.size() > 64) {
+        throw std::invalid_argument("Select between one and 64 edges.");
+    }
+    return append(EdgeTreatment{body, edges.front(), kind, size, {edges.begin() + 1, edges.end()}});
+}
+
+ObjectId Document::addAdvanced(Parameters parameters)
+{
+    if (!isAdvanced(parameters)) {
+        throw std::invalid_argument("Choose an advanced modeling operation.");
+    }
+    return append(std::move(parameters));
+}
+
+bool Document::editAdvanced(ObjectId id, Parameters parameters)
+{
+    const auto& before = objectAt(objects_, id).parameters;
+    if (!isAdvanced(parameters) || before.index() != parameters.index()) {
+        throw std::invalid_argument("Choose the matching advanced modeling operation.");
+    }
+    if (std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, geometry::DatumPlane> || std::is_same_v<T, geometry::DatumAxis>
+            || std::is_same_v<T, Sweep> || std::is_same_v<T, Loft> || std::is_same_v<T, Shell>
+            || std::is_same_v<T, DraftAngle>) {
+            return value == std::get<T>(before);
+        }
+        return false;
+    }, parameters)) {
+        return false;
+    }
+    // Keep the operation's dependencies and visibility rules stable while editing it.
+    const auto currentInputs = inputs(parameters);
+    const auto oldInputs = inputs(before);
+    if (!std::is_permutation(currentInputs.begin(), currentInputs.end(), oldInputs.begin(), oldInputs.end())) {
+        throw std::invalid_argument("Edit the parameters of the original inputs.");
+    }
+    validateAdvancedInputs(objects_, parameters, id);
+    auto next = objects_;
+    next[id - 1].parameters = std::move(parameters);
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::setDensity(ObjectId id, std::optional<double> density)
+{
+    const auto& object = objectAt(objects_, id);
+    requireBody(object);
+    if (density && (!std::isfinite(*density) || *density <= 0 || *density > 1.e9)) {
+        throw std::invalid_argument("Enter a positive material density.");
+    }
+    if (object.densityKgM3 == density) {
+        return false;
+    }
+    auto next = objects_;
+    next[id - 1].densityKgM3 = density;
+    commit(std::move(next));
+    return true;
+}
+
 ObjectId Document::addTransform(ObjectId body, geometry::BodyTransform parameters)
 {
     requireBody(objectAt(objects_, body));
@@ -233,6 +395,11 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
     for (auto& definition : definitions) {
         const auto id = static_cast<ObjectId>(records.size() + 1);
         const auto& parameters = definition.parameters;
+        validateAdvancedInputs(records, parameters, id);
+        if (definition.densityKgM3 && (!isBody(parameters) || !std::isfinite(*definition.densityKgM3)
+            || *definition.densityKgM3 <= 0 || *definition.densityKgM3 > 1.e9)) {
+            throw std::invalid_argument("Invalid saved material density.");
+        }
         const auto requirePrior = [&records](ObjectId source) -> const Object& {
             return objectAt(records, source);
         };
@@ -257,19 +424,19 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
             }
         } else if (const auto* boolean = std::get_if<Boolean>(&parameters)) {
             if (boolean->first == boolean->second
-                || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->first).parameters)
-                || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->second).parameters)) {
+                || !isBody(requirePrior(boolean->first).parameters)
+                || !isBody(requirePrior(boolean->second).parameters)) {
                 throw std::invalid_argument("Invalid references in a boolean operation.");
             }
         }
-        records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible});
+        records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible, definition.densityKgM3});
     }
     rebuild(records, 0, true);
     for (const auto& object : records) {
         if (object.status != Status::Ready
             && (std::holds_alternative<Primitive>(object.parameters)
                 || (std::holds_alternative<geometry::Sketch>(object.parameters)
-                    && !std::get<geometry::Sketch>(object.parameters).support)
+                    && !std::get<geometry::Sketch>(object.parameters).support && !std::get<geometry::Sketch>(object.parameters).datumPlane)
                 || std::holds_alternative<Imported>(object.parameters))) {
             throw std::invalid_argument("Object #" + std::to_string(object.id) + ": " + object.error);
         }
@@ -281,14 +448,17 @@ ObjectId Document::append(Parameters parameters)
 {
     auto next = objects_;
     const auto id = static_cast<ObjectId>(next.size() + 1);
+    validateAdvancedInputs(objects_, parameters, id);
     next.push_back({id, std::move(parameters), {}, Status::Ready, {}, true});
     rebuild(next, next.size() - 1);
     if (next.back().status != Status::Ready) {
         throw std::invalid_argument(next.back().error);
     }
-    if (!std::holds_alternative<geometry::Sketch>(next.back().parameters)) {
+    if (isBody(next.back().parameters)) {
         for (const auto input : inputs(next.back().parameters)) {
-            next[input - 1].visible = false;
+            if (!std::holds_alternative<geometry::DatumAxis>(next[input - 1].parameters)) {
+                next[input - 1].visible = false;
+            }
         }
     }
     commit(std::move(next));
@@ -311,17 +481,19 @@ bool Document::editExtrude(ObjectId id, double distance)
     return true;
 }
 
-bool Document::editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle)
+bool Document::editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle, std::optional<ObjectId> datumAxis)
 {
     const auto* operation = std::get_if<Revolve>(&objectAt(objects_, id).parameters);
     if (!operation) {
         throw std::invalid_argument("Select a Revolve operation.");
     }
-    if (operation->axis == axis && operation->offset == offset && operation->angle == angle) {
+    const auto reference = datumAxis.value_or(operation->datumAxis);
+    if (operation->axis == axis && operation->offset == offset && operation->angle == angle && reference == operation->datumAxis) {
         return false;
     }
     auto next = objects_;
-    next[id - 1].parameters = Revolve{operation->profile, axis, offset, angle};
+    next[id - 1].parameters = Revolve{operation->profile, axis, offset, angle, reference};
+    validateAdvancedInputs(objects_, next[id - 1].parameters, id);
     rebuild(next, id - 1);
     commit(std::move(next));
     return true;

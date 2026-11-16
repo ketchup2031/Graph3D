@@ -13,7 +13,7 @@ namespace graph3d::document { class Document; }
 namespace graph3d {
 
 enum class ViewDirection { Front, Top, Right, Isometric };
-enum class SubshapePick { Face, Edge, SketchFace };
+enum class SubshapePick { Face, Edge, SketchFace, EdgeSet, Vertex };
 
 class Viewport final : public QWidget {
     Q_OBJECT
@@ -40,12 +40,15 @@ signals:
     void objectSelected(int id);
     void facePicked(int id, const geometry::FaceReference& face);
     void edgePicked(int id, const geometry::EdgeReference& edge);
+    void vertexPicked(int id, const geometry::Point3& point);
+    void edgeSetFinished();
     void subshapePickCancelled();
 
 protected:
     QPaintEngine* paintEngine() const override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;

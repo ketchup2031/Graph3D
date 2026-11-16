@@ -38,7 +38,7 @@ TopoDS_Shape visibleSolids(const document::Document& document)
     builder.MakeCompound(group);
     bool hasBody = false;
     for (const auto& object : document.objects()) {
-        if (!object.visible || std::holds_alternative<geometry::Sketch>(object.parameters)) {
+        if (!object.visible || !document::isBody(object.parameters)) {
             continue;
         }
         if (object.status != document::Status::Ready || object.shape.IsNull()) {

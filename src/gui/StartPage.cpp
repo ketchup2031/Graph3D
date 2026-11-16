@@ -137,7 +137,7 @@ public:
                 const auto document = io::openProject(QString::fromLatin1(examples[index].path));
                 for (const auto& object : document.objects()) {
                     if (object.visible && object.status == document::Status::Ready
-                        && !std::holds_alternative<geometry::Sketch>(object.parameters)) {
+                        && document::isBody(object.parameters)) {
                         projections_[index] = drawing::project(object.shape);
                         break;
                     }

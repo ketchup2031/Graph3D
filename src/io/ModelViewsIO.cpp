@@ -240,7 +240,7 @@ QByteArray currentModelDigest(const QString& path)
 bool canProjectBody(const document::Object& item)
 {
     return item.status == document::Status::Ready && !item.shape.IsNull()
-        && !std::holds_alternative<geometry::Sketch>(item.parameters);
+        && document::isBody(item.parameters);
 }
 
 ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<SectionSettings> cut,

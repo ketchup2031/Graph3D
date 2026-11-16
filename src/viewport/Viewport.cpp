@@ -5,6 +5,8 @@
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <BRep_Tool.hxx>
+#include <QKeyEvent>
 #include <Aspect_DisplayConnection.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -161,22 +163,24 @@ void Viewport::syncDocument(const document::Document& document)
                 }
                 continue;
             }
-            const bool sketch = std::holds_alternative<geometry::Sketch>(record.parameters);
-            const auto color = sketch ? Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB)
-                                      : Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB);
+            const bool wire = !document::isBody(record.parameters);
+            const auto color = std::holds_alternative<geometry::Sketch>(record.parameters)
+                ? Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB)
+                : wire ? Quantity_Color(0.87, 0.65, 0.23, Quantity_TOC_sRGB)
+                       : Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB);
             if (object.IsNull()) {
                 object = new AIS_Shape(record.shape);
                 object->SetColor(color);
-                object->SetWidth(sketch ? 2.0 : 1.0);
+                object->SetWidth(wire ? 2.0 : 1.0);
             } else if (!object->Shape().IsSame(record.shape)) {
                 object->SetShape(record.shape);
                 object->SetColor(color);
-                object->SetWidth(sketch ? 2.0 : 1.0);
+                object->SetWidth(wire ? 2.0 : 1.0);
                 scene_->context->Redisplay(object, false);
             }
             const bool displayed = scene_->context->IsDisplayed(object);
             if (record.visible && !displayed) {
-                scene_->context->Display(object, sketch ? AIS_WireFrame : AIS_Shaded, 0, false);
+                scene_->context->Display(object, wire ? AIS_WireFrame : AIS_Shaded, 0, false);
             } else if (!record.visible && displayed) {
                 scene_->context->Erase(object, false);
             }
@@ -254,11 +258,12 @@ bool Viewport::beginSubshapePick(int id, SubshapePick mode)
         scene_->pickId = id;
         scene_->pickMode = mode;
         scene_->oldBoundary = object->Attributes()->FaceBoundaryDraw();
-        if (mode == SubshapePick::Edge) {
+        const bool edges = mode == SubshapePick::Edge || mode == SubshapePick::EdgeSet;
+        if (edges) {
             object->Attributes()->SetFaceBoundaryDraw(true);
             scene_->context->Redisplay(object, false);
         }
-        const auto type = mode == SubshapePick::Edge ? TopAbs_EDGE : TopAbs_FACE;
+        const auto type = edges ? TopAbs_EDGE : mode == SubshapePick::Vertex ? TopAbs_VERTEX : TopAbs_FACE;
         scene_->context->Activate(object, AIS_Shape::SelectionMode(type));
         scene_->context->UpdateCurrentViewer();
         setCursor(Qt::CrossCursor);
@@ -280,7 +285,8 @@ void Viewport::endSubshapePick()
     unsetCursor();
     scene_->context->ClearDetected(false);
     scene_->context->Deactivate(object);
-    if (scene_->pickMode == SubshapePick::Edge) {
+    scene_->context->ClearSelected(false);
+    if (scene_->pickMode == SubshapePick::Edge || scene_->pickMode == SubshapePick::EdgeSet) {
         object->Attributes()->SetFaceBoundaryDraw(scene_->oldBoundary);
         scene_->context->Redisplay(object, false);
     }
@@ -307,7 +313,11 @@ void Viewport::pickSubshape(const QPoint& point)
     if (owner->HasLocation()) {
         shape = shape.Located(owner->Location() * shape.Location());
     }
-    if (scene_->pickMode != SubshapePick::Edge && shape.ShapeType() == TopAbs_FACE) {
+    if (scene_->pickMode == SubshapePick::Vertex && shape.ShapeType() == TopAbs_VERTEX) {
+        const auto p = BRep_Tool::Pnt(TopoDS::Vertex(shape));
+        emit vertexPicked(id, {p.X(), p.Y(), p.Z()});
+    } else if ((scene_->pickMode == SubshapePick::Face || scene_->pickMode == SubshapePick::SketchFace)
+               && shape.ShapeType() == TopAbs_FACE) {
         geometry::Point3 origin;
         geometry::Point3 ray;
         scene_->view->ConvertWithProj(point.x(), point.y(), origin[0], origin[1], origin[2],
@@ -315,12 +325,17 @@ void Viewport::pickSubshape(const QPoint& point)
         const auto reference = geometry::locateHole(TopoDS::Face(shape), origin, ray, scene_->pickMode == SubshapePick::SketchFace);
         endSubshapePick();
         emit facePicked(id, reference);
-    } else if (scene_->pickMode == SubshapePick::Edge && shape.ShapeType() == TopAbs_EDGE) {
+    } else if ((scene_->pickMode == SubshapePick::Edge || scene_->pickMode == SubshapePick::EdgeSet)
+               && shape.ShapeType() == TopAbs_EDGE) {
         const auto reference = geometry::referenceEdge(TopoDS::Edge(shape));
-        endSubshapePick();
+        if (scene_->pickMode == SubshapePick::EdgeSet) {
+            scene_->context->AddOrRemoveSelected(owner, true);
+        } else {
+            endSubshapePick();
+        }
         emit edgePicked(id, reference);
     } else {
-        throw std::invalid_argument("Click the requested face or edge.");
+        throw std::invalid_argument("Click the requested face, edge or vertex.");
     }
 }
 
@@ -404,6 +419,22 @@ void Viewport::resizeEvent(QResizeEvent* event)
 QPoint Viewport::pixels(const QPointF& logicalPosition) const
 {
     return (logicalPosition * devicePixelRatioF()).toPoint();
+}
+
+void Viewport::keyPressEvent(QKeyEvent* event)
+{
+    if (scene_->pickId && event->key() == Qt::Key_Escape) {
+        event->accept();
+        cancelSubshapePick();
+        return;
+    }
+    if (scene_->pickId && scene_->pickMode == SubshapePick::EdgeSet
+        && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+        event->accept();
+        emit edgeSetFinished();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void Viewport::mousePressEvent(QMouseEvent* event)

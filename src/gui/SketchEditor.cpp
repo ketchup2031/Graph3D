@@ -903,6 +903,8 @@ void SketchEditor::begin(const geometry::Sketch& sketch, std::vector<geometry::S
     }
     if (sketch.support) {
         planeLabel_->setText(tr("Face of body #%1").arg(sketch.support->body));
+    } else if (sketch.datumPlane) {
+        planeLabel_->setText(tr("Construction plane #%1").arg(sketch.datumPlane));
     }
     feedback_->setText(tr("Two clicks per shape. Middle drag pans and the wheel zooms."));
     canvas_->setFocus();

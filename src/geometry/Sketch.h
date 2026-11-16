@@ -57,6 +57,7 @@ struct Sketch {
     std::vector<SketchEntity> entities;
     std::vector<SketchConstraint> constraints;
     std::optional<SketchSupport> support;
+    int datumPlane = 0;
     bool operator==(const Sketch&) const = default;
 };
 

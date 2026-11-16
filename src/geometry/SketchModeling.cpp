@@ -127,6 +127,9 @@ TopoDS_Shape applyBoolean(const TopoDS_Shape& first, const TopoDS_Shape& second)
 
 SketchContext sketchContext(const Sketch& sketch, const TopoDS_Shape& support)
 {
+    if (sketch.datumPlane) {
+        throw std::invalid_argument("Select a valid construction plane.");
+    }
     if (!sketch.support) {
         return {cardinalFrame(sketch.plane), {}};
     }

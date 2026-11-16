@@ -7,6 +7,8 @@
 
 #include <QAction>
 #include <QListWidget>
+#include <QPlainTextEdit>
+#include <QStatusBar>
 #include <QAbstractButton>
 #include <array>
 #include <QApplication>
@@ -1454,6 +1456,86 @@ private slots:
         QVERIFY(source->text(2).isEmpty());
     }
 
+    void advancedModelingThroughMenus()
+    {
+        using namespace graph3d;
+        MainWindow window;
+        window.resize(1050, 720);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* viewport = window.findChild<Viewport*>();
+        auto* editor = window.findChild<SketchEditor*>();
+        QVERIFY(tree && viewport && editor);
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        const auto nextDialog = [](const char* name, std::function<void(QDialog*)> change = {}) {
+            QTimer::singleShot(0, [name, change] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (dialog && dialog->objectName() == QLatin1String(name)) {
+                    if (change) {
+                        change(dialog);
+                    }
+                    auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                    buttons->button(QDialogButtonBox::Ok)->click();
+                    if (dialog->isVisible()) {
+                        dialog->reject();
+                    }
+                } else if (dialog) {
+                    dialog->reject();
+                }
+            });
+        };
+        auto* cube = tree->topLevelItem(0);
+        tree->setCurrentItem(cube);
+        nextDialog("advancedFeatureDialog", [](QDialog* dialog) {
+            dialog->findChild<QListWidget*>("operationFaces")->item(0)->setCheckState(Qt::Checked);
+            dialog->findChild<QDoubleSpinBox*>("advancedValue")->setValue(4);
+        });
+        action("makeShell")->trigger();
+        QCOMPARE(cube->childCount(), 1);
+        auto* shell = cube->child(0);
+        QVERIFY(shell->text(0).startsWith("Shell") && shell->text(1).contains("4 mm"));
+        nextDialog("advancedFeatureDialog", [](QDialog* dialog) {
+            dialog->findChild<QDoubleSpinBox*>("advancedValue")->setValue(6);
+        });
+        action("editAdvancedFeature")->trigger();
+        QVERIFY(shell->text(1).contains("6 mm") && shell->text(2).isEmpty());
+        bool sawMass = false;
+        nextDialog("bodyMeasuresDialog", [&sawMass](QDialog* dialog) {
+            dialog->findChild<QDoubleSpinBox*>("materialDensity")->setValue(7850);
+            const auto labels = dialog->findChildren<QLabel*>();
+            sawMass = std::ranges::any_of(labels, [](const QLabel* label) { return label->text() == "2.1357024"; });
+        });
+        action("measureBody")->trigger();
+        QVERIFY(sawMass);
+        action("undoDocument")->trigger();
+        action("undoDocument")->trigger();
+        QVERIFY(shell->text(1).contains("4 mm"));
+
+        nextDialog("advancedFeatureDialog");
+        action("makeDatumPlane")->trigger();
+        auto* plane = tree->currentItem();
+        QVERIFY(plane && plane->text(0).startsWith("Construction plane"));
+        QVERIFY(!action("measureBody")->isEnabled());
+        action("newSketchOnDatum")->trigger();
+        QVERIFY(editor->isVisible() && editor->sketch().datumPlane == 3);
+        editor->findChild<QPushButton*>("sketchCircle")->click();
+        auto* canvas = editor->findChild<QWidget*>("sketchCanvas");
+        const QPoint origin(canvas->width() / 2, canvas->height() / 2);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, origin);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, origin + QPoint(15, 0));
+        editor->findChild<QPushButton*>("sketchFinish")->click();
+        QCOMPARE(plane->childCount(), 1);
+        nextDialog("advancedFeatureDialog", [](QDialog* dialog) {
+            dialog->findChild<QPlainTextEdit*>("sweepPath")->setPlainText("0 0 0\n0 0 40\n50 0 40");
+        });
+        action("makeSweep")->trigger();
+        QCOMPARE(plane->child(0)->childCount(), 1);
+        auto* sweep = plane->child(0)->child(0);
+        QVERIFY(sweep->text(0).startsWith("Sweep") && sweep->text(2).isEmpty());
+    }
+
     void machineSelectedFaceAndEdges()
     {
         graph3d::MainWindow window;
@@ -1573,6 +1655,96 @@ private slots:
             QCOMPARE(cube->childCount(), 0);
             QCOMPARE(cube->checkState(0), Qt::Checked);
         }
+    }
+
+    void pickAndTreatMultipleEdges()
+    {
+        graph3d::MainWindow window;
+        window.resize(960, 680);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* viewport = window.findChild<graph3d::Viewport*>();
+        auto* cube = tree->topLevelItem(0);
+        tree->setCurrentItem(cube);
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        action("viewTop")->trigger();
+        action("fitScene")->trigger();
+        action("makeMultiFillet")->trigger();
+        const auto pixels = frame(viewport);
+        QVERIFY(!pixels.isNull());
+        const auto center = viewport->rect().center();
+        const QColor fill = pixels.pixelColor(center);
+        const auto similar = [&](int y) {
+            const auto c = pixels.pixelColor(center.x(), y);
+            return std::abs(c.red() - fill.red()) + std::abs(c.green() - fill.green())
+                + std::abs(c.blue() - fill.blue()) <= 25;
+        };
+        int top = 1, bottom = viewport->height() - 2;
+        while (top < center.y() && !similar(top)) {
+            ++top;
+        }
+        while (bottom > center.y() && !similar(bottom)) {
+            --bottom;
+        }
+        QVERIFY(top < center.y() - 10 && bottom > center.y() + 10);
+        int left = 1, right = viewport->width() - 2;
+        const auto matchFill = [&](int x) {
+            const auto c = pixels.pixelColor(x, center.y());
+            return std::abs(c.red() - fill.red()) + std::abs(c.green() - fill.green())
+                + std::abs(c.blue() - fill.blue()) <= 25;
+        };
+        while (left < center.x() && !matchFill(left)) {
+            ++left;
+        }
+        while (right > center.x() && !matchFill(right)) {
+            --right;
+        }
+        QVERIFY(left < center.x() - 10 && right > center.x() + 10);
+        const auto click = [&](int y, int count) {
+            const auto message = QStringLiteral("Selected edges: %1.").arg(count);
+            for (int offset : {-1, 0, -2, 1, -3, 2, -4, 3}) {
+                QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(center.x(), y + offset));
+                if (window.statusBar()->currentMessage().startsWith(message)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        QVERIFY(click(top, 1));
+        QVERIFY(click(bottom, 2));
+        QVERIFY(action("finishEdgeSet")->isEnabled());
+        QTimer::singleShot(0, [] {
+            if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                dialog->setDoubleValue(3);
+                dialog->accept();
+            }
+        });
+        QTest::keyClick(viewport, Qt::Key_Return);
+        QVERIFY2(cube->childCount() == 1, qPrintable(window.statusBar()->currentMessage()));
+        QVERIFY(cube->child(0)->text(1).contains("2 edges"));
+        action("undoDocument")->trigger();
+        tree->setCurrentItem(cube);
+        action("viewTop")->trigger();
+        action("fitScene")->trigger();
+        action("measureVertices")->trigger();
+        const auto pickVertex = [&](int x, const QString& result) {
+            for (int dx : {-2, 0, 2, -4, 4}) {
+                for (int dy : {-2, 0, 2, -4, 4}) {
+                    QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(x + dx, top + dy));
+                    if (window.statusBar()->currentMessage() == result) {
+                        return true;
+                    }
+                    if (window.statusBar()->currentMessage().startsWith("Vertex distance:")) {
+                        return false;
+                    }
+                }
+            }
+            return false;
+        };
+        QVERIFY(pickVertex(left, "Pick the second vertex on the selected body."));
+        QVERIFY(pickVertex(right, "Vertex distance: 100 mm"));
     }
 private:
     QTemporaryDir settingsDir_;

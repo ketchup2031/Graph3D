@@ -27,6 +27,7 @@ constexpr int featureVersion = 2;
 constexpr int transformVersion = 3;
 constexpr int assemblyVersion = 4;
 constexpr int sketchVersion = 5;
+constexpr int advancedVersion = 6;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -184,6 +185,66 @@ geometry::Point3 decodePoint3(const QJsonValue& value)
     return {number(coordinates.at(0), "x"), number(coordinates.at(1), "y"), number(coordinates.at(2), "z")};
 }
 
+QJsonObject encodeFace(const geometry::FaceReference& face)
+{
+    return {{"point", encodePoint3(face.center)}, {"normal", encodePoint3(face.outward)}};
+}
+
+geometry::FaceReference decodeFace(const QJsonValue& value)
+{
+    const auto object = value.toObject();
+    return {decodePoint3(object.value("point")), decodePoint3(object.value("normal"))};
+}
+
+QJsonObject encodeEdge(const geometry::EdgeReference& edge)
+{
+    QJsonArray samples;
+    for (const auto& point : edge.samples) {
+        samples.append(encodePoint3(point));
+    }
+    return {{"curveType", edge.curveType}, {"samples", samples}};
+}
+
+geometry::EdgeReference decodeEdge(const QJsonValue& value)
+{
+    const auto object = value.toObject();
+    const auto samples = object.value("samples").toArray();
+    geometry::EdgeReference edge{};
+    edge.curveType = signedInteger(object.value("curveType"), "curveType");
+    if (edge.curveType < 0 || edge.curveType > 8 || samples.size() != static_cast<qsizetype>(edge.samples.size())) {
+        fileError(QStringLiteral("Invalid edge reference."));
+    }
+    for (std::size_t i = 0; i < edge.samples.size(); ++i) {
+        edge.samples[i] = decodePoint3(samples.at(static_cast<qsizetype>(i)));
+    }
+    return edge;
+}
+
+template<class T, class Encoder>
+QJsonArray encodeList(const std::vector<T>& values, Encoder encode)
+{
+    QJsonArray result;
+    for (const auto& value : values) {
+        result.append(encode(value));
+    }
+    return result;
+}
+
+template<class Decoder>
+auto decodeList(const QJsonValue& value, qsizetype min, qsizetype max, Decoder decode)
+{
+    const auto array = value.toArray();
+    if (!value.isArray() || array.size() < min || array.size() > max) {
+        fileError(QStringLiteral("Invalid advanced operation inputs."));
+    }
+    std::vector<decltype(decode(QJsonValue{}))> result;
+    result.reserve(static_cast<std::size_t>(array.size()));
+    for (const auto element : array) {
+        result.push_back(decode(element));
+    }
+    return result;
+}
+
 QJsonArray encodeSketchRef(geometry::SketchRef ref)
 {
     return {ref.entity, ref.part};
@@ -269,6 +330,9 @@ QJsonObject encodeObject(const document::Object& object)
                 entities.append(encodeEntity(entity));
             }
             QJsonObject sketch{{"type", "sketch"}, {"plane", name(item.plane, planes)}, {"entities", entities}};
+            if (item.datumPlane) {
+                sketch.insert("datumPlane", item.datumPlane);
+            }
             if (item.support) {
                 sketch.insert("support", QJsonObject{{"body", item.support->body},
                     {"point", encodePoint3(item.support->face.center)}, {"normal", encodePoint3(item.support->face.outward)}});
@@ -284,8 +348,12 @@ QJsonObject encodeObject(const document::Object& object)
         } else if constexpr (std::is_same_v<Type, document::Extrude>) {
             return {{"type", "extrude"}, {"profile", item.profile}, {"distance", encodeNumber(item.distance)}};
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
-            return {{"type", "revolve"}, {"profile", item.profile}, {"axis", name(item.axis, axes)},
-                    {"offset", encodeNumber(item.offset)}, {"angle", encodeNumber(item.angle)}};
+            QJsonObject result{{"type", "revolve"}, {"profile", item.profile}, {"axis", name(item.axis, axes)},
+                               {"offset", encodeNumber(item.offset)}, {"angle", encodeNumber(item.angle)}};
+            if (item.datumAxis) {
+                result.insert("datumAxis", item.datumAxis);
+            }
+            return result;
         } else if constexpr (std::is_same_v<Type, document::Boolean>) {
             return {{"type", "boolean"}, {"first", item.first}, {"second", item.second},
                     {"operation", name(item.operation, operations)}};
@@ -294,12 +362,29 @@ QJsonObject encodeObject(const document::Object& object)
                     {"outward", encodePoint3(item.face.outward)}, {"diameter", encodeNumber(item.size.diameter)},
                     {"depth", encodeNumber(item.size.depth)}, {"through", item.size.through}};
         } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
-            QJsonArray samples;
-            for (const auto& point : item.edge.samples) {
-                samples.append(encodePoint3(point));
+            auto result = encodeEdge(item.edge);
+            result.insert("type", "edge-treatment");
+            result.insert("body", item.body);
+            result.insert("kind", name(item.kind, treatments));
+            result.insert("size", encodeNumber(item.size));
+            if (!item.additionalEdges.empty()) {
+                result.insert("additionalEdges", encodeList(item.additionalEdges, encodeEdge));
             }
-            return {{"type", "edge-treatment"}, {"body", item.body}, {"kind", name(item.kind, treatments)},
-                    {"size", encodeNumber(item.size)}, {"curveType", item.edge.curveType}, {"samples", samples}};
+            return result;
+        } else if constexpr (std::is_same_v<Type, geometry::DatumPlane>) {
+            return {{"type", "datum-plane"}, {"origin", encodePoint3(item.origin)}, {"normal", encodePoint3(item.normal)}};
+        } else if constexpr (std::is_same_v<Type, geometry::DatumAxis>) {
+            return {{"type", "datum-axis"}, {"origin", encodePoint3(item.origin)}, {"direction", encodePoint3(item.direction)}};
+        } else if constexpr (std::is_same_v<Type, document::Sweep>) {
+            return {{"type", "sweep"}, {"profile", item.profile}, {"path", encodeList(item.path, encodePoint3)}};
+        } else if constexpr (std::is_same_v<Type, document::Loft>) {
+            return {{"type", "loft"}, {"profiles", encodeList(item.profiles, [](int id) { return id; })}, {"ruled", item.ruled}};
+        } else if constexpr (std::is_same_v<Type, document::Shell>) {
+            return {{"type", "shell"}, {"body", item.body}, {"openings", encodeList(item.openings, encodeFace)},
+                    {"thickness", encodeNumber(item.thickness)}};
+        } else if constexpr (std::is_same_v<Type, document::DraftAngle>) {
+            return {{"type", "draft-angle"}, {"body", item.body}, {"neutral", encodeFace(item.neutral)},
+                    {"walls", encodeList(item.walls, encodeFace)}, {"angle", encodeNumber(item.degrees)}};
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
             return encodeTransform(item);
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
@@ -316,12 +401,46 @@ QJsonObject encodeObject(const document::Object& object)
     }, object.parameters);
     data.insert("id", object.id);
     data.insert("visible", object.visible);
+    if (object.densityKgM3) {
+        data.insert("densityKgM3", encodeNumber(*object.densityKgM3));
+    }
     return data;
 }
 
 document::Parameters decodeObject(const QJsonObject& object, int version)
 {
     const auto type = object.value("type").toString();
+    if (version < advancedVersion && (object.contains("datumPlane") || object.contains("datumAxis")
+        || object.contains("additionalEdges") || object.contains("densityKgM3"))) {
+        fileError(QStringLiteral("This model requires project format version 6."));
+    }
+    if (version >= advancedVersion) {
+        if (type == "datum-plane") {
+            return geometry::DatumPlane{decodePoint3(object.value("origin")), decodePoint3(object.value("normal"))};
+        }
+        if (type == "datum-axis") {
+            return geometry::DatumAxis{decodePoint3(object.value("origin")), decodePoint3(object.value("direction"))};
+        }
+        if (type == "sweep") {
+            return document::Sweep{integer(object.value("profile"), "profile"),
+                                   decodeList(object.value("path"), 2, 128, decodePoint3)};
+        }
+        if (type == "loft") {
+            if (!object.value("ruled").isBool()) {
+                fileError(QStringLiteral("Invalid loft mode."));
+            }
+            return document::Loft{decodeList(object.value("profiles"), 2, 32,
+                [](const auto& value) { return integer(value, "profile"); }), object.value("ruled").toBool()};
+        }
+        if (type == "shell") {
+            return document::Shell{integer(object.value("body"), "body"), decodeList(object.value("openings"), 1, 64, decodeFace),
+                                   number(object.value("thickness"), "thickness")};
+        }
+        if (type == "draft-angle") {
+            return document::DraftAngle{integer(object.value("body"), "body"), decodeFace(object.value("neutral")),
+                decodeList(object.value("walls"), 1, 64, decodeFace), number(object.value("angle"), "angle")};
+        }
+    }
     if (type == "primitive") {
         return document::Primitive{parseName<geometry::Primitive>(object.value("kind"), primitives, "kind"),
                                    number(object.value("x"), "x"), number(object.value("y"), "y")};
@@ -355,6 +474,9 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
                 }
             }
         }
+        if (object.contains("datumPlane")) {
+            sketch.datumPlane = integer(object.value("datumPlane"), "datumPlane");
+        }
         return sketch;
     }
     if (type == "extrude") {
@@ -364,7 +486,8 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
     if (type == "revolve") {
         return document::Revolve{integer(object.value("profile"), "profile"),
                                  parseName<geometry::Axis>(object.value("axis"), axes, "axis"),
-                                 number(object.value("offset"), "offset"), number(object.value("angle"), "angle")};
+                                 number(object.value("offset"), "offset"), number(object.value("angle"), "angle"),
+                                 object.contains("datumAxis") ? integer(object.value("datumAxis"), "datumAxis") : 0};
     }
     if (type == "boolean") {
         return document::Boolean{integer(object.value("first"), "first"), integer(object.value("second"), "second"),
@@ -380,20 +503,13 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
              object.value("through").toBool()}};
     }
     if (type == "edge-treatment" && version >= featureVersion) {
-        const auto samples = object.value("samples").toArray();
-        const auto kind = parseName<geometry::EdgeTreatmentKind>(object.value("kind"), treatments, "kind");
-        const auto curve = number(object.value("curveType"), "curveType");
-        geometry::EdgeReference edge{};
-        if (samples.size() != static_cast<qsizetype>(edge.samples.size())
-            || curve < 0 || curve > 8 || std::floor(curve) != curve) {
-            fileError(QStringLiteral("Invalid edge reference."));
+        auto result = document::EdgeTreatment{integer(object.value("body"), "body"), decodeEdge(object),
+            parseName<geometry::EdgeTreatmentKind>(object.value("kind"), treatments, "kind"),
+            number(object.value("size"), "size")};
+        if (object.contains("additionalEdges")) {
+            result.additionalEdges = decodeList(object.value("additionalEdges"), 1, 63, decodeEdge);
         }
-        edge.curveType = static_cast<int>(curve);
-        for (std::size_t i = 0; i < edge.samples.size(); ++i) {
-            edge.samples[i] = decodePoint3(samples.at(static_cast<qsizetype>(i)));
-        }
-        return document::EdgeTreatment{integer(object.value("body"), "body"), edge, kind,
-                                       number(object.value("size"), "size")};
+        return result;
     }
     if (version >= transformVersion && (type == "linear-array" || type == "polar-array")) {
         const auto body = integer(object.value("body"), "body");
@@ -443,7 +559,12 @@ void saveProject(const QString& path, const document::Document& document)
     try {
         for (const auto& object : document.objects()) {
             const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
-            if (sketch && (sketch->support || !sketch->constraints.empty())) {
+            const auto* revolution = std::get_if<document::Revolve>(&object.parameters);
+            const auto* edges = std::get_if<document::EdgeTreatment>(&object.parameters);
+            if (document::isAdvanced(object.parameters) || object.densityKgM3 || (sketch && sketch->datumPlane)
+                || (revolution && revolution->datumAxis) || (edges && !edges->additionalEdges.empty())) {
+                version = advancedVersion;
+            } else if (version < sketchVersion && sketch && (sketch->support || !sketch->constraints.empty())) {
                 version = sketchVersion;
             } else if (version < assemblyVersion && std::holds_alternative<document::Assembly>(object.parameters)) {
                 version = assemblyVersion;
@@ -484,7 +605,8 @@ document::Document decodeProject(const QByteArray& data)
     }
     const auto parsedVersion = root.value("version").toDouble();
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
-         && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion)
+         && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
+         && parsedVersion != advancedVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
@@ -502,7 +624,9 @@ document::Document decodeProject(const QByteArray& data)
                 || !object.value("visible").isBool()) {
                 fileError(QStringLiteral("Invalid object ID or visibility flag."));
             }
-            definitions.push_back({decodeObject(object, version), object.value("visible").toBool()});
+            const auto density = object.contains("densityKgM3")
+                ? std::optional(number(object.value("densityKgM3"), "densityKgM3")) : std::nullopt;
+            definitions.push_back({decodeObject(object, version), object.value("visible").toBool(), density});
         }
         return document::Document::fromDefinitions(std::move(definitions));
     } catch (const Standard_Failure& failure) {

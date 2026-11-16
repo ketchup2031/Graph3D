@@ -17,6 +17,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/SketchModeling.cpp
     src/geometry/SketchConstraints.cpp
     src/geometry/PartFeatures.cpp
+    src/geometry/AdvancedModeling.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp)
 target_compile_features(graph3d_geometry PUBLIC cxx_std_20)
@@ -27,7 +28,7 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset)
 
 add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
@@ -55,7 +56,7 @@ if(WIN32)
 endif()
 add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
-    src/gui/TransformEditor.cpp
+    src/gui/TransformEditor.cpp src/gui/AdvancedDialog.cpp
     src/gui/AssemblyDialog.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
