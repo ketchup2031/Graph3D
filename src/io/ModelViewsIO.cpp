@@ -296,6 +296,25 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
     if (object.contains("section")) {
         snapshot->section = readSection(object.value("section").toObject(), remaining);
     }
+    if (object.contains("detail")) {
+        const auto entry = object.value("detail").toObject();
+        const int source = entry.value("view").toInt(-1);
+        if (source < 0 || source > 2) {
+            invalid();
+        }
+        const auto focus = readPoint(entry.value("focus"));
+        const auto center = readPoint(entry.value("center"));
+        result.detail = drawing::DetailView{source, {focus.x, focus.y}, positive(entry.value("radius"), maxCoordinate),
+            {{center.x, center.y}, positive(entry.value("scale"), maxScale)}};
+    }
+    if (object.contains("local")) {
+        if (!snapshot->section) {
+            invalid();
+        }
+        const auto entry = object.value("local").toObject();
+        const auto focus = readPoint(entry.value("focus"));
+        result.local = drawing::LocalSection{{focus.x, focus.y}, positive(entry.value("radius"), maxCoordinate)};
+    }
     result.geometry = std::move(snapshot);
     return result;
 }
@@ -324,6 +343,30 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath)
                        {"right", writeView(views.right)}};
     if (model.geometry->section) {
         result.insert("section", writeSection(*model.geometry->section));
+    }
+    const auto validPoint = [](QPointF point) {
+        return std::isfinite(point.x()) && std::isfinite(point.y())
+            && std::abs(point.x()) <= maxCoordinate && std::abs(point.y()) <= maxCoordinate;
+    };
+    const auto validPositive = [](double value, double limit) {
+        return std::isfinite(value) && value > 0 && value <= limit;
+    };
+    if (model.detail) {
+        const auto& d = *model.detail;
+        if (d.source < 0 || d.source > 2 || !validPoint(d.center) || !validPoint(d.placement.center)
+            || !validPositive(d.radius, maxCoordinate) || !validPositive(d.placement.scale, maxScale)) {
+            invalid();
+        }
+        result.insert("detail", QJsonObject{{"view", d.source}, {"focus", writePoint({d.center.x(), d.center.y()})},
+            {"radius", d.radius}, {"center", writePoint({d.placement.center.x(), d.placement.center.y()})},
+            {"scale", d.placement.scale}});
+    }
+    if (model.local) {
+        const auto& l = *model.local;
+        if (!model.geometry->section || !validPoint(l.center) || !validPositive(l.radius, maxCoordinate)) {
+            invalid();
+        }
+        result.insert("local", QJsonObject{{"focus", writePoint({l.center.x(), l.center.y()})}, {"radius", l.radius}});
     }
     return result;
 }

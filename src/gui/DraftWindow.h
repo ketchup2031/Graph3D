@@ -5,11 +5,14 @@
 #include <QMainWindow>
 #include <QUndoStack>
 
+#include <functional>
 #include <optional>
 
 class QAction;
 class QFileSystemWatcher;
 class QLabel;
+class QTabBar;
+class QComboBox;
 
 namespace graph3d {
 
@@ -34,10 +37,20 @@ private:
     bool saveDrawing(bool saveAs);
     void exportPdf();
     void editSheet();
+    void editLayers();
+    void updateLayers();
+    void changeSheetCount(bool add);
+    void activateSheet(int index);
+    void updateSheetTabs();
+    drawing::Draft wholeDrawing() const;
+    void pushSheetEdit(const QString& name, std::function<void()> redo, std::function<void()> undo);
     void editSelected();
     void chooseModel();
     void refreshModel();
     void editModelViews();
+    void editDetail();
+    void placeSectionLine();
+    void placeLocalSection();
     void updateModelStatus(const QString& failure = {});
     void setModelViews(std::optional<drawing::ModelViews> model, const QString& description);
     void removeItem(int index);
@@ -49,6 +62,10 @@ private:
     void editItem(int index, const std::optional<drawing::DraftItem>& after, const QString& description);
 
     drawing::Draft draft_;
+    std::vector<drawing::Draft> sheets_{1};
+    int activeSheet_ = 0;
+    QTabBar* sheetTabs_;
+    QComboBox* layers_;
     QUndoStack history_;
     QString path_;
     DraftCanvas* canvas_;
@@ -57,6 +74,9 @@ private:
     QAction* modelRefresh_;
     QAction* modelSettings_;
     QAction* modelRemove_;
+    QAction* modelDetail_;
+    QAction* sectionLine_;
+    QAction* localRegion_;
 };
 
 }  // namespace graph3d

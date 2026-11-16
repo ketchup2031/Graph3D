@@ -218,6 +218,95 @@ void verifySections(const QDir& source, const QDir& output)
     check(rejected, "A section on the body boundary was accepted");
 }
 
+void verifyMultiSheetDrawing(const QDir& source, const QDir& output)
+{
+    const auto modelPath = output.filePath("stepped-bushing-stage13-model.graph3d");
+    io::saveProject(modelPath, io::openProject(source.filePath("stepped-bushing.graph3d")));
+    const auto model = io::openModelSource(modelPath);
+    const int body = finishedPart(model.document).id;
+
+    draw::Draft draft;
+    draft.title = QStringLiteral("Ступенчатая втулка");
+    draft.number = QStringLiteral("G3D-002");
+    draft.author = QStringLiteral("Graph3D");
+    draft.a3 = true;
+    draft.paper.eskd = true;
+    draft.paper.material = QStringLiteral("Сталь 45");
+    draft.paper.organization = QStringLiteral("Graph3D");
+    draft.layers.push_back({QStringLiteral("Обозначения")});
+    draft.layers.push_back({QStringLiteral("Вспомогательные"), false, true});
+    draft.modelViews = io::buildModelViews(model, body, {}, draw::draftSize(draft));
+    draft.modelViews->layout = {{{{188, 62}, 2}, {{70, 62}, 2}, {{188, 172}, 2}}};
+    draft.modelViews->detail = draw::DetailView{0, {14.5, -4}, 7, {{310, 84}, 5}};
+    draft.items = {
+        {draw::DraftKind::Datum, {148, 80}, {}, {124, 98}, QStringLiteral("А")},
+        {draw::DraftKind::Tolerance, {218, 54}, {}, {238, 46}, QStringLiteral("⊥ | 0,05 | А")},
+        {draw::DraftKind::Roughness, {180, 32}, {}, {155, 23}, QStringLiteral("Ra 3,2")},
+        {draw::DraftKind::Leader, {228, 85}, {}, {250, 118}, QStringLiteral("Бурт")},
+        {draw::DraftKind::Text, {50, 190}, {}, {}, QStringLiteral("HIDDEN-LAYER-TEXT")}
+    };
+    for (auto& item : draft.items) {
+        item.layer = 1;
+    }
+    draft.items.back().layer = 2;
+    draw::Draft second;
+    second.title = draft.title;
+    second.number = draft.number;
+    second.paper.eskd = true;
+    second.paper.portrait = true;
+    second.paper.requirements = QStringLiteral("Острые кромки притупить.\nУдалить заусенцы.");
+    second.modelViews = io::buildModelViews(model, body, draw::SectionSettings{geom::Plane::XZ, 0}, draw::draftSize(second));
+    second.modelViews->dimensions = false;
+    second.modelViews->hiddenLines = false;
+    second.modelViews->layout = {{{{147, 64}, 2}, {{66, 64}, 1}, {{147, 168}, 2}}};
+    second.modelViews->local = draw::LocalSection{{13, 0}, 10};
+    draft.additionalSheets.push_back(second);
+
+    const auto path = output.filePath("stepped-bushing-two-sheets.g3draw");
+    io::saveDraft(path, draft);
+    const auto restored = io::openDraft(path);
+    check(restored.additionalSheets.size() == 1 && restored.paper == draft.paper
+        && restored.layers == draft.layers && restored.items.size() == draft.items.size(),
+        "Drawing book, layers, or annotations did not round trip");
+    const auto& page = restored.additionalSheets.front();
+    check(draw::draftSize(restored) == QSizeF(420, 297) && draw::draftSize(page) == QSizeF(210, 297)
+        && restored.modelViews->detail == draft.modelViews->detail && page.paper == second.paper
+        && page.modelViews->local == second.modelViews->local && page.modelViews->geometry->section.has_value(),
+        "Page orientation, detail, or local section did not round trip");
+    check(restored.items[2].text == draft.items[2].text
+        && !draw::layerVisible(restored, restored.items.back().layer)
+        && !draw::layerEditable(restored, restored.items.back().layer),
+        "Drawing layer flags or annotation text did not survive save and reopen");
+
+    const auto render = [&](const draw::Draft& sheet) {
+        QImage image(840, 1188, QImage::Format_RGB32);
+        QPainter painter(&image);
+        painter.scale(4, 4);
+        draw::paintDraft(painter, sheet, false, -1, nullptr, 2, 2);
+        painter.end();
+        return image;
+    };
+    const auto local = render(page);
+    auto original = page;
+    auto uncut = std::make_shared<draw::ModelProjection>(*original.modelViews->geometry);
+    uncut->section.reset();
+    original.modelViews->geometry = std::move(uncut);
+    original.modelViews->local.reset();
+    const auto unsectioned = render(original);
+    const QRect region(650, 235, 40, 40);
+    check(local.copy(region) != unsectioned.copy(region), "The local section did not render in the selected region");
+    const QRect outside(445, 192, 60, 80);
+    check(local.copy(outside) == unsectioned.copy(outside), "The local section changed geometry outside its boundary");
+
+    const auto pdfPath = output.filePath("stepped-bushing-two-sheets.pdf");
+    draw::exportDraftPdf(pdfPath, restored);
+    QFile pdf(pdfPath);
+    check(pdf.open(QIODevice::ReadOnly), "Two-sheet drawing PDF did not open");
+    const auto content = pdf.readAll();
+    check(content.startsWith("%PDF-") && content.count("/Type /Page\n") == 2,
+          "Drawing PDF did not contain two pages");
+}
+
 void verifyDraft(const QDir& output)
 {
     using enum draw::DraftKind;
@@ -495,6 +584,7 @@ int main(int argc, char** argv)
             verifyExample(QDir(args.at(1)), output, example);
         }
         verifySections(QDir(args.at(1)), output);
+        verifyMultiSheetDrawing(QDir(args.at(1)), output);
         verifyDraft(output);
         verifyAttachedDimensions(output);
         verifyModelViews(output);

@@ -38,6 +38,7 @@
 #include <QTableWidget>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QTabBar>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QWheelEvent>
@@ -64,6 +65,57 @@ class ViewportTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void draftTabsPreserveEditsAcrossSheetUndo()
+    {
+        graph3d::MainWindow main;
+        main.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&main));
+        main.findChild<QPushButton*>("startNewDrawing")->click();
+        auto* draft = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(draft && QTest::qWaitForWindowExposed(draft));
+        auto* tabs = draft->findChild<QTabBar*>("draftSheetTabs");
+        auto* canvas = draft->findChild<QWidget*>("draftCanvas");
+        QVERIFY(tabs && canvas);
+        const auto action = [draft](const char* name) { return draft->findChild<QAction*>(name); };
+        const auto click = [canvas](double x, double y) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + QPointF(x, y) * scale).toPoint());
+        };
+        action("draftLine")->trigger();
+        click(60, 55);
+        click(150, 55);
+        action("addDraftSheet")->trigger();
+        QCOMPARE(tabs->count(), 2);
+        QCOMPARE(tabs->currentIndex(), 1);
+        action("draftLine")->trigger();
+        click(60, 85);
+        click(150, 85);
+        tabs->setCurrentIndex(0);
+        action("undoDraft")->trigger();
+        QCOMPARE(tabs->currentIndex(), 1);
+        action("redoDraft")->trigger();
+        tabs->setCurrentIndex(0);
+        action("removeDraftSheet")->trigger();
+        QCOMPARE(tabs->count(), 1);
+        action("undoDraft")->trigger();
+        QCOMPARE(tabs->count(), 2);
+        QCOMPARE(tabs->currentIndex(), 0);
+        action("draftSelect")->trigger();
+        click(95, 55);
+        QVERIFY(action("draftItemProperties")->isEnabled());
+        tabs->setCurrentIndex(1);
+        click(95, 85);
+        QVERIFY(action("draftItemProperties")->isEnabled());
+
+        action("undoDraft")->trigger();
+        action("undoDraft")->trigger();
+        action("undoDraft")->trigger();
+        QCOMPARE(tabs->count(), 1);
+        QVERIFY(!draft->isWindowModified());
+        QVERIFY(draft->close());
+    }
+
     void initTestCase()
     {
         QVERIFY(settingsDir_.isValid());
@@ -553,6 +605,10 @@ private slots:
             }
         });
         action("linkedViewsSettings")->trigger();
+        action("placeSectionLine")->trigger();
+        const double pickScale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+        const QPointF pickOrigin((canvas->width() - 297 * pickScale) / 2, (canvas->height() - 210 * pickScale) / 2);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, (pickOrigin + QPointF(211, 122) * pickScale).toPoint());
         chooseFile(drawingPath);
         action("saveDraft")->trigger();
         const auto readSaved = [&] {
@@ -564,6 +620,7 @@ private slots:
         QCOMPARE(saved.value("version").toInt(), 3);
         QCOMPARE(before.value("body").toInt(), hole);
         QCOMPARE(before.value("section").toObject().value("plane").toString(), QStringLiteral("XZ"));
+        QVERIFY(std::abs(before.value("section").toObject().value("offset").toDouble() - 8) < .5);
         const auto hasRadius = [](const QJsonObject& views, double radius) {
             const auto circles = views.value("top").toObject().value("circles").toArray();
             return std::ranges::any_of(circles, [radius](const auto& circle) {

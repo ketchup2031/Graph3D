@@ -26,11 +26,15 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QPushButton>
+#include <QSignalBlocker>
+#include <QTabBar>
 #include <QToolBar>
 #include <QUndoCommand>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <exception>
 #include <functional>
@@ -85,6 +89,12 @@ DraftWindow::DraftWindow(QWidget* parent)
     layout->setContentsMargins(8, 0, 8, 0);
     auto* lineInput = new LineInput(workspace);
     canvas_ = new DraftCanvas(draft_, *lineInput, workspace);
+    sheetTabs_ = new QTabBar(workspace);
+    sheetTabs_->setObjectName(QStringLiteral("draftSheetTabs"));
+    sheetTabs_->setExpanding(false);
+    layout->addWidget(sheetTabs_);
+    connect(sheetTabs_, &QTabBar::currentChanged, this, &DraftWindow::activateSheet);
+    updateSheetTabs();
     layout->addWidget(lineInput);
     layout->addWidget(canvas_, 1);
     setCentralWidget(workspace);
@@ -130,6 +140,20 @@ DraftWindow::DraftWindow(QWidget* parent)
     auto* sheet = menuBar()->addMenu(tr("&Sheet"));
     auto* settings = sheet->addAction(tr("Format and title block…"), this, &DraftWindow::editSheet);
     settings->setObjectName(QStringLiteral("draftSheetSettings"));
+    sheet->addAction(tr("Add sheet"), this, [this] { changeSheetCount(true); })->setObjectName(QStringLiteral("addDraftSheet"));
+    sheet->addAction(tr("Remove sheet"), this, [this] { changeSheetCount(false); })->setObjectName(QStringLiteral("removeDraftSheet"));
+    sheet->addAction(tr("Technical requirements…"), this, [this] {
+        bool accepted = false;
+        const auto text = QInputDialog::getMultiLineText(this, tr("Technical requirements"),
+            tr("Enter each requirement on a separate line."), draft_.paper.requirements, &accepted);
+        if (accepted && text.size() > 2400) {
+            QMessageBox::warning(this, tr("Technical requirements"), tr("Use at most 2400 characters."));
+        } else if (accepted && text != draft_.paper.requirements) {
+            pushSheetEdit(tr("Edit technical requirements"),
+                [this, text] { draft_.paper.requirements = text; },
+                [this, before = draft_.paper.requirements] { draft_.paper.requirements = before; });
+        }
+    });
     auto* fit = sheet->addAction(tr("Fit sheet"), Qt::Key_F, canvas_, &DraftCanvas::fit);
     auto* grid = sheet->addAction(tr("Show grid"));
     grid->setCheckable(true);
@@ -143,6 +167,11 @@ DraftWindow::DraftWindow(QWidget* parent)
     modelRefresh_->setObjectName(QStringLiteral("linkedViewsRefresh"));
     modelSettings_ = views->addAction(tr("View layout and section…"), this, &DraftWindow::editModelViews);
     modelSettings_->setObjectName(QStringLiteral("linkedViewsSettings"));
+    sectionLine_ = views->addAction(tr("Place section line on view"), this, &DraftWindow::placeSectionLine);
+    localRegion_ = views->addAction(tr("Place local section area"), this, &DraftWindow::placeLocalSection);
+    modelDetail_ = views->addAction(tr("Detail view…"), this, &DraftWindow::editDetail);
+    modelDetail_->setObjectName(QStringLiteral("linkedDetail"));
+    sectionLine_->setObjectName(QStringLiteral("placeSectionLine"));
     modelRemove_ = views->addAction(tr("Remove model views"), this, [this] {
         setModelViews({}, tr("Remove model views"));
     });
@@ -209,6 +238,28 @@ DraftWindow::DraftWindow(QWidget* parent)
          tr("Click a circle or arc, then place the dimension label."), dimensions);
     tool(tr("Diameter dimension"), "draftDiameter", DraftKind::Diameter,
          tr("Click a circle or arc, then place the dimension label."), dimensions);
+    auto* annotations = menuBar()->addMenu(tr("&Annotations"));
+    const auto hint = tr("Pick the feature, then place the label.");
+    tool(tr("Leader"), "draftLeader", DraftKind::Leader, hint, annotations);
+    tool(tr("Datum"), "draftDatum", DraftKind::Datum, hint, annotations);
+    tool(tr("Geometric tolerance"), "draftTolerance", DraftKind::Tolerance, hint, annotations);
+    tool(tr("Surface roughness"), "draftRoughness", DraftKind::Roughness, hint, annotations);
+    auto* layerMenu = menuBar()->addMenu(tr("&Layers"));
+    layerMenu->addAction(tr("Manage layers…"), this, &DraftWindow::editLayers);
+    layerMenu->addAction(tr("Move selection to active layer"), this, [this] {
+        const int index = canvas_->selected();
+        const int layer = layers_->currentIndex();
+        if (index >= 0 && drawing::layerEditable(draft_, layer) && draft_.items[index].layer != layer) {
+            auto item = draft_.items[index];
+            item.layer = layer;
+            editItem(index, item, tr("Move item to layer"));
+        }
+    });
+    layers_ = new QComboBox(bar);
+    layers_->setObjectName(QStringLiteral("draftActiveLayer"));
+    layers_->setAccessibleName(tr("Active layer"));
+    bar->addWidget(layers_);
+    updateLayers();
     auto* stroke = new QComboBox(bar);
     stroke->setAccessibleName(tr("Line style"));
     stroke->addItems({tr("Solid"), tr("Hidden"), tr("Center")});
@@ -241,6 +292,11 @@ DraftWindow::DraftWindow(QWidget* parent)
     });
     connect(canvas_, &DraftCanvas::itemCreated, this, [this](const DraftItem& item) {
         auto identified = item;
+        identified.layer = layers_->currentIndex();
+        if (!drawing::layerEditable(draft_, identified.layer)) {
+            statusBar()->showMessage(tr("Select a visible, unlocked layer to draw."), 4000);
+            return;
+        }
         identified.id = QUuid::createUuid();
         editItem(static_cast<int>(draft_.items.size()), identified, tr("Create item"));
     });
@@ -331,20 +387,231 @@ void DraftWindow::editItem(int index, const std::optional<DraftItem>& after, con
             draft_.items.insert(position, *item);
         }
     };
-    history_.push(new DraftEdit(description, [=] { apply(before.has_value(), after); },
-                               [=] { apply(after.has_value(), before); }));
+    pushSheetEdit(description, [=] { apply(before.has_value(), after); },
+                  [=] { apply(after.has_value(), before); });
 }
 
 void DraftWindow::replaceDrawing(drawing::Draft draft, const QString& path)
 {
     canvas_->cancel();
     canvas_->select(-1);
+    sheets_.assign(1, drawing::Draft{});
+    for (auto& sheet : draft.additionalSheets) {
+        sheets_.push_back(std::move(sheet));
+    }
+    draft.additionalSheets.clear();
+    activeSheet_ = 0;
     draft_ = std::move(draft);
+    updateSheetTabs();
+    updateLayers();
     path_ = path;
     history_.clear();
     canvas_->fit();
     updateModelStatus();
     updateTitle();
+}
+
+void DraftWindow::pushSheetEdit(const QString& name, std::function<void()> redo, std::function<void()> undo)
+{
+    const int sheet = activeSheet_;
+    history_.push(new DraftEdit(name, [this, sheet, redo = std::move(redo)] {
+        activateSheet(sheet);
+        redo();
+    }, [this, sheet, undo = std::move(undo)] {
+        activateSheet(sheet);
+        undo();
+    }));
+}
+
+drawing::Draft DraftWindow::wholeDrawing() const
+{
+    auto document = activeSheet_ == 0 ? draft_ : sheets_.front();
+    for (int i = 1; i < static_cast<int>(sheets_.size()); ++i) {
+        document.additionalSheets.push_back(i == activeSheet_ ? draft_ : sheets_[i]);
+    }
+    return document;
+}
+
+void DraftWindow::updateSheetTabs()
+{
+    const QSignalBlocker blocker(sheetTabs_);
+    while (sheetTabs_->count() < static_cast<int>(sheets_.size())) {
+        sheetTabs_->addTab(tr("Sheet %1").arg(sheetTabs_->count() + 1));
+    }
+    while (sheetTabs_->count() > static_cast<int>(sheets_.size())) {
+        sheetTabs_->removeTab(sheetTabs_->count() - 1);
+    }
+    sheetTabs_->setCurrentIndex(activeSheet_);
+    canvas_->setPageNumber(activeSheet_ + 1, static_cast<int>(sheets_.size()));
+}
+
+void DraftWindow::activateSheet(int index)
+{
+    if (index < 0 || index >= static_cast<int>(sheets_.size()) || index == activeSheet_) {
+        return;
+    }
+    canvas_->cancel();
+    canvas_->select(-1);
+    std::swap(draft_, sheets_[activeSheet_]);
+    activeSheet_ = index;
+    std::swap(draft_, sheets_[activeSheet_]);
+    updateSheetTabs();
+    layers_->setCurrentIndex(0);
+    updateLayers();
+    canvas_->fit();
+    updateModelStatus();
+}
+
+void DraftWindow::changeSheetCount(bool add)
+{
+    const int size = static_cast<int>(sheets_.size());
+    if (add && size >= drawing::maxSheets) {
+        statusBar()->showMessage(tr("The drawing already has the maximum number of sheets."), 4000);
+        return;
+    }
+    if (!add && size == 1) {
+        statusBar()->showMessage(tr("A drawing must have at least one sheet."), 4000);
+        return;
+    }
+    const int index = add ? size : activeSheet_;
+    const int previous = activeSheet_;
+    drawing::Draft sheet;
+    if (add) {
+        sheet.a3 = draft_.a3;
+        sheet.title = draft_.title;
+        sheet.number = draft_.number;
+        sheet.author = draft_.author;
+        sheet.paper = draft_.paper;
+        sheet.paper.requirements.clear();
+        sheet.layers = draft_.layers;
+    } else {
+        sheet = draft_;
+    }
+    const auto insert = [this, index, sheet] {
+        sheets_.insert(sheets_.begin() + index, sheet);
+        if (activeSheet_ >= index) {
+            ++activeSheet_;
+        }
+        activateSheet(index);
+    };
+    const auto erase = [this, index, previous] {
+        const int target = index == previous ? (index == 0 ? 1 : index - 1) : previous;
+        activateSheet(target);
+        sheets_.erase(sheets_.begin() + index);
+        if (activeSheet_ > index) {
+            --activeSheet_;
+        }
+        updateSheetTabs();
+    };
+    history_.push(new DraftEdit(add ? tr("Add sheet") : tr("Remove sheet"),
+        add ? std::function<void()>(insert) : erase, add ? std::function<void()>(erase) : insert));
+}
+
+void DraftWindow::updateLayers()
+{
+    const int index = layers_->currentIndex();
+    layers_->clear();
+    for (const auto& layer : draft_.layers) {
+        auto name = layer.name.isEmpty() ? tr("Default layer") : layer.name;
+        if (!layer.visible) {
+            name += tr(" (hidden)");
+        }
+        if (layer.locked) {
+            name += tr(" (locked)");
+        }
+        layers_->addItem(name);
+    }
+    layers_->setCurrentIndex(std::clamp(index, 0, layers_->count() - 1));
+}
+
+void DraftWindow::editLayers()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Manage layers"));
+    auto* form = new QFormLayout(&dialog);
+    auto* list = new QComboBox(&dialog);
+    auto* name = new QLineEdit(&dialog);
+    name->setMaxLength(200);
+    auto* visible = new QCheckBox(tr("Visible"), &dialog);
+    auto* locked = new QCheckBox(tr("Locked"), &dialog);
+    auto* add = new QPushButton(tr("Add layer"), &dialog);
+    auto* removeLayer = new QPushButton(tr("Remove empty layer"), &dialog);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(tr("Layer"), list);
+    form->addRow(tr("Name"), name);
+    form->addRow(visible, locked);
+    form->addRow(add, removeLayer);
+    form->addRow(buttons);
+    auto edited = draft_.layers;
+    std::vector<int> originalIndices;
+    for (int i = 0; i < static_cast<int>(edited.size()); ++i) {
+        originalIndices.push_back(i);
+    }
+    const auto caption = [this](const drawing::DraftLayer& layer) {
+        return layer.name.isEmpty() ? tr("Default layer") : layer.name;
+    };
+    for (const auto& layer : edited) {
+        list->addItem(caption(layer));
+    }
+    list->setCurrentIndex(layers_->currentIndex());
+    const auto showLayer = [&](int index) {
+        name->setText(edited[index].name);
+        visible->setChecked(edited[index].visible);
+        locked->setChecked(edited[index].locked);
+        const int original = originalIndices[index];
+        removeLayer->setEnabled(index > 0 && (original < 0
+            || std::ranges::none_of(draft_.items, [original](const auto& item) { return item.layer == original; })));
+    };
+    showLayer(list->currentIndex());
+    connect(list, &QComboBox::currentIndexChanged, &dialog, showLayer);
+    connect(name, &QLineEdit::textEdited, &dialog, [&](const QString& text) {
+        auto& layer = edited[list->currentIndex()];
+        layer.name = text.trimmed();
+        list->setItemText(list->currentIndex(), caption(layer));
+    });
+    connect(visible, &QCheckBox::clicked, &dialog, [&](bool checked) { edited[list->currentIndex()].visible = checked; });
+    connect(locked, &QCheckBox::clicked, &dialog, [&](bool checked) { edited[list->currentIndex()].locked = checked; });
+    connect(add, &QPushButton::clicked, &dialog, [&] {
+        if (edited.size() < drawing::maxLayers) {
+            edited.push_back({tr("Layer %1").arg(edited.size() + 1)});
+            originalIndices.push_back(-1);
+            list->addItem(caption(edited.back()));
+            list->setCurrentIndex(list->count() - 1);
+        }
+        add->setEnabled(edited.size() < drawing::maxLayers);
+    });
+    add->setEnabled(edited.size() < drawing::maxLayers);
+    connect(removeLayer, &QPushButton::clicked, &dialog, [&] {
+        const int index = list->currentIndex();
+        edited.erase(edited.begin() + index);
+        originalIndices.erase(originalIndices.begin() + index);
+        list->removeItem(index);
+        showLayer(list->currentIndex());
+        add->setEnabled(true);
+    });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted) {
+        std::vector<int> beforeLayers, afterLayers;
+        for (const auto& item : draft_.items) {
+            beforeLayers.push_back(item.layer);
+            const auto it = std::ranges::find(originalIndices, item.layer);
+            afterLayers.push_back(static_cast<int>(it - originalIndices.begin()));
+        }
+        if (edited != draft_.layers || beforeLayers != afterLayers) {
+            const auto apply = [this](const auto& layers, const auto& itemLayers) {
+                for (std::size_t i = 0; i < itemLayers.size(); ++i) {
+                    draft_.items[i].layer = itemLayers[i];
+                }
+                canvas_->select(-1);
+                draft_.layers = layers;
+                updateLayers();
+            };
+            pushSheetEdit(tr("Edit layers"), [apply, edited, afterLayers] { apply(edited, afterLayers); },
+                          [apply, before = draft_.layers, beforeLayers] { apply(before, beforeLayers); });
+        }
+        layers_->setCurrentIndex(list->currentIndex());
+    }
 }
 
 void DraftWindow::updateTitle()
@@ -399,7 +666,7 @@ bool DraftWindow::saveDrawing(bool saveAs)
         return false;
     }
     try {
-        io::saveDraft(path, draft_);
+        io::saveDraft(path, wholeDrawing());
         path_ = path;
         history_.setClean();
         updateTitle();
@@ -418,7 +685,7 @@ void DraftWindow::exportPdf()
         return;
     }
     try {
-        drawing::exportDraftPdf(path, draft_);
+        drawing::exportDraftPdf(path, wholeDrawing());
         statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
         QMessageBox::warning(this, tr("Export drawing PDF"), localizedDiagnostic(error.what()));
@@ -500,7 +767,8 @@ void DraftWindow::refreshModel()
 void DraftWindow::updateModelStatus(const QString& failure)
 {
     const bool linked = draft_.modelViews.has_value();
-    for (auto* action : {modelRefresh_, modelSettings_, modelRemove_}) {
+    localRegion_->setEnabled(linked && draft_.modelViews->local.has_value());
+    for (auto* action : {modelRefresh_, modelSettings_, modelRemove_, modelDetail_, sectionLine_}) {
         action->setEnabled(linked);
     }
     modelStatus_->setVisible(linked);
@@ -543,8 +811,8 @@ void DraftWindow::setModelViews(std::optional<drawing::ModelViews> model, const 
         draft_.modelViews = value;
         updateModelStatus();
     };
-    history_.push(new DraftEdit(description, [apply, model = std::move(model)] { apply(model); },
-        [apply, model = draft_.modelViews] { apply(model); }));
+    pushSheetEdit(description, [apply, model = std::move(model)] { apply(model); },
+        [apply, model = draft_.modelViews] { apply(model); });
 }
 
 void DraftWindow::editModelViews()
@@ -605,6 +873,30 @@ void DraftWindow::editModelViews()
     form->addRow(tr("Offset from center"), offset);
     offset->setEnabled(plane->currentIndex() > 0);
     connect(plane, &QComboBox::currentIndexChanged, offset, [offset](int index) { offset->setEnabled(index > 0); });
+    auto* local = new QCheckBox(tr("Local section"), &dialog);
+    local->setChecked(next.local.has_value());
+    form->addRow(local);
+    const auto region = next.local.value_or(drawing::LocalSection{});
+    const auto regionField = [&](const QString& label, double min, double value) {
+        auto* spin = new QDoubleSpinBox(&dialog);
+        spin->setRange(min, 100000);
+        spin->setDecimals(3);
+        spin->setValue(value);
+        form->addRow(label, spin);
+        return spin;
+    };
+    auto* localX = regionField(tr("Local section center X on view (mm)"), -100000, region.center.x());
+    auto* localY = regionField(tr("Local section center Y on view (mm)"), -100000, region.center.y());
+    auto* localRadius = regionField(tr("Local section radius (mm)"), .001, region.radius);
+    const auto enableRegion = [=] {
+        local->setEnabled(plane->currentIndex() != 0);
+        for (auto* field : {localX, localY, localRadius}) {
+            field->setEnabled(local->isEnabled() && local->isChecked());
+        }
+    };
+    connect(local, &QCheckBox::toggled, &dialog, enableRegion);
+    connect(plane, &QComboBox::currentIndexChanged, &dialog, enableRegion);
+    enableRegion();
     auto* dimensions = new QCheckBox(tr("Dimensions and center marks"), &dialog);
     dimensions->setChecked(next.dimensions);
     form->addRow(dimensions);
@@ -630,6 +922,9 @@ void DraftWindow::editModelViews()
         if (plane->currentIndex() > 0) {
             cut = drawing::SectionSettings{static_cast<Plane>(plane->currentData().toInt()), offset->value()};
         }
+        updated.local = cut && local->isChecked()
+            ? std::optional(drawing::LocalSection{{localX->value(), localY->value()}, localRadius->value()})
+            : std::nullopt;
         try {
             if (cut != oldCut) {
                 if (cut) {
@@ -651,10 +946,131 @@ void DraftWindow::editModelViews()
     if (dialog.exec() == QDialog::Accepted) {
         const auto& old = *draft_.modelViews;
         if (next.layout != old.layout || next.geometry != old.geometry || next.dimensions != old.dimensions
-            || next.hiddenLines != old.hiddenLines) {
+            || next.hiddenLines != old.hiddenLines || next.local != old.local) {
             setModelViews(std::move(next), tr("Edit model views"));
         }
     }
+}
+
+void DraftWindow::placeSectionLine()
+{
+    const auto model = *draft_.modelViews;
+    using geometry::Plane;
+    auto current = drawing::sectionSettings(model);
+    if (!current) {
+        const QStringList names{tr("XZ — front"), tr("XY — top"), tr("YZ — right")};
+        bool accepted = false;
+        const auto chosen = QInputDialog::getItem(this, tr("Place section line on view"), tr("Section plane"),
+                                                 names, 0, false, &accepted);
+        if (!accepted) {
+            return;
+        }
+        const std::array planes{Plane::XZ, Plane::XY, Plane::YZ};
+        current = drawing::SectionSettings{planes[names.indexOf(chosen)], 0};
+    }
+    const bool vertical = current->plane == Plane::YZ;
+    const bool top = current->plane == Plane::XZ;
+    const auto placement = model.layout[top ? 2 : 0];
+    const auto& view = top ? model.geometry->views.top : model.geometry->views.front;
+    statusBar()->showMessage(top ? tr("Click the cutting line position on the top view.")
+                                : tr("Click the cutting line position on the front view."));
+    canvas_->pickPoint([this, model, placement, current, vertical, width = view.width, height = view.height](QPointF point) {
+        const auto delta = (point - placement.center) / placement.scale;
+        if (std::abs(delta.x()) > width / 2 || std::abs(delta.y()) > height / 2) {
+            statusBar()->showMessage(tr("Click inside the indicated reference view."), 5000);
+            return;
+        }
+        try {
+            const auto source = io::openModelSource(model.sourcePath);
+            const drawing::SectionSettings cut{current->plane, vertical ? delta.x() : -delta.y()};
+            setModelViews(io::buildModelViews(source, model.bodyId, cut, drawing::draftSize(draft_), &model),
+                          tr("Place section line on view"));
+            statusBar()->clearMessage();
+        } catch (const std::exception& error) {
+            QMessageBox::warning(this, tr("Place section line on view"), localizedDiagnostic(error.what()));
+        }
+    });
+}
+
+void DraftWindow::placeLocalSection()
+{
+    auto model = *draft_.modelViews;
+    using geometry::Plane;
+    const auto plane = model.geometry->section->plane;
+    const int index = plane == Plane::XZ ? 0 : plane == Plane::YZ ? 1 : 2;
+    const auto placement = model.layout[index];
+    const auto& view = model.geometry->section->view;
+    statusBar()->showMessage(tr("Click the center of the local section on the sectioned view."));
+    canvas_->pickPoint([this, model, placement, width = view.width, height = view.height](QPointF point) mutable {
+        const auto delta = (point - placement.center) / placement.scale;
+        if (std::abs(delta.x()) > width / 2 || std::abs(delta.y()) > height / 2) {
+            statusBar()->showMessage(tr("Click inside the indicated reference view."), 5000);
+            return;
+        }
+        model.local->center = {delta.x(), -delta.y()};
+        setModelViews(std::move(model), tr("Place local section area"));
+        statusBar()->clearMessage();
+    });
+}
+
+void DraftWindow::editDetail()
+{
+    const auto model = *draft_.modelViews;
+    const auto detail = model.detail.value_or(drawing::DetailView{});
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Detail view"));
+    auto* form = new QFormLayout(&dialog);
+    auto* enabled = new QCheckBox(tr("Show detail view"), &dialog);
+    enabled->setChecked(true);
+    form->addRow(enabled);
+    auto* source = new QComboBox(&dialog);
+    source->addItems({tr("Front"), tr("Right"), tr("Top")});
+    source->setCurrentIndex(detail.source);
+    form->addRow(tr("Reference view"), source);
+    const auto field = [&](const QString& label, double min, double max, double value) {
+        auto* spin = new QDoubleSpinBox(&dialog);
+        spin->setRange(min, max);
+        spin->setDecimals(3);
+        spin->setValue(value);
+        form->addRow(label, spin);
+        return spin;
+    };
+    auto* radius = field(tr("Detail radius on model (mm)"), .001, 100000, detail.radius);
+    auto* scale = field(tr("Scale factor"), .001, 1000, detail.placement.scale);
+    auto* x = field(tr("Center X (mm)"), -10000, 10000, detail.placement.center.x());
+    auto* y = field(tr("Center Y (mm)"), -10000, 10000, detail.placement.center.y());
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (!enabled->isChecked()) {
+        if (model.detail) {
+            auto updated = model;
+            updated.detail.reset();
+            setModelViews(std::move(updated), tr("Remove detail view"));
+        }
+        return;
+    }
+    auto updated = model;
+    const int index = source->currentIndex();
+    updated.detail = drawing::DetailView{index, detail.center, radius->value(), {{x->value(), y->value()}, scale->value()}};
+    const auto place = model.layout[index];
+    const auto& views = model.geometry->views;
+    const auto& view = *std::array{&views.front, &views.right, &views.top}[index];
+    statusBar()->showMessage(tr("Click the center of the detail on the selected reference view."));
+    canvas_->pickPoint([this, updated, place, width = view.width, height = view.height](QPointF point) mutable {
+        const auto delta = (point - place.center) / place.scale;
+        if (std::abs(delta.x()) > width / 2 || std::abs(delta.y()) > height / 2) {
+            statusBar()->showMessage(tr("Click inside the indicated reference view."), 5000);
+            return;
+        }
+        updated.detail->center = {delta.x(), -delta.y()};
+        setModelViews(std::move(updated), tr("Edit detail view"));
+        statusBar()->clearMessage();
+    });
 }
 
 void DraftWindow::editSelected()
@@ -706,14 +1122,16 @@ void DraftWindow::editSelected()
     const auto a = pair(tr("First point X"), tr("First point Y"), measured.a, item.anchorA.has_value());
     std::optional<CoordinateFields> b, label, third;
     QLineEdit* text = nullptr;
-    if (item.kind == DraftKind::Text) {
+    if (item.kind == DraftKind::Text || drawing::isAnnotation(item.kind)) {
         text = new QLineEdit(item.text, &dialog);
         text->setMaxLength(200);
         form->addRow(tr("Text"), text);
     } else {
         b = pair(tr("Second point X"), tr("Second point Y"), measured.b, item.anchorB.has_value());
     }
-    if (drawing::isDimension(item.kind)) {
+    if (drawing::isAnnotation(item.kind)) {
+        label = pair(tr("Label X"), tr("Label Y"), measured.label);
+    } else if (drawing::isDimension(item.kind)) {
         label = pair(tr("Dimension line X"), tr("Dimension line Y"), measured.label);
     } else if (item.kind == DraftKind::Arc) {
         label = pair(tr("End point X"), tr("End point Y"), measured.label);
@@ -769,6 +1187,26 @@ void DraftWindow::editSheet()
         form->addRow(label, input);
         return input;
     };
+    auto* orientation = new QComboBox(&dialog);
+    orientation->setObjectName(QStringLiteral("draftOrientation"));
+    orientation->addItems({tr("Landscape"), tr("Portrait")});
+    orientation->setCurrentIndex(draft_.paper.portrait ? 1 : 0);
+    form->addRow(tr("Orientation"), orientation);
+    auto* eskd = new QCheckBox(tr("ESKD title block"), &dialog);
+    eskd->setChecked(draft_.paper.eskd);
+    form->addRow(eskd);
+    const auto requirePortrait = [=] {
+        const bool required = eskd->isChecked() && paper->currentIndex() == 0;
+        if (required) {
+            orientation->setCurrentIndex(1);
+        }
+        orientation->setEnabled(!required);
+    };
+    connect(eskd, &QCheckBox::toggled, &dialog, requirePortrait);
+    connect(paper, &QComboBox::currentIndexChanged, &dialog, requirePortrait);
+    requirePortrait();
+    auto* material = field(tr("Material"), "draftMaterial", draft_.paper.material);
+    auto* organization = field(tr("Organization"), "draftOrganization", draft_.paper.organization);
     auto* title = field(tr("Name"), "draftTitle", draft_.title);
     auto* number = field(tr("Drawing number"), "draftNumber", draft_.number);
     auto* author = field(tr("Drawn by"), "draftAuthor", draft_.author);
@@ -779,8 +1217,10 @@ void DraftWindow::editSheet()
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
-    const auto apply = [this](bool a3, const QString& name, const QString& number, const QString& author) {
-        const bool resize = a3 != draft_.a3;
+    const auto apply = [this](bool a3, const drawing::DraftPaper& paper, const QString& name,
+                              const QString& number, const QString& author) {
+        const bool resize = a3 != draft_.a3 || paper.portrait != draft_.paper.portrait;
+        draft_.paper = paper;
         draft_.a3 = a3;
         draft_.title = name;
         draft_.number = number;
@@ -790,11 +1230,20 @@ void DraftWindow::editSheet()
         }
     };
     const bool a3 = paper->currentIndex() == 1;
-    if (a3 != draft_.a3 || title->text() != draft_.title || number->text() != draft_.number
-        || author->text() != draft_.author) {
-        history_.push(new DraftEdit(tr("Edit sheet"),
-            [apply, a3, title = title->text(), number = number->text(), author = author->text()] { apply(a3, title, number, author); },
-            [apply, a3 = draft_.a3, title = draft_.title, number = draft_.number, author = draft_.author] { apply(a3, title, number, author); }));
+    auto newPaper = draft_.paper;
+    newPaper.portrait = orientation->currentIndex() == 1;
+    newPaper.eskd = eskd->isChecked();
+    newPaper.material = material->text();
+    newPaper.organization = organization->text();
+    if (a3 != draft_.a3 || newPaper != draft_.paper || title->text() != draft_.title
+        || number->text() != draft_.number || author->text() != draft_.author) {
+        pushSheetEdit(tr("Edit sheet"),
+            [apply, a3, newPaper, title = title->text(), number = number->text(), author = author->text()] {
+                apply(a3, newPaper, title, number, author);
+            },
+            [apply, a3 = draft_.a3, paper = draft_.paper, title = draft_.title, number = draft_.number, author = draft_.author] {
+                apply(a3, paper, title, number, author);
+            });
     }
 }
 

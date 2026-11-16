@@ -53,6 +53,9 @@ std::vector<double> intersectionsAlong(const Draft& draft, const DraftItem& item
 {
     std::vector<double> hits;
     for (const auto& other : draft.items) {
+        if (!layerVisible(draft, other.layer)) {
+            continue;
+        }
         if (other.id == item.id) {
             continue;
         }
@@ -342,6 +345,9 @@ std::optional<DraftItem> extendDraft(const DraftItem& item, const Draft& draft, 
     double limit = std::numeric_limits<double>::infinity();
     std::optional<double> choice;
     for (const auto& other : draft.items) {
+        if (!layerVisible(draft, other.layer)) {
+            continue;
+        }
         if (item.id == other.id) {
             continue;
         }
@@ -435,6 +441,9 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
 {
     std::vector<std::vector<QPointF>> closed, open;
     for (const auto& item : draft.items) {
+        if (!layerVisible(draft, item.layer)) {
+            continue;
+        }
         const auto curves = draftCurves(item);
         if (!curves.empty()) {
             auto points = sampled(curves);

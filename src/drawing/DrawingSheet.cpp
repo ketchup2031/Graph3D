@@ -262,10 +262,10 @@ void paintCutLine(QPainter& p, const Section& section, const Projections& views,
     const double extent = (vertical ? view.height : view.width) * scale / 2 + 5;
     const QPointF along = vertical ? QPointF(0, 1) : QPointF(1, 0);
     const QPointF direction = vertical ? QPointF(-1, 0) : QPointF(0, onTop ? -1 : 1);
-    pen(p, 0.22, Qt::DashDotLine);
-    p.drawLine(center - along * extent, center + along * extent);
-    for (const double side : {-extent, extent}) {
-        const auto start = center + along * side;
+    for (const double side : {-1.0, 1.0}) {
+        const auto start = center + along * (side * extent);
+        pen(p, .5);
+        p.drawLine(start - along * (side * 2), start + along * (side * 3));
         const auto tip = start + direction * 5;
         pen(p, 0.28);
         p.drawLine(start, tip);
@@ -302,7 +302,8 @@ void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
 namespace {
 
 void paintViews(QPainter& painter, const Projections& views, const ViewLayout& layout,
-                bool dimensions, bool hiddenLines, const Section* section, bool showScales)
+                bool dimensions, bool hiddenLines, const Section* section, bool showScales,
+                const LocalSection* local = nullptr)
 {
     const auto& [front, right, top] = layout;
     using geometry::Plane;
@@ -311,6 +312,38 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
     const bool cutTop = section && section->plane == Plane::XY;
     const auto paint = [&](const View& view, const ViewPlacement& place, bool cut) {
         if (cut) {
+            if (local) {
+                const auto center = place.center + QPointF(local->center.x(), -local->center.y()) * place.scale;
+                const auto radius = local->radius * place.scale;
+                QPainterPath boundary;
+                for (int i = 0; i <= 144; ++i) {
+                    const double angle = i * std::acos(-1.0) / 72;
+                    const double r = radius * (1 + 0.045 * std::sin(angle * 12));
+                    const auto point = center + QPointF(std::cos(angle), std::sin(angle)) * r;
+                    if (i == 0) {
+                        boundary.moveTo(point);
+                    } else {
+                        boundary.lineTo(point);
+                    }
+                }
+                boundary.closeSubpath();
+                painter.save();
+                painter.setClipPath(boundary, Qt::IntersectClip);
+                paintHatch(painter, *section, place.center, place.scale);
+                paintView(painter, section->view, place.center, place.scale, false);
+                painter.restore();
+                QPainterPath outside;
+                outside.addRect(painter.clipBoundingRect());
+                outside.addPath(boundary);
+                outside.setFillRule(Qt::OddEvenFill);
+                painter.save();
+                painter.setClipPath(outside, Qt::IntersectClip);
+                paintView(painter, view, place.center, place.scale, hiddenLines);
+                painter.restore();
+                pen(painter, .18);
+                painter.drawPath(boundary);
+                return;
+            }
             paintHatch(painter, *section, place.center, place.scale);
             paintView(painter, section->view, place.center, place.scale, false);
         } else {
@@ -351,7 +384,7 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
                            bool cut, bool dimensioned) {
         const double offset = dimensions && dimensioned && !cut ? 11 : 4;
         const double y = place.center.y() + view.height * place.scale / 2 + offset;
-        auto caption = cut ? QCoreApplication::translate("DrawingSheet", "A–A") : name;
+        auto caption = cut && !local ? QCoreApplication::translate("DrawingSheet", "A–A") : name;
         if (showScales) {
             const auto ratio = place.scale >= 1 ? QStringLiteral("%1:1").arg(digits(place.scale))
                                                 : QStringLiteral("1:%1").arg(digits(1 / place.scale));
@@ -384,14 +417,49 @@ std::optional<SectionSettings> sectionSettings(const ModelViews& model)
     return std::nullopt;
 }
 
-void paintModelViews(QPainter& painter, const ModelViews& model)
+void paintModelViews(QPainter& painter, const ModelViews& model, bool eskd)
 {
     if (!model.geometry) {
         return;
     }
     const auto& cut = model.geometry->section;
     paintViews(painter, model.geometry->views, model.layout, model.dimensions, model.hiddenLines,
-               cut ? &*cut : nullptr, true);
+               cut ? &*cut : nullptr, true, model.local ? &*model.local : nullptr);
+    if (model.detail) {
+        const auto& detail = *model.detail;
+        const auto& views = model.geometry->views;
+        const auto& source = *std::array{&views.front, &views.right, &views.top}[detail.source];
+        const auto& parent = model.layout[detail.source];
+        const QPointF shift(detail.center.x(), -detail.center.y());
+        const QPointF center = parent.center + shift * parent.scale;
+        const double radius = detail.radius * parent.scale;
+        pen(painter, .18);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(center, radius, radius);
+        const double side = shift.x() > 0 ? -1 : 1;
+        const auto tip = center + QPointF(side * radius, -radius) / std::sqrt(2.0);
+        const auto elbow = tip + QPointF(side * 5, -5);
+        painter.drawLine(tip, elbow);
+        painter.drawLine(elbow, elbow + QPointF(side * 8, 0));
+        const auto mark = eskd ? QStringLiteral("Б") : QCoreApplication::translate("DrawingSheet", "B");
+        text(painter, {std::min(elbow.x(), elbow.x() + side * 8), elbow.y() - 5, 8, 5},
+             mark, 4, Qt::AlignCenter, true);
+
+        const auto& place = detail.placement;
+        const auto zoomRadius = detail.radius * place.scale;
+        QPainterPath region;
+        region.addEllipse(place.center, zoomRadius, zoomRadius);
+        painter.save();
+        painter.setClipPath(region, Qt::IntersectClip);
+        paintView(painter, source, place.center - shift * place.scale, place.scale, model.hiddenLines);
+        painter.restore();
+        pen(painter, .18);
+        painter.drawEllipse(place.center, zoomRadius, zoomRadius);
+        const auto ratio = place.scale >= 1 ? QStringLiteral("%1:1").arg(digits(place.scale))
+                                           : QStringLiteral("1:%1").arg(digits(1 / place.scale));
+        text(painter, {place.center.x() - 30, place.center.y() - zoomRadius - 8, 60, 6},
+             QStringLiteral("%1 (%2)").arg(mark, ratio), 4, Qt::AlignCenter, true);
+    }
 }
 
 void paintSheet(QPainter& painter, const QRectF& area, const Projections& views, const SheetOptions& options,

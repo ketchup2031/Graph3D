@@ -35,6 +35,20 @@ struct ModelProjection {
     std::optional<Section> section;
 };
 
+struct DetailView {
+    int source = 0;
+    QPointF center;
+    double radius = 10;
+    ViewPlacement placement{{140, 90}, 2};
+    bool operator==(const DetailView&) const = default;
+};
+
+struct LocalSection {
+    QPointF center;
+    double radius = 12;
+    bool operator==(const LocalSection&) const = default;
+};
+
 struct ModelViews {
     QString sourcePath;
     int bodyId = 0;
@@ -43,10 +57,12 @@ struct ModelViews {
     bool dimensions = true;
     bool hiddenLines = true;
     std::shared_ptr<const ModelProjection> geometry;
+    std::optional<DetailView> detail;
+    std::optional<LocalSection> local;
 };
 
 ViewLayout defaultViewLayout(const Projections& views, QSizeF paper);
 std::optional<SectionSettings> sectionSettings(const ModelViews& model);
-void paintModelViews(QPainter& painter, const ModelViews& model);
+void paintModelViews(QPainter& painter, const ModelViews& model, bool eskd = false);
 
 }  // namespace graph3d::drawing

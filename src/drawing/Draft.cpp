@@ -45,6 +45,11 @@ QPainterPath itemPath(const DraftItem& item)
         path.lineTo(b);
     };
     switch (item.kind) {
+    case DraftKind::Leader:
+    case DraftKind::Datum:
+    case DraftKind::Tolerance:
+    case DraftKind::Roughness:
+        break;
     case DraftKind::Line:
     case DraftKind::Rectangle:
     case DraftKind::Circle:
@@ -152,8 +157,203 @@ QPointF dimensionText(const DraftItem& item)
     }
 }
 
-void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame)
+struct AnnotationShape {
+    QPainterPath lines;
+    QPainterPath ink;
+    QRectF box;
+};
+
+AnnotationShape annotationShape(const DraftItem& item)
 {
+    AnnotationShape shape;
+    auto& lines = shape.lines;
+    auto& ink = shape.ink;
+    const auto segment = [&](QPointF a, QPointF b) {
+        lines.moveTo(a);
+        lines.lineTo(b);
+    };
+    const auto font = lettering(3.5);
+    const QFontMetricsF metrics(font);
+    const auto at = item.label;
+    const auto delta = at - item.a;
+    const double length = std::hypot(delta.x(), delta.y());
+    if (length > epsilon) {
+        segment(item.a, at);
+        const auto axis = delta / length;
+        const QPointF side(-axis.y(), axis.x());
+        const bool datum = item.kind == DraftKind::Datum;
+        const auto tip = datum ? item.a + axis * 2.5 : item.a;
+        const auto base = datum ? item.a : item.a + axis * 3;
+        const auto halfWidth = datum ? 1.3 : .7;
+        ink.moveTo(tip);
+        ink.lineTo(base + side * halfWidth);
+        ink.lineTo(base - side * halfWidth);
+        ink.closeSubpath();
+    }
+    if (item.kind == DraftKind::Leader) {
+        const auto width = std::max(7.0, metrics.horizontalAdvance(item.text) + 2);
+        segment(at, at + QPointF(width, 0));
+        ink.addText(at + QPointF(1, -1), font, item.text);
+        shape.box = {at.x(), at.y() - 5, width, 5};
+    } else if (item.kind == DraftKind::Roughness) {
+        const auto shelf = at + QPointF(7, -6);
+        segment(at, at + QPointF(2, 3));
+        segment(at + QPointF(2, 3), shelf);
+        const auto width = std::max(7.0, metrics.horizontalAdvance(item.text) + 2);
+        segment(shelf, shelf + QPointF(width, 0));
+        ink.addText(shelf + QPointF(1, -1), font, item.text);
+        shape.box = {at.x(), shelf.y() - 5, width + 7, 14};
+    } else {
+        auto fields = item.kind == DraftKind::Datum ? QStringList{item.text} : item.text.split(u'|');
+        double x = at.x();
+        for (const auto& field : fields) {
+            const double width = std::max(6.0, metrics.horizontalAdvance(field.trimmed()) + 3);
+            lines.addRect({x, at.y() - 3, width, 6});
+            ink.addText({x + (width - metrics.horizontalAdvance(field.trimmed())) / 2, at.y() + 1.2},
+                        font, field.trimmed());
+            x += width;
+        }
+        shape.box = {at.x(), at.y() - 3, x - at.x(), 6};
+    }
+    return shape;
+}
+
+QString numberedRequirements(const Draft& draft)
+{
+    QStringList numbered;
+    for (const auto& line : draft.paper.requirements.split(u'\n', Qt::SkipEmptyParts)) {
+        if (!line.trimmed().isEmpty()) {
+            numbered << QStringLiteral("%1. %2").arg(numbered.size() + 1).arg(line.trimmed());
+        }
+    }
+    return numbered.join(u'\n');
+}
+
+QRectF requirementsArea(const Draft& draft, const QRectF& frame, int sheet)
+{
+    const double width = draft.paper.eskd ? 185 : 145;
+    const double bottom = frame.bottom() - (draft.paper.eskd ? (sheet == 1 ? 56 : 16) : 25);
+    return QRectF(frame.right() - width, frame.top() + 2, width - 2, bottom - frame.top() - 2);
+}
+
+void paintRequirements(QPainter& p, const Draft& draft, const QRectF& frame, int sheet)
+{
+    const auto requirements = numberedRequirements(draft);
+    if (requirements.isEmpty()) {
+        return;
+    }
+    const auto area = requirementsArea(draft, frame, sheet);
+    p.save();
+    p.setClipRect(area, Qt::IntersectClip);
+    p.setPen(Qt::black);
+    p.setFont(lettering(3.5));
+    p.drawText(area, Qt::AlignBottom | Qt::AlignLeft | Qt::TextWrapAnywhere, requirements);
+    p.restore();
+}
+
+void paintEskdBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sheet, int total)
+{
+    const bool first = sheet == 1;
+    const double height = first ? 55 : 15;
+    p.save();
+    p.translate(frame.right() - 185, frame.bottom() - height);
+    p.fillRect(QRectF(0, 0, 185, height), Qt::white);
+    p.setPen(QPen(Qt::black, .45));
+    p.drawRect(QRectF(0, 0, 185, height));
+    const auto horizontal = [&](double y, double left, double right) {
+        p.drawLine(QPointF(left, y), QPointF(right, y));
+    };
+    const auto vertical = [&](double x, double top, double bottom) {
+        p.drawLine(QPointF(x, top), QPointF(x, bottom));
+    };
+    const auto cell = [&](QRectF area, const QString& value, int size = 3, int align = Qt::AlignCenter) {
+        p.setFont(lettering(size));
+        p.drawText(area.adjusted(.6, 0, -.6, 0), align | Qt::AlignVCenter | Qt::TextSingleLine,
+            QFontMetricsF(p.font()).elidedText(value.simplified(), Qt::ElideRight, area.width() - 1.2));
+    };
+    const auto format = draft.a3 ? QStringLiteral("A3") : QStringLiteral("A4");
+    if (first) {
+        vertical(75, 0, 55);
+        horizontal(15, 75, 185);
+        vertical(145, 15, 55);
+        horizontal(40, 75, 145);
+        horizontal(20, 145, 185);
+        horizontal(30, 145, 185);
+        horizontal(35, 145, 185);
+        vertical(160, 15, 30);
+        vertical(170, 15, 30);
+        vertical(160, 30, 35);
+    } else {
+        vertical(65, 0, 15);
+        vertical(165, 0, 15);
+        vertical(175, 0, 15);
+        horizontal(5, 165, 185);
+    }
+    p.setPen(QPen(Qt::black, .2));
+    const std::array firstColumns{0, 10, 17, 27, 50, 65, 75};
+    const std::array nextColumns{0, 7, 17, 40, 55, 65};
+    const QStringList headers{QStringLiteral("Зона"), QStringLiteral("Изм."), QStringLiteral("Лист"),
+                              QStringLiteral("№ докум."), QStringLiteral("Подп."), QStringLiteral("Дата")};
+    const auto table = [&](const auto& columns, int changeBottom, int bottom) {
+        for (int y = 5; y <= changeBottom; y += 5) {
+            horizontal(y, 0, columns.back());
+        }
+        for (std::size_t i = 1; i + 1 < columns.size(); ++i) {
+            vertical(columns[i], 0, changeBottom);
+        }
+        const int start = first ? 0 : 1;
+        for (std::size_t i = 0; i + 1 < columns.size(); ++i) {
+            cell(QRectF(columns[i], changeBottom - 5, columns[i + 1] - columns[i], 5),
+                 headers[i + start], 2);
+        }
+        if (first) {
+            for (int y = changeBottom + 5; y < bottom; y += 5) {
+                horizontal(y, 0, columns.back());
+            }
+            for (const auto x : {17, 40, 65}) {
+                vertical(x, changeBottom, bottom);
+            }
+        }
+    };
+    if (first) {
+        table(firstColumns, 30, 55);
+        const QStringList roles{QStringLiteral("Разраб."), QStringLiteral("Пров."), QStringLiteral("Т. контр."),
+                                QStringLiteral("Н. контр."), QStringLiteral("Утв.")};
+        for (int i = 0; i < roles.size(); ++i) {
+            cell(QRectF(0, 30 + i * 5, 17, 5), roles[i], 2);
+        }
+        cell({17, 30, 23, 5}, draft.author);
+        cell({75, 0, 110, 15}, draft.number, 5);
+        cell({75, 15, 70, 25}, draft.title, 5);
+        cell({75, 40, 70, 15}, draft.paper.material, 4);
+        cell({145, 15, 15, 5}, QStringLiteral("Лит."), 2);
+        cell({160, 15, 10, 5}, QStringLiteral("Масса"), 2);
+        cell({170, 15, 15, 5}, QStringLiteral("Масштаб"), 2);
+        const double scale = draft.modelViews ? draft.modelViews->layout[0].scale : 1;
+        const auto ratio = scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 6)
+                                      : QStringLiteral("1:%1").arg(1 / scale, 0, 'g', 6);
+        cell({170, 20, 15, 10}, ratio, 3);
+        cell({145, 30, 15, 5}, QStringLiteral("Лист %1").arg(sheet), 2);
+        cell({160, 30, 25, 5}, QStringLiteral("Листов %1").arg(total), 2);
+        cell({145, 35, 40, 20}, draft.paper.organization);
+    } else {
+        table(nextColumns, 15, 15);
+        cell({65, 0, 100, 15}, draft.number, 5);
+        cell({165, 0, 10, 5}, QStringLiteral("Вер."), 2);
+        cell({175, 0, 10, 5}, QStringLiteral("Лист"), 2);
+        cell({175, 5, 10, 10}, QString::number(sheet));
+    }
+    horizontal(height + 4, 0, 185);
+    cell({155, height, 30, 4}, QStringLiteral("Формат %1").arg(format), 2);
+    p.restore();
+}
+
+void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sheet, int total)
+{
+    if (draft.paper.eskd) {
+        paintEskdBlock(p, draft, frame, sheet, total);
+        return;
+    }
     const QRectF block(frame.right() - 145, frame.bottom() - 24, 145, 24);
     const double x = block.left();
     const double y = block.top();
@@ -172,7 +372,8 @@ void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame)
     cell({x + 2, y + 9, 102, 8}, draft.number);
     cell({x + 108, y + 9, 35, 8}, QCoreApplication::translate("DraftSheet", draft.modelViews ? "mm" : "1:1   mm"));
     cell({x + 2, y + 17, 102, 7}, draft.author);
-    cell({x + 108, y + 17, 35, 7}, draft.a3 ? QStringLiteral("A3   1/1") : QStringLiteral("A4   1/1"));
+    cell({x + 108, y + 17, 35, 7}, QStringLiteral("%1   %2/%3")
+        .arg(draft.a3 ? QStringLiteral("A3") : QStringLiteral("A4")).arg(sheet).arg(total));
 }
 
 }  // namespace
@@ -322,7 +523,26 @@ DraftItem DraftGeometry::resolve(const DraftItem& item) const
 
 QSizeF draftSize(const Draft& draft)
 {
-    return draft.a3 ? QSizeF(420, 297) : QSizeF(297, 210);
+    auto size = draft.a3 ? QSizeF(420, 297) : QSizeF(297, 210);
+    if (draft.paper.portrait) {
+        size.transpose();
+    }
+    return size;
+}
+
+bool isAnnotation(DraftKind kind)
+{
+    return kind >= DraftKind::Leader && kind <= DraftKind::Roughness;
+}
+
+bool layerVisible(const Draft& draft, int layer)
+{
+    return layer >= 0 && layer < static_cast<int>(draft.layers.size()) && draft.layers[layer].visible;
+}
+
+bool layerEditable(const Draft& draft, int layer)
+{
+    return layerVisible(draft, layer) && !draft.layers[layer].locked;
 }
 
 bool validItem(const DraftItem& item)
@@ -341,6 +561,14 @@ bool validItem(const DraftItem& item)
     case DraftKind::Line:
     case DraftKind::Circle: return std::hypot(dx, dy) >= epsilon;
     case DraftKind::Rectangle: return dx >= epsilon && dy >= epsilon;
+    case DraftKind::Tolerance: {
+        const auto fields = item.text.split(u'|');
+        return item.text.size() <= 200 && fields.size() >= 2 && fields.size() <= 6
+            && std::ranges::none_of(fields, [](const auto& field) { return field.trimmed().isEmpty(); });
+    }
+    case DraftKind::Leader:
+    case DraftKind::Datum:
+    case DraftKind::Roughness:
     case DraftKind::Text: return !item.text.trimmed().isEmpty() && item.text.size() <= 200;
     case DraftKind::Horizontal:
     case DraftKind::Vertical:
@@ -370,6 +598,14 @@ void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
         pen.setDashPattern({7, 4});
     } else if (item.stroke == DraftStroke::Center) {
         pen.setDashPattern({15, 4, 3, 4});
+    }
+    if (isAnnotation(item.kind)) {
+        const auto annotation = annotationShape(item);
+        p.setPen(QPen(color, .22, Qt::SolidLine, Qt::RoundCap));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(annotation.lines);
+        p.fillPath(annotation.ink, color);
+        return;
     }
     if (item.kind == DraftKind::Text) {
         p.fillPath(itemPath(item), color);
@@ -407,6 +643,12 @@ void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
 
 bool draftHit(const DraftItem& item, QPointF point, double tolerance)
 {
+    if (isAnnotation(item.kind)) {
+        const auto annotation = annotationShape(item);
+        QPainterPathStroker stroke;
+        stroke.setWidth(tolerance * 2);
+        return annotation.box.contains(point) || stroke.createStroke(annotation.lines).contains(point);
+    }
     const auto path = itemPath(item);
     if (item.kind == DraftKind::Text) {
         return path.boundingRect().adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(point);
@@ -419,7 +661,8 @@ bool draftHit(const DraftItem& item, QPointF point, double tolerance)
     return stroke.createStroke(path).contains(point);
 }
 
-void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const DraftItem* preview)
+static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int selected,
+                            const DraftItem* preview, int sheet, int total)
 {
     const auto size = draftSize(draft);
     const QRectF paper(QPointF{}, size);
@@ -443,14 +686,14 @@ void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const 
     p.save();
     p.setClipRect(frame, Qt::IntersectClip);
     if (draft.modelViews) {
-        paintModelViews(p, *draft.modelViews);
+        paintModelViews(p, *draft.modelViews, draft.paper.eskd);
     }
     const DraftGeometry geometry(draft, preview);
     for (const bool hatches : {true, false}) {
         for (std::size_t i = 0; i < draft.items.size(); ++i) {
             const bool active = static_cast<int>(i) == selected;
             const auto& item = active && preview ? *preview : draft.items[i];
-            if ((item.kind == DraftKind::Hatch) == hatches) {
+            if (layerVisible(draft, item.layer) && (item.kind == DraftKind::Hatch) == hatches) {
                 if (isDimension(item.kind)) {
                     paintDraftItem(p, geometry.resolve(item), active);
                 } else {
@@ -460,12 +703,29 @@ void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const 
         }
     }
     p.restore();
-    titleBlock(p, draft, frame);
+    titleBlock(p, draft, frame, sheet, total);
+    paintRequirements(p, draft, frame, sheet);
     p.restore();
+}
+
+void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const DraftItem* preview,
+                int sheet, int total)
+{
+    paintSheetDraft(p, draft, grid, selected, preview, sheet, total);
 }
 
 void exportDraftPdf(const QString& path, const Draft& draft)
 {
+    const auto pages = static_cast<int>(draft.additionalSheets.size()) + 1;
+    const QFontMetricsF metrics(lettering(3.5));
+    for (int i = 0; i < pages; ++i) {
+        const auto& sheet = i == 0 ? draft : draft.additionalSheets[i - 1];
+        const auto frame = QRectF(QPointF{}, draftSize(sheet)).marginsRemoved(QMarginsF(20, 5, 5, 5));
+        const auto area = requirementsArea(sheet, frame, i + 1);
+        if (metrics.boundingRect(area, Qt::TextWrapAnywhere, numberedRequirements(sheet)).height() > area.height()) {
+            throw std::runtime_error("Technical requirements do not fit on the drawing sheet.");
+        }
+    }
     QSaveFile file(path);
     const auto fileFailure = [&] { return std::runtime_error(file.errorString().toStdString()); };
     if (!file.open(QIODevice::WriteOnly)) {
@@ -473,8 +733,13 @@ void exportDraftPdf(const QString& path, const Draft& draft)
     }
     {
         QPdfWriter writer(&file);
-        writer.setPageLayout(QPageLayout(QPageSize(draft.a3 ? QPageSize::A3 : QPageSize::A4),
-                                         QPageLayout::Landscape, QMarginsF{}));
+        const auto setPage = [&](const Draft& sheet) {
+            if (!writer.setPageLayout(QPageLayout(QPageSize(sheet.a3 ? QPageSize::A3 : QPageSize::A4),
+                sheet.paper.portrait ? QPageLayout::Portrait : QPageLayout::Landscape, {}))) {
+                throw std::runtime_error("Could not set the drawing PDF page layout.");
+            }
+        };
+        setPage(draft);
         writer.setResolution(300);
         writer.setCreator(QStringLiteral("Graph3D"));
         writer.setTitle(draft.title);
@@ -482,9 +747,20 @@ void exportDraftPdf(const QString& path, const Draft& draft)
         if (!painter.begin(&writer)) {
             throw std::runtime_error("Could not create the drawing PDF.");
         }
-        const auto size = draftSize(draft);
-        painter.scale(writer.width() / size.width(), writer.height() / size.height());
-        paintDraft(painter, draft);
+        for (int i = 0; i < pages; ++i) {
+            const Draft& sheet = i == 0 ? draft : draft.additionalSheets[i - 1];
+            if (i != 0) {
+                setPage(sheet);
+                if (!writer.newPage()) {
+                    throw std::runtime_error("Could not add a drawing PDF page.");
+                }
+            }
+            const auto size = draftSize(sheet);
+            painter.save();
+            painter.scale(writer.width() / size.width(), writer.height() / size.height());
+            paintDraft(painter, sheet, false, -1, nullptr, i + 1, pages);
+            painter.restore();
+        }
         if (!painter.end()) {
             throw std::runtime_error("Could not finish the drawing PDF.");
         }

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace graph3d {
 namespace {
@@ -29,7 +30,7 @@ DraftItem moved(DraftItem item, QPointF delta)
     if (item.kind != DraftKind::Text) {
         item.b += delta;
     }
-    if (drawing::isDimension(item.kind) || item.kind == DraftKind::Arc) {
+    if (drawing::isDimension(item.kind) || item.kind == DraftKind::Arc || drawing::isAnnotation(item.kind)) {
         item.label += delta;
     }
     for (auto& point : item.points) {
@@ -100,8 +101,19 @@ void DraftCanvas::fit()
     update();
 }
 
+void DraftCanvas::pickPoint(std::function<void(QPointF)> callback)
+{
+    cancel();
+    pointPick_ = std::move(callback);
+    setCursor(Qt::CrossCursor);
+}
+
 void DraftCanvas::cancel()
 {
+    if (pointPick_) {
+        pointPick_ = {};
+        unsetCursor();
+    }
     points_.clear();
     lineInput_.reset();
     dragging_ = false;
@@ -157,6 +169,9 @@ DraftCanvas::Pick DraftCanvas::snapped(QPointF page) const
         consider(points_.front().position, {});
     }
     for (const auto& item : draft_.items) {
+        if (!drawing::layerVisible(draft_, item.layer)) {
+            continue;
+        }
         for (const auto anchor : drawing::draftAnchors(item.kind)) {
             if (const auto point = drawing::draftAnchorPoint(item, anchor)) {
                 consider(*point, {item.id, anchor});
@@ -210,7 +225,8 @@ std::optional<DraftItem> DraftCanvas::pendingItem(QPointF end) const
     }
     const auto kind = *tool_;
     const bool dimension = drawing::isDimension(kind);
-    if ((dimension && points_.size() == 1) || (kind == DraftKind::Arc && points_.size() == 1)) {
+    if (drawing::isAnnotation(kind) || (dimension && points_.size() == 1)
+        || (kind == DraftKind::Arc && points_.size() == 1)) {
         return DraftItem{DraftKind::Line, points_.front().position, end};
     }
     DraftItem item{kind, points_.front().position, end, {}, {}, dimension ? drawing::DraftStroke::Solid : stroke_};
@@ -247,7 +263,7 @@ void DraftCanvas::paintEvent(QPaintEvent*)
     painter.fillRect(rect(), palette().dark());
     painter.translate(origin());
     painter.scale(scale(), scale());
-    drawing::paintDraft(painter, draft_, grid_, selected_, preview_ ? &*preview_ : nullptr);
+    drawing::paintDraft(painter, draft_, grid_, selected_, preview_ ? &*preview_ : nullptr, page_, total_);
     const auto size = drawing::draftSize(draft_);
     painter.setClipRect(QRectF(QPointF{}, size).marginsRemoved(QMarginsF(20, 5, 5, 5)));
     const auto ghost = pendingItem(cursor_);
@@ -303,6 +319,9 @@ int DraftCanvas::hitItem(QPointF point, bool curvesOnly) const
     int hatch = -1;
     for (int i = static_cast<int>(draft_.items.size()) - 1; i >= 0; --i) {
         const auto& item = draft_.items[i];
+        if (!drawing::layerEditable(draft_, item.layer)) {
+            continue;
+        }
         if (curvesOnly && drawing::draftAnchors(item.kind).empty()) {
             continue;
         }
@@ -362,6 +381,9 @@ std::optional<DraftCanvas::Pick> DraftCanvas::circularPick(QPointF point) const
     std::optional<Pick> result;
     double best = 8 / scale();
     for (const auto& item : draft_.items) {
+        if (!drawing::layerVisible(draft_, item.layer)) {
+            continue;
+        }
         if (item.kind != DraftKind::Circle && item.kind != DraftKind::Arc) {
             continue;
         }
@@ -398,6 +420,14 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
     }
     setFocus();
     const auto raw = toSheet(event->position());
+    if (pointPick_) {
+        if (canPlace(raw)) {
+            auto callback = std::exchange(pointPick_, {});
+            unsetCursor();
+            callback(raw);
+        }
+        return;
+    }
     if (modify_) {
         if (canPlace(raw)) {
             handleModify(raw);
@@ -441,6 +471,32 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
         if (accepted && !text.trimmed().isEmpty()) {
             emit itemCreated(DraftItem{DraftKind::Text, point.position, {}, {}, text.left(200)});
         }
+        return;
+    }
+    if (drawing::isAnnotation(*tool_)) {
+        if (points_.empty()) {
+            points_.push_back(point);
+            emit toolMessage(tr("Place the annotation label."));
+            return;
+        }
+        const auto anchor = points_.front().position;
+        points_.clear();
+        const bool tolerance = *tool_ == DraftKind::Tolerance;
+        const auto label = tolerance ? tr("Symbol | tolerance | optional datums") : tr("Annotation text");
+        bool accepted = false;
+        const auto defaultText = *tool_ == DraftKind::Datum ? QStringLiteral("A")
+            : tolerance ? QStringLiteral("⊥ | 0.05 | A")
+            : *tool_ == DraftKind::Roughness ? QStringLiteral("Ra 3.2") : QString{};
+        const auto text = QInputDialog::getText(this, tr("Annotation"), label, QLineEdit::Normal, defaultText, &accepted).trimmed();
+        if (accepted) {
+            const DraftItem item{*tool_, anchor, {}, point.position, text};
+            if (drawing::validItem(item)) {
+                emit itemCreated(item);
+            } else {
+                emit toolMessage(tr("Enter valid annotation text."));
+            }
+        }
+        update();
         return;
     }
     const bool dimension = drawing::isLinearDimension(*tool_);

@@ -15,7 +15,7 @@ namespace graph3d::io {
 namespace {
 
 constexpr std::array kinds{"line", "rectangle", "circle", "text", "horizontal", "vertical", "arc", "polyline",
-                           "aligned", "angular", "radius", "diameter", "hatch"};
+                           "aligned", "angular", "radius", "diameter", "hatch", "leader", "datum", "tolerance", "roughness"};
 constexpr std::array strokes{"solid", "hidden", "center"};
 constexpr std::array anchors{"start", "end", "corner-ab", "corner-ba", "center", "right", "left", "top", "bottom", "curve", "intersection"};
 constexpr int maxItems = 20000;
@@ -142,16 +142,8 @@ void validateLinks(const drawing::Draft& draft)
     }
 }
 
-}  // namespace
-
-drawing::Draft openDraft(const QString& path)
+drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& path, int& remaining)
 {
-    const auto root = QJsonDocument::fromJson(readFile(path)).object();
-    const auto version = root.value("version").toDouble();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || (version != 1 && version != 2 && version != 3 && version != 4)
-        || root.value("unit") != QJsonValue("mm")) {
-        fileError(QStringLiteral("This is not a supported Graph3D drawing."));
-    }
     const auto paper = root.value("paper").toString();
     const auto items = root.value("items").toArray();
     if ((paper != "A4" && paper != "A3") || !root.value("items").isArray() || items.size() > maxItems) {
@@ -160,7 +152,30 @@ drawing::Draft openDraft(const QString& path)
     drawing::Draft draft{readText(root.value("title")), readText(root.value("number")),
                          readText(root.value("author")), paper == "A3", {}};
     draft.items.reserve(items.size());
-    int remaining = maxDraftPoints;
+    if (version == 5) {
+        if (!root.value("portrait").isBool() || !root.value("eskd").isBool()
+            || !root.value("requirements").isString() || root.value("requirements").toString().size() > 2400) {
+            fileError(QStringLiteral("Invalid drawing sheet settings."));
+        }
+        draft.paper = {root.value("portrait").toBool(), root.value("eskd").toBool(),
+            readText(root.value("material")), readText(root.value("organization")), root.value("requirements").toString()};
+        const auto layers = root.value("layers").toArray();
+        if (layers.isEmpty() || layers.size() > drawing::maxLayers) {
+            fileError(QStringLiteral("Invalid drawing layers."));
+        }
+        if (draft.paper.eskd && !draft.a3 && !draft.paper.portrait) {
+            fileError(QStringLiteral("ESKD drawings on A4 require portrait orientation."));
+        }
+        draft.layers.clear();
+        for (const auto value : layers) {
+            const auto layer = value.toObject();
+            if (!layer.value("visible").isBool() || !layer.value("locked").isBool()) {
+                fileError(QStringLiteral("Invalid drawing layers."));
+            }
+            draft.layers.push_back({readText(layer.value("name")), layer.value("visible").toBool(),
+                                    layer.value("locked").toBool()});
+        }
+    }
     for (const auto value : items) {
         const auto entry = value.toObject();
         drawing::DraftItem item{readName<drawing::DraftKind>(entry.value("type"), kinds),
@@ -182,7 +197,11 @@ drawing::Draft openDraft(const QString& path)
         } else if (item.kind > drawing::DraftKind::Vertical) {
             fileError(QStringLiteral("Invalid drawing geometry."));
         }
-        if (!drawing::validItem(item)) {
+        if (version == 5) {
+            item.layer = entry.value("layer").toInt(-1);
+        }
+        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())
+            || (version < 5 && drawing::isAnnotation(item.kind)) || !drawing::validItem(item)) {
             fileError(QStringLiteral("Invalid drawing geometry."));
         }
         item.id = version >= 2 ? readId(entry.value("id")) : QUuid::createUuid();
@@ -195,13 +214,13 @@ drawing::Draft openDraft(const QString& path)
     if (version >= 2) {
         validateLinks(draft);
     }
-    if (version == 3 || (version == 4 && root.contains("modelViews"))) {
+    if (version == 3 || (version >= 4 && root.contains("modelViews"))) {
         draft.modelViews = readModelViews(root.value("modelViews").toObject(), path);
     }
     return draft;
 }
 
-void saveDraft(const QString& path, const drawing::Draft& draft)
+QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int version, int& remaining)
 {
     if (draft.items.size() > maxItems || draft.title.size() > 200 || draft.number.size() > 200
         || draft.author.size() > 200) {
@@ -211,24 +230,19 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
     if (linked) {
         validateLinks(draft);
     }
-    const auto curveAnchor = [](const auto& reference) {
-        return reference && (reference->anchor == drawing::DraftAnchor::Curve
-                          || reference->anchor == drawing::DraftAnchor::Intersection);
-    };
-    const bool modern = std::ranges::any_of(draft.items, [&](const auto& item) {
-        return item.kind > drawing::DraftKind::Vertical || curveAnchor(item.anchorA) || curveAnchor(item.anchorB);
-    });
-    const int version = modern ? 4 : draft.modelViews ? 3 : linked ? 2 : 1;
-    int remaining = maxDraftPoints;
     QJsonArray items;
     for (const auto& item : draft.items) {
-        if (!drawing::validItem(item) || item.text.size() > 200) {
+        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())
+            || !drawing::validItem(item) || item.text.size() > 200) {
             fileError(QStringLiteral("Invalid drawing item."));
         }
         QJsonObject entry{{"type", kinds.at(static_cast<std::size_t>(item.kind))},
             {"stroke", strokes.at(static_cast<std::size_t>(item.stroke))},
             {"a", writePoint(item.a)}, {"b", writePoint(item.b)}, {"label", writePoint(item.label)},
             {"text", item.text}};
+        if (version == 5) {
+            entry.insert("layer", item.layer);
+        }
         if (version >= 2) {
             const auto id = item.id.isNull() ? QUuid::createUuid() : item.id;
             entry.insert("id", id.toString(QUuid::WithoutBraces));
@@ -239,7 +253,7 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
                 entry.insert("anchorB", writeAnchor(*item.anchorB));
             }
         }
-        if (version == 4) {
+        if (version >= 4) {
             if (item.anchorC) {
                 entry.insert("anchorC", writeAnchor(*item.anchorC));
             }
@@ -256,12 +270,105 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
         }
         items.append(entry);
     }
-    QJsonObject root{{"format", "Graph3D Drawing"}, {"version", version}, {"unit", "mm"},
-        {"paper", draft.a3 ? "A3" : "A4"}, {"title", draft.title}, {"number", draft.number},
+    QJsonObject root{{"paper", draft.a3 ? "A3" : "A4"}, {"title", draft.title}, {"number", draft.number},
         {"author", draft.author}, {"items", items}};
     if (draft.modelViews) {
         root.insert("modelViews", writeModelViews(*draft.modelViews, path));
     }
+    if (version == 5) {
+        if (draft.layers.empty() || draft.layers.size() > drawing::maxLayers || draft.paper.material.size() > 200
+            || draft.paper.organization.size() > 200 || draft.paper.requirements.size() > 2400) {
+            fileError(QStringLiteral("Invalid drawing sheet settings."));
+        }
+        if (draft.paper.eskd && !draft.a3 && !draft.paper.portrait) {
+            fileError(QStringLiteral("ESKD drawings on A4 require portrait orientation."));
+        }
+        QJsonArray layers;
+        for (const auto& layer : draft.layers) {
+            if (layer.name.size() > 200) {
+                fileError(QStringLiteral("Invalid drawing layers."));
+            }
+            layers.append(QJsonObject{{"name", layer.name}, {"visible", layer.visible}, {"locked", layer.locked}});
+        }
+        root.insert("portrait", draft.paper.portrait);
+        root.insert("eskd", draft.paper.eskd);
+        root.insert("material", draft.paper.material);
+        root.insert("organization", draft.paper.organization);
+        root.insert("requirements", draft.paper.requirements);
+        root.insert("layers", layers);
+    }
+    return root;
+}
+
+int draftVersion(const drawing::Draft& draft)
+{
+    if (!draft.additionalSheets.empty() || draft.paper != drawing::DraftPaper{}
+        || draft.layers != std::vector<drawing::DraftLayer>{{}}
+        || (draft.modelViews && (draft.modelViews->detail || draft.modelViews->local))
+        || std::ranges::any_of(draft.items, [](const auto& item) {
+            return item.layer != 0 || drawing::isAnnotation(item.kind);
+        })) {
+        return 5;
+    }
+    const auto curveAnchor = [](const auto& reference) {
+        return reference && (reference->anchor == drawing::DraftAnchor::Curve
+                          || reference->anchor == drawing::DraftAnchor::Intersection);
+    };
+    const bool modern = std::ranges::any_of(draft.items, [&](const auto& item) {
+        return item.kind > drawing::DraftKind::Vertical || curveAnchor(item.anchorA) || curveAnchor(item.anchorB);
+    });
+    const bool linked = std::ranges::any_of(draft.items, [](const auto& item) { return item.anchorA || item.anchorB || item.anchorC; });
+    return modern ? 4 : draft.modelViews ? 3 : linked ? 2 : 1;
+}
+
+}  // namespace
+
+drawing::Draft openDraft(const QString& path)
+{
+    const auto root = QJsonDocument::fromJson(readFile(path)).object();
+    const int version = root.value("version").toInt();
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 5
+        || root.value("unit") != QJsonValue("mm")) {
+        fileError(QStringLiteral("This is not a supported Graph3D drawing."));
+    }
+    int remaining = maxDraftPoints;
+    if (version < 5) {
+        return decodeSheet(root, version, path, remaining);
+    }
+    const auto sheets = root.value("sheets").toArray();
+    if (sheets.isEmpty() || sheets.size() > drawing::maxSheets) {
+        fileError(QStringLiteral("Invalid drawing sheet or item list."));
+    }
+    auto draft = decodeSheet(sheets[0].toObject(), version, path, remaining);
+    for (qsizetype i = 1; i < sheets.size(); ++i) {
+        draft.additionalSheets.push_back(decodeSheet(sheets[i].toObject(), version, path, remaining));
+    }
+    return draft;
+}
+
+void saveDraft(const QString& path, const drawing::Draft& draft)
+{
+    const int version = draftVersion(draft);
+    int remaining = maxDraftPoints;
+    QJsonObject root;
+    if (version < 5) {
+        root = encodeSheet(path, draft, version, remaining);
+    } else {
+        if (draft.additionalSheets.size() >= drawing::maxSheets) {
+            fileError(QStringLiteral("Invalid drawing sheet or item list."));
+        }
+        QJsonArray sheets{encodeSheet(path, draft, version, remaining)};
+        for (const auto& sheet : draft.additionalSheets) {
+            if (!sheet.additionalSheets.empty()) {
+                fileError(QStringLiteral("Invalid drawing sheet or item list."));
+            }
+            sheets.append(encodeSheet(path, sheet, version, remaining));
+        }
+        root.insert("sheets", sheets);
+    }
+    root.insert("format", "Graph3D Drawing");
+    root.insert("version", version);
+    root.insert("unit", "mm");
     const auto data = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (data.size() > fileLimit) {
         fileError(QStringLiteral("This drawing exceeds the file limits."));
