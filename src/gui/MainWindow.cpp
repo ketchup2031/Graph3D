@@ -1,6 +1,7 @@
 #include "gui/MainWindow.h"
 
 #include "gui/AssemblyDialog.h"
+#include "gui/DraftWindow.h"
 #include "gui/DrawingDialog.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
@@ -84,6 +85,7 @@ MainWindow::MainWindow()
         logPath_ = QDir(folder).filePath(QStringLiteral("graph3d.log"));
     }
     createMenus();
+    connect(startPage_, &StartPage::newDrawingRequested, this, [this] { showDraft(); });
     connect(startPage_, &StartPage::newProjectRequested, this, &MainWindow::newProject);
     connect(startPage_, &StartPage::cubeRequested, this, &MainWindow::initializeScene);
     connect(startPage_, &StartPage::sketchRequested, this, [this] {
@@ -307,6 +309,8 @@ void MainWindow::createMenus()
     connect(createAssembly_, &QAction::triggered, this, [this] { configureAssembly(0); });
 
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
+    auto* newDraft = menuAction(drawingMenu, tr("New 2D drawing…"), "newDrawing");
+    connect(newDraft, &QAction::triggered, this, [this] { showDraft(); });
     drawing_ = menuAction(drawingMenu, tr("Create drawing from selected body…"), "drawingPreview");
     connect(drawing_, &QAction::triggered, this, &MainWindow::showDrawing);
 
@@ -820,7 +824,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
         event->ignore();
         return;
     }
-    if (confirmSave()) {
+    if (confirmSave() && (!draftWindow_ || draftWindow_->close())) {
         event->accept();
     } else {
         event->ignore();
@@ -830,15 +834,37 @@ void MainWindow::closeEvent(QCloseEvent* event)
 void MainWindow::openProject()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
-                                                  tr("Graph3D projects (*.graph3d)"), nullptr,
+                                                  tr("Graph3D files (*.graph3d *.g3draw);;3D projects (*.graph3d);;2D drawings (*.g3draw)"), nullptr,
                                                   darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openProjectPath(path);
     }
 }
 
+void MainWindow::showDraft(const QString& path)
+{
+    if (!draftWindow_) {
+        draftWindow_ = new DraftWindow(this);
+        connect(draftWindow_, &DraftWindow::fileUsed, startPage_, &StartPage::rememberProject);
+        if (!path.isEmpty() && !draftWindow_->openDrawing(path)) {
+            draftWindow_->deleteLater();
+            draftWindow_.clear();
+            return;
+        }
+    } else if (path.isEmpty() ? !draftWindow_->newDrawing() : !draftWindow_->openDrawing(path)) {
+        return;
+    }
+    draftWindow_->showNormal();
+    draftWindow_->raise();
+    draftWindow_->activateWindow();
+}
+
 void MainWindow::openProjectPath(const QString& path, bool example)
 {
+    if (!example && path.endsWith(QStringLiteral(".g3draw"), Qt::CaseInsensitive)) {
+        showDraft(path);
+        return;
+    }
     try {
         auto loaded = io::openProject(path);
         if (!confirmSave() || !showWorkspace()) {

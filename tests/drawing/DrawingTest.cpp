@@ -1,4 +1,5 @@
 #include "drawing/DrawingSheet.h"
+#include "io/DraftIO.h"
 #include "geometry/SketchModeling.h"
 #include "io/ProjectIO.h"
 
@@ -213,6 +214,41 @@ void verifySections(const QDir& source, const QDir& output)
     check(rejected, "A section on the body boundary was accepted");
 }
 
+void verifyDraft(const QDir& output)
+{
+    using enum draw::DraftKind;
+    const draw::Draft draft{"Mounting plate", "G3D-2D-001", "Graph3D", false, {
+        {Rectangle, {70, 55}, {210, 145}},
+        {Circle, {105, 100}, {117, 100}},
+        {Circle, {175, 100}, {187, 100}},
+        {Line, {85, 100}, {196, 100}, {}, {}, draw::DraftStroke::Center},
+        {Horizontal, {70, 55}, {210, 55}, {140, 38}},
+        {Vertical, {70, 55}, {70, 145}, {48, 100}},
+        {Text, {70, 161}, {}, {}, "2 x holes"},
+    }};
+    const auto path = output.filePath("mounting-plate.g3draw");
+    io::saveDraft(path, draft);
+    const auto reopened = io::openDraft(path);
+    check(reopened.items == draft.items && reopened.title == draft.title && reopened.number == draft.number
+          && reopened.author == draft.author && reopened.a3 == draft.a3, "Draft data changed after reloading");
+    check(draw::draftHit(draft.items[1], {117, 100}, .1)
+          && !draw::draftHit(draft.items[1], {105, 100}, .1), "Circle selection ignores the circumference");
+    QFile pdf(output.filePath("mounting-plate.pdf"));
+    draw::exportDraftPdf(pdf.fileName(), reopened);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.read(5) == "%PDF-" && pdf.size() > 1000,
+          "2D draft PDF was not produced");
+    QFile bad(output.filePath("invalid.g3draw"));
+    check(bad.open(QIODevice::WriteOnly) && bad.write("{}") == 2, "Could not write invalid drawing");
+    bad.close();
+    bool rejected = false;
+    try {
+        io::openDraft(bad.fileName());
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "An invalid native file was accepted");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -237,6 +273,7 @@ int main(int argc, char** argv)
             verifyExample(QDir(args.at(1)), output, example);
         }
         verifySections(QDir(args.at(1)), output);
+        verifyDraft(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

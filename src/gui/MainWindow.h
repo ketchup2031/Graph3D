@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
+#include <QPointer>
 
 #include <functional>
 #include <optional>
@@ -21,6 +22,7 @@ namespace graph3d {
 
 namespace io { enum class ExchangeFormat; }
 
+class DraftWindow;
 class PropertyPanel;
 class SketchEditor;
 class StartPage;
@@ -42,6 +44,7 @@ private:
     bool showWorkspace();
     bool newProject();
     void showMouseControls();
+    void showDraft(const QString& path = {});
     void openProjectPath(const QString& path, bool example = false);
     void updateFileState();
     bool saveProject(bool choosePath);
@@ -109,6 +112,7 @@ private:
     QString projectPath_;
     std::uint64_t savedRevision_ = 0;
     bool hasWorkspace_ = false;
+    QPointer<DraftWindow> draftWindow_;
 };
 
 }  // namespace graph3d

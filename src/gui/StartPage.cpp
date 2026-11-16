@@ -55,7 +55,7 @@ QLabel* label(const QString& text, const char* name, QWidget* parent)
     return item;
 }
 
-enum class CommandIcon { Part, Sketch, Cube };
+enum class CommandIcon { Part, Sketch, Cube, Drawing };
 
 QIcon commandIcon(CommandIcon kind, bool dark)
 {
@@ -77,6 +77,11 @@ QIcon commandIcon(CommandIcon kind, bool dark)
         painter.drawRoundedRect(QRectF(3, 3, 20, 20), 2, 2);
         painter.setBrush(Qt::NoBrush);
         painter.drawPolyline(QPolygonF{{7, 18}, {11, 8}, {19, 11}, {18, 18}, {7, 18}});
+        break;
+    case CommandIcon::Drawing:
+        painter.drawRect(QRectF(3, 5, 20, 16));
+        painter.drawRect(QRectF(6, 8, 14, 10));
+        painter.drawLine(QPointF(13, 15), QPointF(20, 15));
         break;
     case CommandIcon::Cube:
         painter.drawPolygon(QPolygonF{{13, 2}, {23, 8}, {23, 18}, {13, 24}, {3, 18}, {3, 8}});
@@ -233,6 +238,7 @@ void StartPage::setDarkTheme(bool dark)
     preview_->setDarkTheme(dark);
     const std::array commands{
         std::pair{"startNewPart", CommandIcon::Part},
+        std::pair{"startNewDrawing", CommandIcon::Drawing},
         std::pair{"startSketch", CommandIcon::Sketch},
         std::pair{"startCube", CommandIcon::Cube},
     };
@@ -311,8 +317,8 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
     recent->addStretch();
 
     auto* create = buildPanel(tr("Create"), createPane_);
-    auto* commands = new QHBoxLayout;
-    const auto addCommand = [&](const QString& title, const char* name, auto signal) {
+    auto* commands = new QGridLayout;
+    const auto addCommand = [&](const QString& title, const char* name, auto signal, int row, int column) {
         auto* button = new QPushButton(title, createPane_);
         button->setObjectName(QString::fromLatin1(name));
         button->setProperty("card", true);
@@ -320,11 +326,12 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
         button->setIconSize(QSize(26, 26));
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         connect(button, &QPushButton::clicked, this, signal);
-        commands->addWidget(button);
+        commands->addWidget(button, row, column);
     };
-    addCommand(tr("New part"), "startNewPart", &StartPage::newProjectRequested);
-    addCommand(tr("XY sketch"), "startSketch", &StartPage::sketchRequested);
-    addCommand(tr("Demo cube"), "startCube", &StartPage::cubeRequested);
+    addCommand(tr("New part"), "startNewPart", &StartPage::newProjectRequested, 0, 0);
+    addCommand(tr("New drawing"), "startNewDrawing", &StartPage::newDrawingRequested, 0, 1);
+    addCommand(tr("XY sketch"), "startSketch", &StartPage::sketchRequested, 1, 0);
+    addCommand(tr("Demo cube"), "startCube", &StartPage::cubeRequested, 1, 1);
     create->addLayout(commands);
     create->addSpacing(8);
     auto* exampleHeader = new QHBoxLayout;

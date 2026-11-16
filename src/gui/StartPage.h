@@ -25,6 +25,7 @@ protected:
 
 signals:
     void newProjectRequested();
+    void newDrawingRequested();
     void cubeRequested();
     void sketchRequested();
     void openRequested();

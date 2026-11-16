@@ -32,13 +32,14 @@ add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
-add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/Exchange.cpp)
-set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core PRIVATE TKDESTEP TKXSBase TKMesh TKTopAlgo)
-
-add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp)
+add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp)
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
+
+add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/Exchange.cpp src/io/DraftIO.cpp)
+set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core
+    PRIVATE graph3d_drawing TKDESTEP TKXSBase TKMesh TKTopAlgo)
 
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
@@ -57,6 +58,7 @@ add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/AssemblyDialog.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp
+    src/gui/DraftCanvas.cpp src/gui/DraftCanvas.h src/gui/DraftWindow.cpp src/gui/DraftWindow.h
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 qt_add_resources(graph3d_ui start_examples PREFIX "/" FILES

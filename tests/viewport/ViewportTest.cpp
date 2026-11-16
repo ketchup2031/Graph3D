@@ -16,6 +16,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -139,6 +142,87 @@ private slots:
         auto* saved = restarted.findChild<QPushButton*>("startRecent");
         QVERIFY(saved);
         QCOMPARE(saved->accessibleName(), QStringLiteral("welcome-project.graph3d"));
+    }
+
+    void standaloneDrawingWorkflow()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow main;
+        main.show();
+        main.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&main));
+        auto* create = main.findChild<QPushButton*>("startNewDrawing");
+        QVERIFY(create && create->isVisible());
+        create->click();
+        auto* window = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto* canvas = window->findChild<QWidget*>("draftCanvas");
+        QVERIFY(canvas && canvas->isVisible());
+        QVERIFY(!main.findChild<graph3d::Viewport*>()->isVisible());
+        const auto action = [window](const char* name) { return window->findChild<QAction*>(name); };
+        const auto click = [canvas](double x, double y) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + QPointF(x, y) * scale).toPoint());
+        };
+        action("draftRect")->trigger();
+        click(60, 55);
+        click(160, 105);
+        action("draftHorizontal")->trigger();
+        click(60, 55);
+        click(160, 55);
+        click(110, 40);
+        QVERIFY(window->isWindowModified());
+        QVERIFY(action("undoDraft")->isEnabled());
+        action("undoDraft")->trigger();
+        QVERIFY(action("redoDraft")->isEnabled());
+        action("redoDraft")->trigger();
+
+        QTimer::singleShot(0, window, [] {
+            if (auto* sheet = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                sheet->findChild<QLineEdit*>("draftTitle")->setText(QStringLiteral("Пластина"));
+                sheet->findChild<QComboBox*>("draftPaper")->setCurrentIndex(1);
+                sheet->accept();
+            }
+        });
+        action("draftSheetSettings")->trigger();
+        const auto selectFile = [window](const QString& path) {
+            QTimer::singleShot(0, window, [path] {
+                if (auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    dialog->selectFile(path);
+                    static_cast<QDialog*>(dialog)->accept();
+                }
+            });
+        };
+        const auto path = folder.filePath("plate.g3draw");
+        selectFile(path);
+        action("saveDraft")->trigger();
+        QVERIFY(!window->isWindowModified());
+        QFile native(path);
+        QVERIFY(native.open(QIODevice::ReadOnly));
+        const auto contents = QJsonDocument::fromJson(native.readAll()).object();
+        native.close();
+        QCOMPARE(contents.value("items").toArray().size(), 2);
+        QCOMPARE(contents.value("title").toString(), QStringLiteral("Пластина"));
+        QCOMPARE(contents.value("paper").toString(), QStringLiteral("A3"));
+        const auto pdfPath = folder.filePath("plate.pdf");
+        selectFile(pdfPath);
+        action("exportDraftPdf")->trigger();
+        QFile pdf(pdfPath);
+        QVERIFY(pdf.open(QIODevice::ReadOnly));
+        QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
+
+        QVERIFY(window->close());
+        QTRY_VERIFY(!main.findChild<QMainWindow*>("draftWindow"));
+        auto* recent = main.findChild<QPushButton*>("startRecent");
+        QVERIFY(recent && recent->accessibleName() == QStringLiteral("plate.g3draw"));
+        recent->click();
+        auto* restored = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(restored && restored->windowTitle().startsWith(QStringLiteral("plate.g3draw")));
+        QVERIFY(!restored->isWindowModified());
     }
 
     void darkThemePreference()
