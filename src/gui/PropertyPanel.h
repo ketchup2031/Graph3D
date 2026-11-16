@@ -4,6 +4,7 @@
 
 #include <QWidget>
 
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
@@ -24,6 +25,8 @@ public:
 signals:
     void extrudeEdited(int id, double distance);
     void revolveEdited(int id, geometry::Axis axis, double offset, double angle);
+    void holeEdited(int id, double diameter, double depth, bool through);
+    void edgeTreatmentEdited(int id, double size);
 
 private:
     QFormLayout* form_;
@@ -34,6 +37,10 @@ private:
     QComboBox* axis_;
     QDoubleSpinBox* offset_;
     QDoubleSpinBox* angle_;
+    QDoubleSpinBox* diameter_;
+    QDoubleSpinBox* depth_;
+    QCheckBox* through_;
+    QDoubleSpinBox* edgeSize_;
     QPushButton* apply_;
     int id_ = 0;
 };

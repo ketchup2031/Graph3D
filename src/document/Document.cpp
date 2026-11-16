@@ -24,6 +24,8 @@ std::array<ObjectId, 2> inputs(const Parameters& parameters)
         [](const Extrude& p) { return std::array{p.profile, 0}; },
         [](const Revolve& p) { return std::array{p.profile, 0}; },
         [](const Boolean& p) { return std::array{p.first, p.second}; },
+        [](const Hole& p) { return std::array{p.body, 0}; },
+        [](const EdgeTreatment& p) { return std::array{p.body, 0}; },
         [](const auto&) { return std::array{0, 0}; }
     }, parameters);
 }
@@ -34,6 +36,13 @@ const Object& objectAt(const std::vector<Object>& state, ObjectId id)
         throw std::invalid_argument("The requested object does not exist.");
     }
     return state[id - 1];
+}
+
+void requireBody(const Object& object)
+{
+    if (std::holds_alternative<geometry::Sketch>(object.parameters)) {
+        throw std::invalid_argument("Select a solid body.");
+    }
 }
 
 const geometry::Sketch& requireSketch(const Object& object)
@@ -62,6 +71,12 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [&state](const Boolean& p) {
             return geometry::booleanResult(objectAt(state, p.first).shape,
                                            objectAt(state, p.second).shape, p.operation);
+        },
+        [&state](const Hole& p) {
+            return geometry::drillHole(objectAt(state, p.body).shape, p.face, p.size);
+        },
+        [&state](const EdgeTreatment& p) {
+            return geometry::treatEdge(objectAt(state, p.body).shape, p.edge, p.kind, p.size);
         },
         [](const Imported& imported) {
             if (imported.sourceShape.IsNull() || !TopExp_Explorer(imported.sourceShape, TopAbs_SOLID).More()
@@ -119,6 +134,19 @@ ObjectId Document::addImported(std::string name, TopoDS_Shape shape)
     return append(Imported{std::move(name), std::move(shape)});
 }
 
+ObjectId Document::addHole(ObjectId body, geometry::FaceReference face, geometry::HoleSize size)
+{
+    requireBody(objectAt(objects_, body));
+    return append(Hole{body, face, size});
+}
+
+ObjectId Document::addEdgeTreatment(ObjectId body, geometry::EdgeReference edge,
+                                    geometry::EdgeTreatmentKind kind, double size)
+{
+    requireBody(objectAt(objects_, body));
+    return append(EdgeTreatment{body, edge, kind, size});
+}
+
 Document Document::fromDefinitions(std::vector<Definition> definitions)
 {
     Document document;
@@ -134,6 +162,10 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
             requireSketch(requirePrior(extrusion->profile));
         } else if (const auto* revolution = std::get_if<Revolve>(&parameters)) {
             requireSketch(requirePrior(revolution->profile));
+        } else if (const auto* hole = std::get_if<Hole>(&parameters)) {
+            requireBody(requirePrior(hole->body));
+        } else if (const auto* edge = std::get_if<EdgeTreatment>(&parameters)) {
+            requireBody(requirePrior(edge->body));
         } else if (const auto* boolean = std::get_if<Boolean>(&parameters)) {
             if (boolean->first == boolean->second
                 || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->first).parameters)
@@ -200,6 +232,39 @@ bool Document::editRevolve(ObjectId id, geometry::Axis axis, double offset, doub
     }
     auto next = objects_;
     next[id - 1].parameters = Revolve{operation->profile, axis, offset, angle};
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::editHole(ObjectId id, geometry::HoleSize size)
+{
+    const auto* operation = std::get_if<Hole>(&objectAt(objects_, id).parameters);
+    if (!operation) {
+        throw std::invalid_argument("Select a Hole operation.");
+    }
+    if (operation->size.diameter == size.diameter && operation->size.depth == size.depth
+        && operation->size.through == size.through) {
+        return false;
+    }
+    auto next = objects_;
+    std::get<Hole>(next[id - 1].parameters).size = size;
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::editEdgeTreatment(ObjectId id, double size)
+{
+    const auto* operation = std::get_if<EdgeTreatment>(&objectAt(objects_, id).parameters);
+    if (!operation) {
+        throw std::invalid_argument("Select a Chamfer or Fillet operation.");
+    }
+    if (operation->size == size) {
+        return false;
+    }
+    auto next = objects_;
+    std::get<EdgeTreatment>(next[id - 1].parameters).size = size;
     rebuild(next, id - 1);
     commit(std::move(next));
     return true;

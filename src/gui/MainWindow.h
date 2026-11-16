@@ -7,6 +7,7 @@
 #include <QMainWindow>
 
 #include <functional>
+#include <optional>
 
 class QAction;
 class QCloseEvent;
@@ -41,6 +42,11 @@ private:
     void openProject();
     void importStep();
     void exportModel(io::ExchangeFormat format);
+    enum class Machining { Hole, Chamfer, Fillet };
+    void startMachining(Machining operation);
+    void makeHole(int id, const geometry::FaceReference& face);
+    void makeEdgeTreatment(int id, const geometry::EdgeReference& edge);
+    void endMachining(int id);
     void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
@@ -79,6 +85,8 @@ private:
     QAction* extrude_ = nullptr;
     QAction* revolve_ = nullptr;
     QAction* drawing_ = nullptr;
+    QList<QAction*> machiningActions_;
+    std::optional<Machining> pendingMachining_;
     QMenu* booleanMenu_ = nullptr;
     QList<QAction*> fileActions_;
     QString logPath_;

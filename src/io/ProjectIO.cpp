@@ -20,7 +20,8 @@
 namespace graph3d::io {
 namespace {
 
-constexpr int version = 1;
+constexpr int legacyVersion = 1;
+constexpr int featureVersion = 2;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -28,6 +29,7 @@ constexpr std::array planes{"XY", "XZ", "YZ"};
 constexpr std::array axes{"U", "V"};
 constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
+constexpr std::array treatments{"chamfer", "fillet"};
 
 template<class Enum, std::size_t N>
 QString name(Enum value, const std::array<const char*, N>& names)
@@ -152,6 +154,20 @@ TopoDS_Shape decodeBrep(const QJsonValue& value)
     return shape;
 }
 
+QJsonArray encodePoint3(const geometry::Point3& point)
+{
+    return {encodeNumber(point[0]), encodeNumber(point[1]), encodeNumber(point[2])};
+}
+
+geometry::Point3 decodePoint3(const QJsonValue& value)
+{
+    const auto coordinates = value.toArray();
+    if (coordinates.size() != 3) {
+        fileError(QStringLiteral("A 3D point or direction needs three coordinates."));
+    }
+    return {number(coordinates.at(0), "x"), number(coordinates.at(1), "y"), number(coordinates.at(2), "z")};
+}
+
 QJsonObject encodeObject(const document::Object& object)
 {
     auto data = std::visit([](const auto& item) -> QJsonObject {
@@ -175,6 +191,17 @@ QJsonObject encodeObject(const document::Object& object)
         } else if constexpr (std::is_same_v<Type, document::Boolean>) {
             return {{"type", "boolean"}, {"first", item.first}, {"second", item.second},
                     {"operation", name(item.operation, operations)}};
+        } else if constexpr (std::is_same_v<Type, document::Hole>) {
+            return {{"type", "hole"}, {"body", item.body}, {"center", encodePoint3(item.face.center)},
+                    {"outward", encodePoint3(item.face.outward)}, {"diameter", encodeNumber(item.size.diameter)},
+                    {"depth", encodeNumber(item.size.depth)}, {"through", item.size.through}};
+        } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
+            QJsonArray samples;
+            for (const auto& point : item.edge.samples) {
+                samples.append(encodePoint3(point));
+            }
+            return {{"type", "edge-treatment"}, {"body", item.body}, {"kind", name(item.kind, treatments)},
+                    {"size", encodeNumber(item.size)}, {"curveType", item.edge.curveType}, {"samples", samples}};
         } else {
             return {{"type", "imported"}, {"name", QString::fromStdString(item.name)},
                     {"brep", encodeBrep(item.sourceShape)}};
@@ -185,7 +212,7 @@ QJsonObject encodeObject(const document::Object& object)
     return data;
 }
 
-document::Parameters decodeObject(const QJsonObject& object)
+document::Parameters decodeObject(const QJsonObject& object, int version)
 {
     const auto type = object.value("type").toString();
     if (type == "primitive") {
@@ -217,6 +244,31 @@ document::Parameters decodeObject(const QJsonObject& object)
         return document::Boolean{integer(object.value("first"), "first"), integer(object.value("second"), "second"),
             parseName<geometry::BooleanOperation>(object.value("operation"), operations, "operation")};
     }
+    if (type == "hole" && version >= featureVersion) {
+        if (!object.value("through").isBool()) {
+            fileError(QStringLiteral("Missing the hole through flag."));
+        }
+        return document::Hole{integer(object.value("body"), "body"),
+            {decodePoint3(object.value("center")), decodePoint3(object.value("outward"))},
+            {number(object.value("diameter"), "diameter"), number(object.value("depth"), "depth"),
+             object.value("through").toBool()}};
+    }
+    if (type == "edge-treatment" && version >= featureVersion) {
+        const auto samples = object.value("samples").toArray();
+        const auto kind = parseName<geometry::EdgeTreatmentKind>(object.value("kind"), treatments, "kind");
+        const auto curve = number(object.value("curveType"), "curveType");
+        geometry::EdgeReference edge{};
+        if (samples.size() != static_cast<qsizetype>(edge.samples.size())
+            || curve < 0 || curve > 8 || std::floor(curve) != curve) {
+            fileError(QStringLiteral("Invalid edge reference."));
+        }
+        edge.curveType = static_cast<int>(curve);
+        for (std::size_t i = 0; i < edge.samples.size(); ++i) {
+            edge.samples[i] = decodePoint3(samples.at(static_cast<qsizetype>(i)));
+        }
+        return document::EdgeTreatment{integer(object.value("body"), "body"), edge, kind,
+                                       number(object.value("size"), "size")};
+    }
     if (type == "imported") {
         return document::Imported{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
     }
@@ -231,8 +283,13 @@ void saveProject(const QString& path, const document::Document& document)
         fileError(QStringLiteral("Too many objects in this project."));
     }
     QJsonArray encoded;
+    int version = legacyVersion;
     try {
         for (const auto& object : document.objects()) {
+            if (std::holds_alternative<document::Hole>(object.parameters)
+                || std::holds_alternative<document::EdgeTreatment>(object.parameters)) {
+                version = featureVersion;
+            }
             encoded.append(encodeObject(object));
         }
     } catch (const Standard_Failure& error) {
@@ -257,9 +314,12 @@ document::Document openProject(const QString& path)
     if (root.value("format").toString() != QLatin1String(format)) {
         fileError(QStringLiteral("This is not a Graph3D project."));
     }
-    if (root.value("version").toDouble() != version || root.value("unit").toString() != "mm") {
+    const auto parsedVersion = root.value("version").toDouble();
+    if ((parsedVersion != legacyVersion && parsedVersion != featureVersion)
+        || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
+    const auto version = static_cast<int>(parsedVersion);
     const auto entries = root.value("objects").toArray();
     if (!root.value("objects").isArray() || entries.size() > maxObjects) {
         fileError(QStringLiteral("Invalid or oversized project object list."));
@@ -273,7 +333,7 @@ document::Document openProject(const QString& path)
                 || !object.value("visible").isBool()) {
                 fileError(QStringLiteral("Invalid object ID or visibility flag."));
             }
-            definitions.push_back({decodeObject(object), object.value("visible").toBool()});
+            definitions.push_back({decodeObject(object, version), object.value("visible").toBool()});
         }
         return document::Document::fromDefinitions(std::move(definitions));
     } catch (const Standard_Failure& failure) {

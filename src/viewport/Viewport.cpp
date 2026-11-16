@@ -7,6 +7,11 @@
 #include <Aspect_DisplayConnection.hxx>
 #include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <StdSelect_BRepOwner.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Edge.hxx>
 #include <Quantity_Color.hxx>
 #include <Standard_Failure.hxx>
 #include <V3d_View.hxx>
@@ -56,6 +61,9 @@ struct Viewport::Scene {
     Handle(V3d_View) view;
     std::vector<Handle(AIS_Shape)> objects;
     QPoint previousMouse;
+    int pickId = 0;
+    SubshapePick pickMode = SubshapePick::Face;
+    bool oldBoundary = false;
     bool ready = false;
 
     ~Scene()
@@ -131,6 +139,7 @@ bool Viewport::runOperation(const QString& operation, const std::function<void()
 
 void Viewport::syncDocument(const document::Document& document)
 {
+    cancelSubshapePick();
     runOperation(tr("Refresh scene"), [this, &document] {
         const auto& records = document.objects();
         while (scene_->objects.size() > records.size()) {
@@ -229,8 +238,97 @@ void Viewport::selectObject(int id)
     });
 }
 
+bool Viewport::beginSubshapePick(int id, SubshapePick mode)
+{
+    cancelSubshapePick();
+    const bool started = runOperation(tr("Start selection"), [this, id, mode] {
+        if (id < 1 || static_cast<std::size_t>(id) > scene_->objects.size()
+            || scene_->objects[id - 1].IsNull()
+            || !scene_->context->IsDisplayed(scene_->objects[id - 1])) {
+            throw std::invalid_argument("Select a visible body.");
+        }
+        const auto& object = scene_->objects[id - 1];
+        scene_->context->ClearSelected(false);
+        scene_->context->Deactivate(object);
+        scene_->pickId = id;
+        scene_->pickMode = mode;
+        scene_->oldBoundary = object->Attributes()->FaceBoundaryDraw();
+        if (mode == SubshapePick::Edge) {
+            object->Attributes()->SetFaceBoundaryDraw(true);
+            scene_->context->Redisplay(object, false);
+        }
+        const auto type = mode == SubshapePick::Face ? TopAbs_FACE : TopAbs_EDGE;
+        scene_->context->Activate(object, AIS_Shape::SelectionMode(type));
+        scene_->context->UpdateCurrentViewer();
+        setCursor(Qt::CrossCursor);
+        setFocus();
+    });
+    if (!started) {
+        cancelSubshapePick();
+    }
+    return started;
+}
+
+void Viewport::endSubshapePick()
+{
+    if (!scene_->pickId) {
+        return;
+    }
+    const auto& object = scene_->objects[scene_->pickId - 1];
+    scene_->pickId = 0;
+    unsetCursor();
+    scene_->context->ClearDetected(false);
+    scene_->context->Deactivate(object);
+    if (scene_->pickMode == SubshapePick::Edge) {
+        object->Attributes()->SetFaceBoundaryDraw(scene_->oldBoundary);
+        scene_->context->Redisplay(object, false);
+    }
+    scene_->context->Activate(object, 0);
+    scene_->context->UpdateCurrentViewer();
+}
+
+void Viewport::cancelSubshapePick()
+{
+    if (scene_->pickId) {
+        runOperation(tr("Cancel selection"), [this] { endSubshapePick(); });
+        emit subshapePickCancelled();
+    }
+}
+
+void Viewport::pickSubshape(const QPoint& point)
+{
+    const auto id = scene_->pickId;
+    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(scene_->context->DetectedOwner());
+    if (owner.IsNull() || !owner->HasShape() || scene_->context->DetectedInteractive() != scene_->objects[id - 1]) {
+        throw std::invalid_argument("Click the requested geometry on the selected body.");
+    }
+    auto shape = owner->Shape();
+    if (owner->HasLocation()) {
+        shape = shape.Located(owner->Location() * shape.Location());
+    }
+    if (scene_->pickMode == SubshapePick::Face && shape.ShapeType() == TopAbs_FACE) {
+        geometry::Point3 origin;
+        geometry::Point3 ray;
+        scene_->view->ConvertWithProj(point.x(), point.y(), origin[0], origin[1], origin[2],
+                                     ray[0], ray[1], ray[2]);
+        const auto reference = geometry::locateHole(TopoDS::Face(shape), origin, ray);
+        endSubshapePick();
+        emit facePicked(id, reference);
+    } else if (scene_->pickMode == SubshapePick::Edge && shape.ShapeType() == TopAbs_EDGE) {
+        const auto reference = geometry::referenceEdge(TopoDS::Edge(shape));
+        endSubshapePick();
+        emit edgePicked(id, reference);
+    } else {
+        throw std::invalid_argument("Click the requested face or edge.");
+    }
+}
+
 void Viewport::clearSelection()
 {
+    if (scene_->pickId) {
+        cancelSubshapePick();
+        return;
+    }
     selectObject(0);
     emit objectSelected(0);
 }
@@ -319,6 +417,10 @@ void Viewport::mousePressEvent(QMouseEvent* event)
             scene_->view->StartRotation(point.x(), point.y());
         } else if (event->button() == Qt::LeftButton) {
             scene_->context->MoveTo(point.x(), point.y(), scene_->view, false);
+            if (scene_->pickId) {
+                pickSubshape(point);
+                return;
+            }
             scene_->context->SelectDetected(AIS_SelectionScheme_Replace);
             scene_->context->UpdateCurrentViewer();
             const auto selected = scene_->context->FirstSelectedObject();

@@ -14,7 +14,8 @@ endif()
 add_library(graph3d_geometry STATIC
     src/geometry/PreviewBox.cpp
     src/geometry/Primitives.cpp
-    src/geometry/SketchModeling.cpp)
+    src/geometry/SketchModeling.cpp
+    src/geometry/PartFeatures.cpp)
 target_compile_features(graph3d_geometry PUBLIC cxx_std_20)
 set_target_properties(graph3d_geometry PROPERTIES CXX_EXTENSIONS OFF)
 if(WIN32)
@@ -23,7 +24,7 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet)
 
 add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
@@ -83,6 +84,11 @@ if(BUILD_TESTING)
     set_target_properties(exchange_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(exchange_test PRIVATE graph3d_io TKTopAlgo)
     add_test(NAME exchange COMMAND exchange_test)
+
+    add_executable(part_features_test tests/geometry/PartFeaturesTest.cpp)
+    set_target_properties(part_features_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(part_features_test PRIVATE graph3d_io TKTopAlgo)
+    add_test(NAME part_features COMMAND part_features_test)
 
     add_executable(drawing_test tests/drawing/DrawingTest.cpp)
     set_target_properties(drawing_test PROPERTIES CXX_EXTENSIONS OFF)

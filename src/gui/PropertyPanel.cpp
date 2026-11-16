@@ -2,6 +2,7 @@
 
 #include "document/Document.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -14,6 +15,8 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     : QWidget(parent), form_(new QFormLayout(this)), object_(new QLabel(this)),
       details_(new QLabel(this)), state_(new QLabel(this)), distance_(new QDoubleSpinBox(this)),
       axis_(new QComboBox(this)), offset_(new QDoubleSpinBox(this)), angle_(new QDoubleSpinBox(this)),
+      diameter_(new QDoubleSpinBox(this)), depth_(new QDoubleSpinBox(this)),
+      through_(new QCheckBox(tr("Through"), this)), edgeSize_(new QDoubleSpinBox(this)),
       apply_(new QPushButton(tr("Apply"), this))
 {
     setObjectName(QStringLiteral("propertyPanel"));
@@ -23,6 +26,10 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     axis_->setObjectName(QStringLiteral("propertyAxis"));
     offset_->setObjectName(QStringLiteral("propertyOffset"));
     angle_->setObjectName(QStringLiteral("propertyAngle"));
+    diameter_->setObjectName(QStringLiteral("propertyHoleDiameter"));
+    depth_->setObjectName(QStringLiteral("propertyHoleDepth"));
+    through_->setObjectName(QStringLiteral("propertyHoleThrough"));
+    edgeSize_->setObjectName(QStringLiteral("propertyEdgeSize"));
     apply_->setObjectName(QStringLiteral("applyProperties"));
     for (auto* label : {object_, details_, state_}) {
         label->setWordWrap(true);
@@ -43,6 +50,15 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     form_->addRow(tr("Axis"), axis_);
     form_->addRow(tr("Offset"), offset_);
     form_->addRow(tr("Angle"), angle_);
+    for (auto* value : {diameter_, depth_, edgeSize_}) {
+        value->setRange(0.01, 100000);
+        value->setSuffix(tr(" mm"));
+    }
+    form_->addRow(tr("Diameter"), diameter_);
+    form_->addRow(through_);
+    form_->addRow(tr("Blind depth"), depth_);
+    form_->addRow(tr("Distance / radius"), edgeSize_);
+    connect(through_, &QCheckBox::toggled, depth_, &QDoubleSpinBox::setDisabled);
     form_->addRow(apply_);
     connect(apply_, &QPushButton::clicked, this, [this] {
         if (id_ && form_->isRowVisible(distance_)) {
@@ -50,6 +66,10 @@ PropertyPanel::PropertyPanel(QWidget* parent)
         } else if (id_ && form_->isRowVisible(axis_)) {
             const auto axis = axis_->currentIndex() == 0 ? geometry::Axis::U : geometry::Axis::V;
             emit revolveEdited(id_, axis, offset_->value(), angle_->value());
+        } else if (id_ && form_->isRowVisible(diameter_)) {
+            emit holeEdited(id_, diameter_->value(), depth_->value(), through_->isChecked());
+        } else if (id_ && form_->isRowVisible(edgeSize_)) {
+            emit edgeTreatmentEdited(id_, edgeSize_->value());
         }
     });
     showObject(nullptr, {}, {});
@@ -78,7 +98,22 @@ void PropertyPanel::showObject(const document::Object* object, const QString& na
     for (auto* field : {static_cast<QWidget*>(axis_), static_cast<QWidget*>(offset_), static_cast<QWidget*>(angle_)}) {
         form_->setRowVisible(field, revolution != nullptr);
     }
-    form_->setRowVisible(apply_, extrusion || revolution);
+    const auto* hole = object ? std::get_if<document::Hole>(&object->parameters) : nullptr;
+    const auto* edge = object ? std::get_if<document::EdgeTreatment>(&object->parameters) : nullptr;
+    form_->setRowVisible(diameter_, hole != nullptr);
+    form_->setRowVisible(through_, hole != nullptr);
+    form_->setRowVisible(depth_, hole != nullptr);
+    form_->setRowVisible(edgeSize_, edge != nullptr);
+    form_->setRowVisible(apply_, extrusion || revolution || hole || edge);
+    if (hole) {
+        diameter_->setValue(hole->size.diameter);
+        depth_->setValue(hole->size.depth);
+        through_->setChecked(hole->size.through);
+        depth_->setDisabled(hole->size.through);
+    }
+    if (edge) {
+        edgeSize_->setValue(edge->size);
+    }
     if (extrusion) {
         distance_->setValue(extrusion->distance);
     }

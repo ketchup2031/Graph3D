@@ -1,5 +1,7 @@
 #pragma once
 
+#include "geometry/PartFeatures.h"
+
 #include <QImage>
 #include <QWidget>
 
@@ -11,6 +13,7 @@ namespace graph3d::document { class Document; }
 namespace graph3d {
 
 enum class ViewDirection { Front, Top, Right, Isometric };
+enum class SubshapePick { Face, Edge };
 
 class Viewport final : public QWidget {
     Q_OBJECT
@@ -24,6 +27,8 @@ public:
     QImage renderSnapshot();
     void resetCamera();
     void selectObject(int id);
+    bool beginSubshapePick(int id, SubshapePick mode);
+    void cancelSubshapePick();
     void clearSelection();
     void fitScene();
     void setDirection(ViewDirection direction);
@@ -33,6 +38,9 @@ public:
 signals:
     void operationFailed(const QString& message);
     void objectSelected(int id);
+    void facePicked(int id, const geometry::FaceReference& face);
+    void edgePicked(int id, const geometry::EdgeReference& edge);
+    void subshapePickCancelled();
 
 protected:
     QPaintEngine* paintEngine() const override;
@@ -44,6 +52,8 @@ protected:
 
 private:
     bool runOperation(const QString& operation, const std::function<void()>& action);
+    void endSubshapePick();
+    void pickSubshape(const QPoint& point);
     QPoint pixels(const QPointF& logicalPosition) const;
 
     struct Scene;

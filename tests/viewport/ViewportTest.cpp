@@ -7,7 +7,9 @@
 #include <array>
 #include <QApplication>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
+#include <cmath>
 #include <QDialog>
 #include <QDoubleSpinBox>
 #include <QFile>
@@ -538,6 +540,117 @@ private slots:
         QVERIFY(pdf.open(QIODevice::ReadOnly));
         QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
         QVERIFY(!window.isWindowModified());
+    }
+
+    void machineSelectedFaceAndEdges()
+    {
+        graph3d::MainWindow window;
+        window.resize(920, 650);
+        window.show();
+        window.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* viewport = window.findChild<graph3d::Viewport*>();
+        QVERIFY(tree && viewport);
+        auto* cube = tree->topLevelItem(0);
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        QVERIFY(cube);
+        tree->setCurrentItem(cube);
+        action("viewTop")->trigger();
+        action("fitScene")->trigger();
+        QVERIFY(action("makeHole")->isEnabled());
+        action("makeHole")->trigger();
+        QVERIFY(!action("makeChamfer")->isEnabled());
+        action("clearSelection")->trigger();
+        QCOMPARE(tree->currentItem(), cube);
+        QCOMPARE(cube->childCount(), 0);
+        QVERIFY(action("makeHole")->isEnabled());
+
+        action("makeHole")->trigger();
+        bool holeDialogSeen = false;
+        QTimer::singleShot(0, [&] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                holeDialogSeen = dialog->objectName() == "holeDialog";
+                if (holeDialogSeen) {
+                    auto* through = dialog->findChild<QCheckBox*>("holeThrough");
+                    auto* depth = dialog->findChild<QDoubleSpinBox*>("holeDepth");
+                    through->setChecked(false);
+                    depth->setValue(20);
+                    dialog->accept();
+                } else {
+                    dialog->reject();
+                }
+            }
+        });
+        QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier, viewport->rect().center());
+        QVERIFY(holeDialogSeen);
+        QCOMPARE(cube->childCount(), 1);
+        auto* hole = cube->child(0);
+        QCOMPARE(hole->text(0), QStringLiteral("Hole 2"));
+        QVERIFY(hole->text(1).contains(QStringLiteral("Depth 20 mm")));
+        QCOMPARE(cube->checkState(0), Qt::Unchecked);
+        auto* through = window.findChild<QCheckBox*>("propertyHoleThrough");
+        auto* apply = window.findChild<QPushButton*>("applyProperties");
+        QVERIFY(through && apply && through->isVisible());
+        through->setChecked(true);
+        apply->click();
+        QVERIFY(hole->text(1).contains(QStringLiteral("Through")));
+        action("undoDocument")->trigger();
+        QVERIFY(hole->text(1).contains(QStringLiteral("Depth 20 mm")));
+        action("redoDocument")->trigger();
+        QVERIFY(hole->text(1).contains(QStringLiteral("Through")));
+        action("undoDocument")->trigger();
+        action("undoDocument")->trigger();
+        QCOMPARE(cube->childCount(), 0);
+        QCOMPARE(cube->checkState(0), Qt::Checked);
+
+        for (const auto [actionName, prefix] : {std::pair{"makeChamfer", "Chamfer"},
+                                                std::pair{"makeFillet", "Fillet"}}) {
+            tree->setCurrentItem(cube);
+            action("viewTop")->trigger();
+            action("fitScene")->trigger();
+            QVERIFY(action(actionName)->isEnabled());
+            action(actionName)->trigger();
+            const auto pixels = frame(viewport);
+            QVERIFY(!pixels.isNull());
+            const auto center = viewport->rect().center();
+            const auto inside = pixels.pixelColor(center);
+            const auto diff = [&inside](const QColor& c) {
+                return std::abs(c.red() - inside.red()) + std::abs(c.green() - inside.green())
+                       + std::abs(c.blue() - inside.blue());
+            };
+            int rim = 1;
+            while (rim < center.y() && diff(pixels.pixelColor(center.x(), rim)) > 25) {
+                ++rim;
+            }
+            QVERIFY(rim < center.y() - 10);
+            for (const int offset : {-1, 0, -2, 1, -3, 2, -4, 3}) {
+                QTimer::singleShot(0, [] {
+                    if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                        dialog->setDoubleValue(3);
+                        dialog->accept();
+                    }
+                });
+                QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier, QPoint(center.x(), rim + offset));
+                QCoreApplication::processEvents();
+                if (cube->childCount() == 1) {
+                    break;
+                }
+            }
+            QCOMPARE(cube->childCount(), 1);
+            QCOMPARE(cube->child(0)->text(0), QString::fromLatin1(prefix) + QStringLiteral(" 2"));
+            auto* edgeSize = window.findChild<QDoubleSpinBox*>("propertyEdgeSize");
+            QVERIFY(edgeSize && edgeSize->isVisible());
+            QCOMPARE(edgeSize->value(), 3.0);
+            edgeSize->setValue(4);
+            apply->click();
+            QVERIFY(cube->child(0)->text(1).contains(QStringLiteral("4 mm")));
+            action("undoDocument")->trigger();
+            action("undoDocument")->trigger();
+            QCOMPARE(cube->childCount(), 0);
+            QCOMPARE(cube->checkState(0), Qt::Checked);
+        }
     }
 };
 
