@@ -55,8 +55,11 @@ add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp
     src/gui/AssemblyDialog.cpp
+    src/gui/StartPage.cpp src/gui/StartPage.h
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
+qt_add_resources(graph3d_ui start_examples PREFIX "/" FILES
+    examples/flange.graph3d examples/stepped-bushing.graph3d examples/angle-bracket.graph3d)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
     PRIVATE graph3d_io graph3d_drawing TKV3d TKOpenGl TKService)
@@ -117,6 +120,6 @@ if(BUILD_TESTING)
         set_target_properties(viewport_test PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
         target_link_libraries(viewport_test PRIVATE graph3d_ui Qt6::Test)
         add_test(NAME viewport COMMAND viewport_test)
-        set_tests_properties(viewport PROPERTIES TIMEOUT 45)
+        set_tests_properties(viewport PROPERTIES TIMEOUT 75)
     endif()
 endif()

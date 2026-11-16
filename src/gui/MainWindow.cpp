@@ -4,6 +4,7 @@
 #include "gui/DrawingDialog.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
+#include "gui/StartPage.h"
 #include "gui/TransformEditor.h"
 #include "io/Exchange.h"
 #include "io/ProjectIO.h"
@@ -60,13 +61,14 @@ QAction* menuAction(QMenu* menu, const QString& label, const char* name)
 
 MainWindow::MainWindow()
     : viewport_(new Viewport(this)), pages_(new QStackedWidget(this)),
-      sketchEditor_(new SketchEditor(this)), tree_(new QTreeWidget(this)),
+      sketchEditor_(new SketchEditor(this)), startPage_(new StartPage(this)), tree_(new QTreeWidget(this)),
       properties_(new PropertyPanel(this))
 {
     setWindowTitle(QStringLiteral("Graph3D[*]"));
     resize(1040, 710);
     setMinimumSize(480, 320);
     setCentralWidget(pages_);
+    pages_->addWidget(startPage_);
     pages_->addWidget(viewport_);
     pages_->addWidget(sketchEditor_);
     createModelTree();
@@ -81,7 +83,19 @@ MainWindow::MainWindow()
         logPath_ = QDir(folder).filePath(QStringLiteral("graph3d.log"));
     }
     createMenus();
-    updateActions();
+    connect(startPage_, &StartPage::newProjectRequested, this, &MainWindow::newProject);
+    connect(startPage_, &StartPage::cubeRequested, this, &MainWindow::initializeScene);
+    connect(startPage_, &StartPage::sketchRequested, this, [this] {
+        if (newProject()) {
+            beginSketch(geometry::Plane::XY);
+        }
+    });
+    connect(startPage_, &StartPage::openRequested, this, &MainWindow::openProject);
+    connect(startPage_, &StartPage::recentRequested, this, [this](const QString& path) { openProjectPath(path); });
+    connect(startPage_, &StartPage::exampleRequested, this, [this](const QString& path) { openProjectPath(path, true); });
+    connect(startPage_, &StartPage::resumeRequested, this, &MainWindow::showWorkspace);
+    connect(startPage_, &StartPage::controlsRequested, this, &MainWindow::showMouseControls);
+    showStartPage();
     connect(properties_, &PropertyPanel::extrudeEdited, this, [this](int id, double distance) {
         editFeature(id, [this, id, distance] { return document_.editExtrude(id, distance); });
     });
@@ -111,15 +125,13 @@ MainWindow::MainWindow()
         endMachining(selectedId());
         report(tr("Geometry selection cancelled"));
     });
-    statusBar()->showMessage(tr("Starting 3D viewport…"));
 }
 
 bool MainWindow::initializeScene()
 {
-    if (!viewport_->initialize()) {
+    if (!newProject()) {
         return false;
     }
-    writeLog(tr("3D viewport initialized"));
     if (!addFeature(tr("Create cube"), [this] { return document_.addPrimitive(geometry::Primitive::Cube); }, false)) {
         return false;
     }
@@ -131,21 +143,78 @@ bool MainWindow::initializeScene()
     return true;
 }
 
+void MainWindow::showStartPage()
+{
+    viewport_->cancelSubshapePick();
+    pages_->setCurrentWidget(startPage_);
+    modelDock_->hide();
+    propertyDock_->hide();
+    startPage_->setWorkspaceAvailable(hasWorkspace_);
+    statusBar()->clearMessage();
+    updateActions();
+}
+
+bool MainWindow::showWorkspace()
+{
+    pages_->setCurrentWidget(viewport_);
+    modelDock_->show();
+    propertyDock_->show();
+    if (!viewport_->initialize()) {
+        const auto error = statusBar()->currentMessage();
+        showStartPage();
+        statusBar()->showMessage(error);
+        return false;
+    }
+    if (!hasWorkspace_) {
+        writeLog(tr("3D viewport initialized"));
+    }
+    hasWorkspace_ = true;
+    updateActions();
+    return true;
+}
+
+bool MainWindow::newProject()
+{
+    if (!confirmSave() || !showWorkspace()) {
+        return false;
+    }
+    document_ = document::Document{};
+    projectPath_.clear();
+    savedRevision_ = document_.revision();
+    refreshDocument(0);
+    viewport_->resetCamera();
+    report(tr("New part"));
+    return true;
+}
+
+void MainWindow::showMouseControls()
+{
+    QMessageBox::information(this, tr("Mouse controls"),
+        tr("Left click: select a body\nRight drag: orbit\nMiddle drag: pan\nWheel: zoom\nF: fit all"));
+}
+
 void MainWindow::createMenus()
 {
     auto* file = menuBar()->addMenu(tr("&File"));
+    startPageAction_ = menuAction(file, tr("Start page"), "showStartPage");
+    connect(startPageAction_, &QAction::triggered, this, &MainWindow::showStartPage);
+    file->addSeparator();
     newScene_ = menuAction(file, tr("&New scene"), "newScene");
     newScene_->setShortcut(QKeySequence::New);
     connect(newScene_, &QAction::triggered, this, [this] {
+        if (pages_->currentWidget() == startPage_) {
+            newProject();
+            return;
+        }
         if (document_.clear()) {
             refreshDocument(0);
         }
         viewport_->resetCamera();
         report(tr("New scene"));
     });
-    auto* open = menuAction(file, tr("&Open project…"), "openProject");
-    open->setShortcut(QKeySequence::Open);
-    connect(open, &QAction::triggered, this, &MainWindow::openProject);
+    openAction_ = menuAction(file, tr("&Open project…"), "openProject");
+    openAction_->setShortcut(QKeySequence::Open);
+    connect(openAction_, &QAction::triggered, this, &MainWindow::openProject);
     auto* save = menuAction(file, tr("&Save project"), "saveProject");
     save->setShortcut(QKeySequence::Save);
     connect(save, &QAction::triggered, this, [this] { saveProject(false); });
@@ -160,7 +229,7 @@ void MainWindow::createMenus()
     connect(exportStep, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Step); });
     auto* exportStl = menuAction(file, tr("Export visible bodies to STL…"), "exportStl");
     connect(exportStl, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Stl); });
-    fileActions_ = {open, save, saveAs, import, exportStep, exportStl};
+    fileActions_ = {save, saveAs, import, exportStep, exportStl};
 
     file->addSeparator();
     auto* quit = file->addAction(tr("E&xit"), this, &QWidget::close);
@@ -266,10 +335,7 @@ void MainWindow::createMenus()
     connect(axes, &QAction::toggled, viewport_, &Viewport::setAxesVisible);
 
     auto* help = menuBar()->addMenu(tr("&Help"));
-    help->addAction(tr("Mouse controls"), this, [this] {
-        QMessageBox::information(this, tr("Mouse controls"),
-            tr("Left click: select a body\nRight drag: orbit\nMiddle drag: pan\nWheel: zoom\nF: fit all"));
-    });
+    help->addAction(tr("Mouse controls"), this, &MainWindow::showMouseControls);
     auto* openLog = help->addAction(tr("Open log folder"), this, [this] {
         if (!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(logPath_).absolutePath()))) {
             statusBar()->showMessage(tr("Could not open the log folder"));
@@ -283,7 +349,7 @@ void MainWindow::createMenus()
 
 void MainWindow::createModelTree()
 {
-    auto* dock = new QDockWidget(tr("Model tree"), this);
+    auto* dock = modelDock_ = new QDockWidget(tr("Model tree"), this);
     dock->setObjectName(QStringLiteral("modelDock"));
     dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     tree_->setObjectName(QStringLiteral("modelTree"));
@@ -291,7 +357,7 @@ void MainWindow::createModelTree()
     dock->setWidget(tree_);
     addDockWidget(Qt::RightDockWidgetArea, dock);
 
-    auto* propertyDock = new QDockWidget(tr("Properties"), this);
+    auto* propertyDock = propertyDock_ = new QDockWidget(tr("Properties"), this);
     propertyDock->setObjectName(QStringLiteral("propertiesDock"));
     propertyDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     propertyDock->setWidget(properties_);
@@ -403,6 +469,7 @@ void MainWindow::updateActions()
         return;
     }
     const bool drawing = pages_->currentWidget() == sketchEditor_;
+    const bool modeling = pages_->currentWidget() == viewport_;
     const auto* object = document_.find(selectedId());
     const bool sketch = object && std::holds_alternative<geometry::Sketch>(object->parameters);
     const auto validBody = [](const document::Object& candidate) {
@@ -410,26 +477,28 @@ void MainWindow::updateActions()
             && !std::holds_alternative<geometry::Sketch>(candidate.parameters);
     };
     const auto bodies = std::count_if(document_.objects().begin(), document_.objects().end(), validBody);
+    startPageAction_->setEnabled(modeling);
+    openAction_->setEnabled(!drawing);
     newScene_->setEnabled(!drawing);
     for (auto* action : fileActions_) {
-        action->setEnabled(!drawing);
+        action->setEnabled(modeling);
     }
-    undo_->setEnabled(!drawing && document_.canUndo());
-    redo_->setEnabled(!drawing && document_.canRedo());
-    createMenu_->setEnabled(!drawing);
-    editMenu_->setEnabled(!drawing);
-    viewMenu_->setEnabled(!drawing);
-    sketchMenu_->setEnabled(!drawing);
-    tree_->setEnabled(!drawing);
-    properties_->setEnabled(!drawing);
-    extrude_->setEnabled(!drawing && sketch);
-    revolve_->setEnabled(!drawing && sketch);
-    booleanMenu_->setEnabled(!drawing && object && validBody(*object) && bodies >= 2);
-    transformMenu_->setEnabled(!drawing && !pendingMachining_ && object && validBody(*object));
-    createAssembly_->setEnabled(!drawing && !pendingMachining_ && bodies > 0);
-    drawing_->setEnabled(!drawing && object && validBody(*object));
+    undo_->setEnabled(modeling && document_.canUndo());
+    redo_->setEnabled(modeling && document_.canRedo());
+    createMenu_->setEnabled(modeling);
+    editMenu_->setEnabled(modeling);
+    viewMenu_->setEnabled(modeling);
+    sketchMenu_->setEnabled(modeling);
+    tree_->setEnabled(modeling);
+    properties_->setEnabled(modeling);
+    extrude_->setEnabled(modeling && sketch);
+    revolve_->setEnabled(modeling && sketch);
+    booleanMenu_->setEnabled(modeling && object && validBody(*object) && bodies >= 2);
+    transformMenu_->setEnabled(modeling && !pendingMachining_ && object && validBody(*object));
+    createAssembly_->setEnabled(modeling && !pendingMachining_ && bodies > 0);
+    drawing_->setEnabled(modeling && object && validBody(*object));
     for (auto* action : machiningActions_) {
-        action->setEnabled(!drawing && !pendingMachining_ && object && object->visible && validBody(*object));
+        action->setEnabled(modeling && !pendingMachining_ && object && object->visible && validBody(*object));
     }
 }
 
@@ -707,6 +776,7 @@ bool MainWindow::saveProject(bool choosePath)
         projectPath_ = path;
         savedRevision_ = document_.revision();
         updateFileState();
+        startPage_->rememberProject(path);
         report(tr("Saved %1").arg(QFileInfo(path).fileName()));
         return true;
     } catch (const std::exception& error) {
@@ -747,11 +817,18 @@ void MainWindow::openProject()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
                                                   tr("Graph3D projects (*.graph3d)"));
-    if (path.isEmpty() || !confirmSave()) {
-        return;
+    if (!path.isEmpty()) {
+        openProjectPath(path);
     }
+}
+
+void MainWindow::openProjectPath(const QString& path, bool example)
+{
     try {
         auto loaded = io::openProject(path);
+        if (!confirmSave() || !showWorkspace()) {
+            return;
+        }
         {
             const QSignalBlocker block(tree_);
             items_.clear();
@@ -759,11 +836,14 @@ void MainWindow::openProject()
         }
         viewport_->syncDocument(document::Document{});
         document_ = std::move(loaded);
-        projectPath_ = path;
+        projectPath_ = example ? QString{} : path;
         savedRevision_ = document_.revision();
         refreshDocument(0);
         viewport_->resetCamera();
         viewport_->fitScene();
+        if (!example) {
+            startPage_->rememberProject(path);
+        }
         const auto errors = std::count_if(document_.objects().begin(), document_.objects().end(),
             [](const auto& item) { return item.status != document::Status::Ready; });
         report(errors ? tr("Opened %1. %2 operations need attention in the model tree.")

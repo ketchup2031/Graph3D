@@ -22,6 +22,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QSpinBox>
@@ -55,10 +56,93 @@ class ViewportTest : public QObject {
     Q_OBJECT
 
 private slots:
-    void sceneAndCamera()
+    void initTestCase()
     {
+        QVERIFY(settingsDir_.isValid());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir_.path());
         QStandardPaths::setTestModeEnabled(true);
         QApplication::setApplicationName(QStringLiteral("Graph3D-test"));
+    }
+
+    void startPageWorkflow()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* home = window.findChild<QWidget*>("startPage");
+        auto* viewport = window.findChild<graph3d::Viewport*>();
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        const auto button = [&window](const char* name) { return window.findChild<QPushButton*>(name); };
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        QVERIFY(home && viewport && tree);
+        QVERIFY(home->isVisible() && !viewport->isVisible() && !tree->isVisible());
+        QVERIFY(!button("startResume")->isVisible());
+        QVERIFY(action("openProject")->isEnabled());
+        QVERIFY(!action("saveProject")->isEnabled());
+        auto* preview = home->findChild<QWidget*>("startPreview");
+        QVERIFY(preview && preview->isVisible() && !preview->grab().isNull());
+
+        button("startSketch")->click();
+        auto* editor = window.findChild<graph3d::SketchEditor*>();
+        QVERIFY(editor && editor->isVisible() && !home->isVisible());
+        editor->findChild<QPushButton*>("sketchCancel")->click();
+        QVERIFY(viewport->isVisible() && tree->isVisible());
+        QCOMPARE(tree->topLevelItemCount(), 0);
+        QVERIFY(!window.isWindowModified());
+        action("createCube")->trigger();
+        action("showStartPage")->trigger();
+        QVERIFY(home->isVisible() && !tree->isVisible());
+        QVERIFY(button("startResume")->isVisible() && window.isWindowModified());
+        QTimer::singleShot(0, &window, [] {
+            if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                dialog->button(QMessageBox::Cancel)->click();
+            }
+        });
+        button("startNewPart")->click();
+        QVERIFY(home->isVisible() && window.isWindowModified());
+        button("startResume")->click();
+        QCOMPARE(tree->topLevelItemCount(), 1);
+
+        const auto path = folder.filePath(QStringLiteral("welcome-project.graph3d"));
+        QTimer::singleShot(0, &window, [&] {
+            if (auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                dialog->selectFile(path);
+                static_cast<QDialog*>(dialog)->accept();
+            }
+        });
+        action("saveProject")->trigger();
+        QVERIFY(QFileInfo::exists(path) && !window.isWindowModified());
+        action("showStartPage")->trigger();
+        auto* recent = button("startRecent");
+        QVERIFY(recent && recent->isVisible());
+        QCOMPARE(recent->accessibleName(), QStringLiteral("welcome-project.graph3d"));
+        recent->click();
+        QCOMPARE(tree->topLevelItemCount(), 1);
+        QCOMPARE(tree->topLevelItem(0)->text(0), QStringLiteral("Cube 1"));
+
+        action("showStartPage")->trigger();
+        auto* example = home->findChild<QLabel*>("exampleName");
+        QVERIFY(example);
+        QCOMPARE(example->text(), QStringLiteral("Mounting flange"));
+        button("startNextExample")->click();
+        QCOMPARE(example->text(), QStringLiteral("Stepped bushing"));
+        button("startOpenExample")->click();
+        QVERIFY(viewport->isVisible() && !window.isWindowModified());
+        QVERIFY(tree->topLevelItemCount() > 0);
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("stepped-bushing.graph3d")));
+        QCOMPARE(window.windowTitle(), QStringLiteral("Graph3D[*]"));
+
+        graph3d::MainWindow restarted;
+        auto* saved = restarted.findChild<QPushButton*>("startRecent");
+        QVERIFY(saved);
+        QCOMPARE(saved->accessibleName(), QStringLiteral("welcome-project.graph3d"));
+    }
+
+    void sceneAndCamera()
+    {
         graph3d::MainWindow window;
         window.resize(730, 530);
         window.show();
@@ -782,6 +866,8 @@ private slots:
             QCOMPARE(cube->checkState(0), Qt::Checked);
         }
     }
+private:
+    QTemporaryDir settingsDir_;
 };
 
 QTEST_MAIN(ViewportTest)

@@ -11,6 +11,7 @@
 
 class QAction;
 class QCloseEvent;
+class QDockWidget;
 class QMenu;
 class QStackedWidget;
 class QTreeWidget;
@@ -22,6 +23,7 @@ namespace io { enum class ExchangeFormat; }
 
 class PropertyPanel;
 class SketchEditor;
+class StartPage;
 class Viewport;
 
 class MainWindow final : public QMainWindow {
@@ -36,6 +38,11 @@ protected:
 
 private:
     void createMenus();
+    void showStartPage();
+    bool showWorkspace();
+    bool newProject();
+    void showMouseControls();
+    void openProjectPath(const QString& path, bool example = false);
     void updateFileState();
     bool saveProject(bool choosePath);
     bool confirmSave();
@@ -74,6 +81,7 @@ private:
     Viewport* viewport_;
     QStackedWidget* pages_;
     SketchEditor* sketchEditor_;
+    StartPage* startPage_;
     QTreeWidget* tree_;
     PropertyPanel* properties_;
     QHash<int, QTreeWidgetItem*> items_;
@@ -81,6 +89,10 @@ private:
     QMenu* editMenu_ = nullptr;
     QMenu* viewMenu_ = nullptr;
     QMenu* sketchMenu_ = nullptr;
+    QDockWidget* modelDock_ = nullptr;
+    QDockWidget* propertyDock_ = nullptr;
+    QAction* startPageAction_ = nullptr;
+    QAction* openAction_ = nullptr;
     QAction* newScene_ = nullptr;
     QAction* undo_ = nullptr;
     QAction* redo_ = nullptr;
@@ -96,6 +108,7 @@ private:
     QString logPath_;
     QString projectPath_;
     std::uint64_t savedRevision_ = 0;
+    bool hasWorkspace_ = false;
 };
 
 }  // namespace graph3d
