@@ -11,6 +11,7 @@
 #include <QSaveFile>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -104,6 +105,75 @@ void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame)
 
 }  // namespace
 
+bool isLinearDimension(DraftKind kind)
+{
+    return kind == DraftKind::Horizontal || kind == DraftKind::Vertical;
+}
+
+std::span<const DraftAnchor> draftAnchors(DraftKind kind)
+{
+    using enum DraftAnchor;
+    static constexpr std::array line{Start, End};
+    static constexpr std::array rectangle{Start, End, CornerAB, CornerBA};
+    static constexpr std::array circle{Center, Right, Left, Top, Bottom};
+    switch (kind) {
+    case DraftKind::Line: return line;
+    case DraftKind::Rectangle: return rectangle;
+    case DraftKind::Circle: return circle;
+    default: return {};
+    }
+}
+
+std::optional<QPointF> draftAnchorPoint(const DraftItem& item, DraftAnchor anchor)
+{
+    const auto anchors = draftAnchors(item.kind);
+    if (std::ranges::find(anchors, anchor) == anchors.end()) {
+        return {};
+    }
+    const auto radius = QLineF(item.a, item.b).length();
+    switch (anchor) {
+    case DraftAnchor::Start:
+    case DraftAnchor::Center: return item.a;
+    case DraftAnchor::End: return item.b;
+    case DraftAnchor::CornerAB: return QPointF(item.a.x(), item.b.y());
+    case DraftAnchor::CornerBA: return QPointF(item.b.x(), item.a.y());
+    case DraftAnchor::Right: return item.a + QPointF(radius, 0);
+    case DraftAnchor::Left: return item.a - QPointF(radius, 0);
+    case DraftAnchor::Top: return item.a - QPointF(0, radius);
+    case DraftAnchor::Bottom: return item.a + QPointF(0, radius);
+    }
+    return {};
+}
+
+DraftGeometry::DraftGeometry(const Draft& draft, const DraftItem* preview)
+{
+    for (const auto& item : draft.items) {
+        if (!item.id.isNull() && !draftAnchors(item.kind).empty()) {
+            sources_.insert(item.id, preview && item.id == preview->id ? preview : &item);
+        }
+    }
+}
+
+std::optional<QPointF> DraftGeometry::point(const DraftReference& reference) const
+{
+    const auto* source = sources_.value(reference.item);
+    return source ? draftAnchorPoint(*source, reference.anchor) : std::nullopt;
+}
+
+DraftItem DraftGeometry::resolve(const DraftItem& item) const
+{
+    auto copy = item;
+    if (item.anchorA) {
+        copy.a = point(*item.anchorA).value_or(item.a);
+        // The dimension line keeps its offset from the first measured point.
+        copy.label += copy.a - item.a;
+    }
+    if (item.anchorB) {
+        copy.b = point(*item.anchorB).value_or(item.b);
+    }
+    return copy;
+}
+
 QSizeF draftSize(const Draft& draft)
 {
     return draft.a3 ? QSizeF(420, 297) : QSizeF(297, 210);
@@ -124,8 +194,8 @@ bool validItem(const DraftItem& item)
     case DraftKind::Circle: return std::hypot(dx, dy) >= epsilon;
     case DraftKind::Rectangle: return dx >= epsilon && dy >= epsilon;
     case DraftKind::Text: return !item.text.trimmed().isEmpty() && item.text.size() <= 200;
-    case DraftKind::Horizontal: return dx >= epsilon;
-    case DraftKind::Vertical: return dy >= epsilon;
+    case DraftKind::Horizontal:
+    case DraftKind::Vertical: return true;
     }
     return false;
 }
@@ -133,7 +203,7 @@ bool validItem(const DraftItem& item)
 void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
 {
     const QColor color = selected ? QColor("#1a72b8") : QColor("#151b22");
-    const bool dimension = item.kind == DraftKind::Horizontal || item.kind == DraftKind::Vertical;
+    const bool dimension = isLinearDimension(item.kind);
     QPen pen(color, selected ? 0.48 : dimension ? 0.18 : 0.35, Qt::SolidLine, Qt::FlatCap);
     if (item.stroke == DraftStroke::Hidden) {
         pen.setDashPattern({7, 4});
@@ -167,7 +237,7 @@ bool draftHit(const DraftItem& item, QPointF point, double tolerance)
     return stroke.createStroke(path).contains(point);
 }
 
-void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected)
+void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const DraftItem* preview)
 {
     const auto size = draftSize(draft);
     const QRectF paper(QPointF{}, size);
@@ -190,8 +260,11 @@ void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected)
     p.drawRect(frame);
     p.save();
     p.setClipRect(frame, Qt::IntersectClip);
+    const DraftGeometry geometry(draft, preview);
     for (std::size_t i = 0; i < draft.items.size(); ++i) {
-        paintDraftItem(p, draft.items[i], static_cast<int>(i) == selected);
+        const bool active = static_cast<int>(i) == selected;
+        const auto& item = active && preview ? *preview : draft.items[i];
+        paintDraftItem(p, geometry.resolve(item), active);
     }
     p.restore();
     titleBlock(p, draft, frame);

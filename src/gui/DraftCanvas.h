@@ -41,7 +41,11 @@ private:
     double scale() const;
     QPointF origin() const;
     QPointF toSheet(QPointF screen) const;
-    QPointF snapped(QPointF page) const;
+    struct Pick {
+        QPointF position;
+        std::optional<drawing::DraftReference> reference;
+    };
+    Pick snapped(QPointF page) const;
     std::optional<drawing::DraftItem> pendingItem(QPointF end) const;
 
     bool canPlace(QPointF point) const;
@@ -51,13 +55,14 @@ private:
     LineInput& lineInput_;
     std::optional<drawing::DraftKind> tool_;
     drawing::DraftStroke stroke_ = drawing::DraftStroke::Solid;
-    std::vector<QPointF> points_;
+    std::vector<Pick> points_;
     QPointF cursor_;
     QPointF pan_;
     QPointF panStart_;
     QPointF dragStart_;
     double zoom_ = 1;
     bool grid_ = true;
+    bool cursorAttached_ = false;
     bool panning_ = false;
     bool dragging_ = false;
     int selected_ = -1;

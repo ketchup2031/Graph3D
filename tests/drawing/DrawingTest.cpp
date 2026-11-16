@@ -228,7 +228,11 @@ void verifyDraft(const QDir& output)
     }};
     const auto path = output.filePath("mounting-plate.g3draw");
     io::saveDraft(path, draft);
-    const auto reopened = io::openDraft(path);
+    auto reopened = io::openDraft(path);
+    for (auto& item : reopened.items) {
+        check(!item.id.isNull() && !item.anchorA && !item.anchorB, "Legacy drawing gained an attachment");
+        item.id = QUuid{};
+    }
     check(reopened.items == draft.items && reopened.title == draft.title && reopened.number == draft.number
           && reopened.author == draft.author && reopened.a3 == draft.a3, "Draft data changed after reloading");
     check(draw::draftHit(draft.items[1], {117, 100}, .1)
@@ -247,6 +251,60 @@ void verifyDraft(const QDir& output)
         rejected = true;
     }
     check(rejected, "An invalid native file was accepted");
+}
+
+void verifyAttachedDimensions(const QDir& output)
+{
+    using enum draw::DraftKind;
+    using enum draw::DraftAnchor;
+    draw::Draft draft;
+    draft.items = {{Line, {40, 40}, {90, 40}}, {Rectangle, {100, 55}, {140, 85}},
+                   {Circle, {160, 90}, {170, 90}}, {Horizontal, {40, 40}, {90, 40}, {65, 25}},
+                   {Vertical, {100, 85}, {160, 100}, {185, 95}},
+                   {Horizontal, {45, 70}, {75, 70}, {60, 60}}};
+    for (auto& item : draft.items) {
+        item.id = QUuid::createUuid();
+    }
+    draft.items[3].anchorA = draw::DraftReference{draft.items[0].id, Start};
+    draft.items[3].anchorB = draw::DraftReference{draft.items[0].id, End};
+    draft.items[4].anchorA = draw::DraftReference{draft.items[1].id, CornerAB};
+    draft.items[4].anchorB = draw::DraftReference{draft.items[2].id, Bottom};
+
+    draft.items[0].a = {45, 55};
+    draft.items[0].b = {115, 55};
+    draft.items[1].b = {145, 90};
+    draft.items[2].b = {175, 90};
+    const draw::DraftGeometry geometry(draft);
+    const auto first = geometry.resolve(draft.items[3]);
+    check(first.a == QPointF(45, 55) && first.b == QPointF(115, 55) && first.label.y() == 40,
+          "Line edit did not update its attached dimension and offset");
+    const auto second = geometry.resolve(draft.items[4]);
+    check(second.a == QPointF(100, 90) && second.b == QPointF(160, 105),
+          "Rectangle corner or circle quadrant did not update");
+    check(geometry.resolve(draft.items[5]) == draft.items[5], "A free dimension moved");
+    auto preview = draft.items[0];
+    preview.b = {145, 55};
+    check(draw::DraftGeometry(draft, &preview).resolve(draft.items[3]).b == preview.b,
+          "Dimension did not follow the drag preview");
+
+    const auto path = output.filePath("attached-dimensions.g3draw");
+    io::saveDraft(path, draft);
+    const auto restored = io::openDraft(path);
+    check(restored.items == draft.items, "Dimension IDs or attachments did not survive saving");
+    check(draw::DraftGeometry(restored).resolve(restored.items[3]) == first,
+          "Reloaded attachment resolved to a different point");
+    QFile pdf(output.filePath("attached-dimensions.pdf"));
+    draw::exportDraftPdf(pdf.fileName(), restored);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.read(5) == "%PDF-", "PDF with attached dimensions was not written");
+
+    draft.items[3].anchorA->item = QUuid::createUuid();
+    bool rejected = false;
+    try {
+        io::saveDraft(path, draft);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "A dangling attachment was saved");
 }
 
 }  // namespace
@@ -274,6 +332,7 @@ int main(int argc, char** argv)
         }
         verifySections(QDir(args.at(1)), output);
         verifyDraft(output);
+        verifyAttachedDimensions(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

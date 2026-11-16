@@ -31,6 +31,7 @@ private:
     void exportPdf();
     void editSheet();
     void editSelected();
+    void removeItem(int index);
     bool confirmSave();
     void replaceDrawing(drawing::Draft draft, const QString& path = {});
     void updateTitle();

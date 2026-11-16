@@ -103,11 +103,12 @@ DraftWindow::DraftWindow(QWidget* parent)
     edit->addAction(redo);
     auto* remove = edit->addAction(tr("Delete selected"), QKeySequence::Delete, this, [this] {
         if (const int index = canvas_->selected(); index >= 0) {
-            editItem(index, {}, tr("Delete item"));
+            removeItem(index);
         }
     });
     auto* properties = edit->addAction(tr("Item properties…"), this, &DraftWindow::editSelected);
     properties->setObjectName(QStringLiteral("draftItemProperties"));
+    remove->setObjectName(QStringLiteral("removeDraftItem"));
     remove->setEnabled(false);
     properties->setEnabled(false);
     connect(canvas_, &DraftCanvas::selectionChanged, this, [remove, properties](int selected) {
@@ -146,8 +147,8 @@ DraftWindow::DraftWindow(QWidget* parent)
     tool(tr("Circle"), "draftCircle", DraftKind::Circle, tr("Pick the center and a point on the circle."));
     tool(tr("Text"), "draftText", DraftKind::Text, tr("Pick a position for a note."));
     bar->addSeparator();
-    tool(tr("Horizontal dim."), "draftHorizontal", DraftKind::Horizontal, tr("Pick two points, then place the dimension line."));
-    tool(tr("Vertical dim."), "draftVertical", DraftKind::Vertical, tr("Pick two points, then place the dimension line."));
+    tool(tr("Horizontal dim."), "draftHorizontal", DraftKind::Horizontal, tr("Pick two points, then place the dimension line. Snapped points stay attached."));
+    tool(tr("Vertical dim."), "draftVertical", DraftKind::Vertical, tr("Pick two points, then place the dimension line. Snapped points stay attached."));
     auto* stroke = new QComboBox(bar);
     stroke->setAccessibleName(tr("Line style"));
     stroke->addItems({tr("Solid"), tr("Hidden"), tr("Center")});
@@ -179,7 +180,9 @@ DraftWindow::DraftWindow(QWidget* parent)
         coordinates->setText(tr("X %1   Y %2 mm").arg(point.x(), 0, 'f', 1).arg(point.y(), 0, 'f', 1));
     });
     connect(canvas_, &DraftCanvas::itemCreated, this, [this](const DraftItem& item) {
-        editItem(static_cast<int>(draft_.items.size()), item, tr("Create item"));
+        auto identified = item;
+        identified.id = QUuid::createUuid();
+        editItem(static_cast<int>(draft_.items.size()), identified, tr("Create item"));
     });
     connect(canvas_, &DraftCanvas::itemMoved, this, [this](int index, const DraftItem& item) {
         editItem(index, item, tr("Move item"));
@@ -191,6 +194,30 @@ DraftWindow::DraftWindow(QWidget* parent)
     connect(&history_, &QUndoStack::cleanChanged, this, [this] { updateTitle(); });
     select->trigger();
     updateTitle();
+}
+
+void DraftWindow::removeItem(int index)
+{
+    const auto id = draft_.items[index].id;
+    const drawing::DraftGeometry geometry(draft_);
+    history_.beginMacro(tr("Delete item"));
+    for (int i = 0; i < static_cast<int>(draft_.items.size()); ++i) {
+        const auto& dimension = draft_.items[i];
+        const bool detachA = dimension.anchorA && dimension.anchorA->item == id;
+        const bool detachB = dimension.anchorB && dimension.anchorB->item == id;
+        if (detachA || detachB) {
+            auto fixed = geometry.resolve(dimension);
+            if (detachA) {
+                fixed.anchorA.reset();
+            }
+            if (detachB) {
+                fixed.anchorB.reset();
+            }
+            editItem(i, fixed, tr("Detach dimension point"));
+        }
+    }
+    editItem(index, {}, tr("Delete item"));
+    history_.endMacro();
 }
 
 void DraftWindow::editItem(int index, const std::optional<DraftItem>& after, const QString& description)
@@ -308,6 +335,7 @@ void DraftWindow::editSelected()
         return;
     }
     auto item = draft_.items[index];
+    const auto measured = drawing::DraftGeometry(draft_).resolve(item);
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("draftItemDialog"));
     dialog.setWindowTitle(tr("Item properties"));
@@ -315,9 +343,15 @@ void DraftWindow::editSelected()
     struct CoordinateFields {
         QDoubleSpinBox* x;
         QDoubleSpinBox* y;
-        QPointF point() const { return {x->value(), y->value()}; }
+        QPointF original;
+        QPointF displayed;
+        QPointF point() const
+        {
+            return {x->value() == displayed.x() ? original.x() : x->value(),
+                    y->value() == displayed.y() ? original.y() : y->value()};
+        }
     };
-    const auto pair = [&](const QString& xName, const QString& yName, QPointF point) {
+    const auto pair = [&](const QString& xName, const QString& yName, QPointF point, bool linked = false) {
         auto* x = new QDoubleSpinBox(&dialog);
         auto* y = new QDoubleSpinBox(&dialog);
         for (auto* field : {x, y}) {
@@ -325,13 +359,19 @@ void DraftWindow::editSelected()
             field->setRange(-10000, 10000);
             field->setSuffix(tr(" mm"));
         }
+        if (linked) {
+            for (auto* field : {x, y}) {
+                field->setReadOnly(true);
+                field->setToolTip(tr("This point follows the attached geometry."));
+            }
+        }
         x->setValue(point.x());
         y->setValue(point.y());
         form->addRow(xName, x);
         form->addRow(yName, y);
-        return CoordinateFields{x, y};
+        return CoordinateFields{x, y, point, {x->value(), y->value()}};
     };
-    const auto a = pair(tr("First point X"), tr("First point Y"), item.a);
+    const auto a = pair(tr("First point X"), tr("First point Y"), measured.a, item.anchorA.has_value());
     std::optional<CoordinateFields> b, label;
     QLineEdit* text = nullptr;
     if (item.kind == DraftKind::Text) {
@@ -339,21 +379,23 @@ void DraftWindow::editSelected()
         text->setMaxLength(200);
         form->addRow(tr("Text"), text);
     } else {
-        b = pair(tr("Second point X"), tr("Second point Y"), item.b);
+        b = pair(tr("Second point X"), tr("Second point Y"), measured.b, item.anchorB.has_value());
     }
     if (item.kind == DraftKind::Horizontal || item.kind == DraftKind::Vertical) {
-        label = pair(tr("Dimension line X"), tr("Dimension line Y"), item.label);
+        label = pair(tr("Dimension line X"), tr("Dimension line Y"), measured.label);
     }
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-        item.a = a.point();
-        if (b) {
+        if (!item.anchorA) {
+            item.a = a.point();
+        }
+        if (b && !item.anchorB) {
             item.b = b->point();
         }
         if (label) {
-            item.label = label->point();
+            item.label += label->point() - measured.label;
         }
         if (text) {
             item.text = text->text();

@@ -288,6 +288,61 @@ private slots:
         QVERIFY(std::abs(endpoint.at(1).toDouble() - 117.5) < 1.e-9);
         QCOMPARE(contents.value("title").toString(), QStringLiteral("Пластина"));
         QCOMPARE(contents.value("paper").toString(), QStringLiteral("A3"));
+        QCOMPARE(contents.value("version").toInt(), 2);
+        const auto rectangle = items.at(0).toObject();
+        const auto dimension = items.at(1).toObject();
+        QCOMPARE(dimension.value("anchorA").toObject().value("item"), rectangle.value("id"));
+        QCOMPARE(dimension.value("anchorB").toObject().value("item"), rectangle.value("id"));
+
+        action("draftSelect")->trigger();
+        const auto clickA3 = [canvas](double x, double y) {
+            QApplication::processEvents();
+            const double scale = std::min((canvas->width() - 32) / 420.0, (canvas->height() - 32) / 297.0);
+            const QPointF origin((canvas->width() - 420 * scale) / 2, (canvas->height() - 297 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + QPointF(x, y) * scale).toPoint());
+        };
+        clickA3(160, 80);
+        QVERIFY(action("draftItemProperties")->isEnabled());
+        QTimer::singleShot(0, window, [] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (dialog) {
+                const auto fields = dialog->findChildren<QDoubleSpinBox*>();
+                if (fields.size() == 4) {
+                    fields[2]->setValue(180);
+                    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                } else {
+                    dialog->reject();
+                }
+            }
+        });
+        action("draftItemProperties")->trigger();
+        clickA3(180, 80);
+        QVERIFY(action("removeDraftItem")->isEnabled());
+        action("removeDraftItem")->trigger();
+        action("saveDraft")->trigger();
+        const auto readSaved = [&native] {
+            if (!native.open(QIODevice::ReadOnly)) {
+                return QJsonObject{};
+            }
+            const auto result = QJsonDocument::fromJson(native.readAll()).object();
+            native.close();
+            return result;
+        };
+        const auto detached = readSaved();
+        QCOMPARE(detached.value("version").toInt(), 1);
+        const auto fixed = detached.value("items").toArray().at(0).toObject();
+        QCOMPARE(fixed.value("type").toString(), QStringLiteral("horizontal"));
+        QCOMPARE(fixed.value("b").toArray().at(0).toDouble(), 180.0);
+        QVERIFY(!fixed.contains("anchorB"));
+
+        action("undoDraft")->trigger();
+        action("saveDraft")->trigger();
+        const auto reattached = readSaved();
+        QCOMPARE(reattached.value("version").toInt(), 2);
+        QCOMPARE(reattached.value("items").toArray().at(1).toObject().value("anchorB"), dimension.value("anchorB"));
+        action("redoDraft")->trigger();
+        action("undoDraft")->trigger();
+        QVERIFY(!window->isWindowModified());
         const auto pdfPath = folder.filePath("plate.pdf");
         selectFile(pdfPath);
         action("exportDraftPdf")->trigger();
