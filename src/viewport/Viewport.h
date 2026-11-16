@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QImage>
 #include <QWidget>
 
 #include <functional>
@@ -20,6 +21,7 @@ public:
 
     bool initialize();
     void syncDocument(const document::Document& document);
+    QImage renderSnapshot();
     void resetCamera();
     void selectObject(int id);
     void clearSelection();

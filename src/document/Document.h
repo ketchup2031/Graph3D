@@ -6,6 +6,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <variant>
 #include <vector>
@@ -18,7 +19,13 @@ struct Primitive { geometry::Primitive kind; double x; double y; };
 struct Extrude { ObjectId profile; double distance; };
 struct Revolve { ObjectId profile; geometry::Axis axis; double offset; double angle; };
 struct Boolean { ObjectId first, second; geometry::BooleanOperation operation; };
-using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean>;
+struct Imported { std::string name; TopoDS_Shape sourceShape; };
+using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported>;
+
+struct Definition {
+    Parameters parameters;
+    bool visible;
+};
 
 enum class Status { Ready, Failed, Blocked };
 
@@ -38,11 +45,14 @@ public:
     ObjectId addExtrude(ObjectId profile, double distance);
     ObjectId addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle);
     ObjectId addBoolean(ObjectId first, ObjectId second, geometry::BooleanOperation operation);
+    ObjectId addImported(std::string name, TopoDS_Shape shape);
+    static Document fromDefinitions(std::vector<Definition> definitions);
     bool editExtrude(ObjectId id, double distance);
     bool editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle);
     bool setVisible(ObjectId id, bool visible);
     bool clear();
 
+    std::uint64_t revision() const { return revision_; }
     bool canUndo() const { return !undo_.empty(); }
     bool canRedo() const { return !redo_.empty(); }
     bool undo();
@@ -55,11 +65,14 @@ private:
     using State = std::vector<Object>;
     ObjectId append(Parameters parameters);
     void commit(State next);
-    static void rebuild(State& state, std::size_t first);
+    static void rebuild(State& state, std::size_t first, bool all = false);
 
+    struct Snapshot { State objects; std::uint64_t revision; };
     State objects_;
-    std::vector<State> undo_;
-    std::vector<State> redo_;
+    std::vector<Snapshot> undo_;
+    std::vector<Snapshot> redo_;
+    std::uint64_t revision_ = 0;
+    std::uint64_t nextRevision_ = 1;
 };
 
 }  // namespace graph3d::document

@@ -3,19 +3,25 @@
 #include "viewport/Viewport.h"
 
 #include <QAction>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPushButton>
-#include <QScreen>
+
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTest>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QWheelEvent>
@@ -31,9 +37,9 @@ void drag(QWidget* widget, Qt::MouseButton button, QPoint from, QPoint to)
     QTest::mouseRelease(widget, button, Qt::NoModifier, to);
 }
 
-QImage frame(QWidget* widget)
+QImage frame(graph3d::Viewport* viewport)
 {
-    return widget->screen()->grabWindow(widget->winId()).toImage();
+    return viewport->renderSnapshot();
 }
 
 }  // namespace
@@ -257,6 +263,104 @@ private slots:
         button("sketchFinish")->click();
         QCOMPARE(tree->currentItem()->text(1), QStringLiteral("Plane YZ"));
         QCOMPARE(errors.count(), 0);
+    }
+
+    void projectFileAndExchangeMenus()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow window;
+        window.show();
+        window.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        QVERIFY(tree);
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        const auto path = folder.filePath(QStringLiteral("сцена.graph3d"));
+        const auto step = folder.filePath(QStringLiteral("сцена.step"));
+        const auto stl = folder.filePath(QStringLiteral("сцена.stl"));
+        const auto dialogFile = [](const QString& name, QMessageBox::StandardButton next = QMessageBox::NoButton) {
+            QTimer::singleShot(0, [name, next] {
+                auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                if (!dialog) {
+                    return;
+                }
+                dialog->selectFile(name);
+                static_cast<QDialog*>(dialog)->accept();
+                if (next != QMessageBox::NoButton) {
+                    QTimer::singleShot(0, [next] {
+                        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                            if (auto* button = box->button(next)) {
+                                button->click();
+                            }
+                        }
+                    });
+                }
+            });
+        };
+
+        QVERIFY(!window.isWindowModified());
+        action("createCylinder")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QVERIFY(window.isWindowModified());
+        dialogFile(path);
+        action("saveProject")->trigger();
+        QVERIFY(QFileInfo::exists(path));
+        QVERIFY(!window.isWindowModified());
+        action("createSphere")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 3);
+        QVERIFY(window.isWindowModified());
+        action("undoDocument")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QVERIFY(!window.isWindowModified());
+        action("redoDocument")->trigger();
+        QVERIFY(window.isWindowModified());
+
+        dialogFile(path, QMessageBox::Cancel);
+        action("openProject")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 3);
+        QVERIFY(window.isWindowModified());
+        dialogFile(path, QMessageBox::Discard);
+        action("openProject")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QCOMPARE(tree->topLevelItem(1)->text(0), QStringLiteral("Cylinder 2"));
+        QVERIFY(!window.isWindowModified());
+        QVERIFY(!action("undoDocument")->isEnabled());
+
+        const auto invalid = folder.filePath(QStringLiteral("bad.graph3d"));
+        QFile damaged(invalid);
+        QVERIFY(damaged.open(QIODevice::WriteOnly));
+        QCOMPARE(damaged.write("{"), 1);
+        damaged.close();
+        dialogFile(invalid, QMessageBox::Ok);
+        action("openProject")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QVERIFY(window.statusBar()->currentMessage().startsWith(QStringLiteral("Could not open")));
+        QVERIFY(!window.isWindowModified());
+
+        dialogFile(step);
+        action("exportStep")->trigger();
+        QVERIFY(QFileInfo::exists(step));
+        dialogFile(stl);
+        action("exportStl")->trigger();
+        QVERIFY(QFileInfo(stl).size() > 84);
+        QVERIFY(!window.isWindowModified());
+        dialogFile(step);
+        action("importStep")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 3);
+        QCOMPARE(tree->topLevelItem(2)->text(0), QStringLiteral("Imported STEP 3"));
+        QVERIFY(window.isWindowModified());
+        action("saveProject")->trigger();
+        QVERIFY(!window.isWindowModified());
+
+        dialogFile(path);
+        action("openProject")->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 3);
+        QCOMPARE(tree->topLevelItem(2)->text(1), QStringLiteral("сцена.step"));
+        QVERIFY(!window.isWindowModified());
     }
 };
 

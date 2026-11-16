@@ -5,6 +5,7 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Image_PixMap.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Quantity_Color.hxx>
 #include <Standard_Failure.hxx>
@@ -22,6 +23,7 @@
 #endif
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -172,6 +174,36 @@ void Viewport::syncDocument(const document::Document& document)
         scene_->view->ZFitAll();
         scene_->context->UpdateCurrentViewer();
     });
+}
+
+QImage Viewport::renderSnapshot()
+{
+    QImage output;
+    if (!scene_->ready || width() < 1 || height() < 1) {
+        return output;
+    }
+    runOperation(tr("Render 3D view"), [this, &output] {
+        Image_PixMap pixels;
+        if (!pixels.InitTrash(Image_Format_RGB, width(), height(), width() * 3)
+            || !scene_->view->ToPixMap(pixels, width(), height())) {
+            throw std::runtime_error("Could not render the offscreen view.");
+        }
+        const auto format = pixels.Format() == Image_Format_RGB ? QImage::Format_RGB888
+                          : pixels.Format() == Image_Format_BGR ? QImage::Format_BGR888
+                          : QImage::Format_Invalid;
+        if (format == QImage::Format_Invalid) {
+            throw std::runtime_error("Unsupported pixel layout for the offscreen view.");
+        }
+        output = QImage(width(), height(), format);
+        if (output.isNull()) {
+            throw std::runtime_error("Could not allocate the offscreen image.");
+        }
+        output.fill(Qt::black);
+        for (int row = 0; row < output.height(); ++row) {
+            std::memcpy(output.scanLine(row), pixels.Row(row), static_cast<std::size_t>(output.width()) * 3);
+        }
+    });
+    return output;
 }
 
 void Viewport::resetCamera()

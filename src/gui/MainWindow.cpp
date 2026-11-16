@@ -2,10 +2,13 @@
 
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
+#include "io/Exchange.h"
+#include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
@@ -16,6 +19,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QInputDialog>
 #include <QIcon>
@@ -55,7 +59,7 @@ MainWindow::MainWindow()
       sketchEditor_(new SketchEditor(this)), tree_(new QTreeWidget(this)),
       properties_(new PropertyPanel(this))
 {
-    setWindowTitle(QStringLiteral("Graph3D"));
+    setWindowTitle(QStringLiteral("Graph3D[*]"));
     resize(1040, 710);
     setMinimumSize(480, 320);
     setCentralWidget(pages_);
@@ -97,6 +101,8 @@ bool MainWindow::initializeScene()
         return false;
     }
     document_.clearHistory();
+    savedRevision_ = document_.revision();
+    updateFileState();
     updateActions();
     statusBar()->showMessage(tr("Left click: select   |   Right drag: orbit   |   Middle drag: pan   |   Wheel: zoom"));
     return true;
@@ -114,6 +120,25 @@ void MainWindow::createMenus()
         viewport_->resetCamera();
         report(tr("New scene"));
     });
+    auto* open = menuAction(file, tr("&Open project…"), "openProject");
+    open->setShortcut(QKeySequence::Open);
+    connect(open, &QAction::triggered, this, &MainWindow::openProject);
+    auto* save = menuAction(file, tr("&Save project"), "saveProject");
+    save->setShortcut(QKeySequence::Save);
+    connect(save, &QAction::triggered, this, [this] { saveProject(false); });
+    auto* saveAs = menuAction(file, tr("Save project &as…"), "saveProjectAs");
+    saveAs->setShortcut(QKeySequence::SaveAs);
+    connect(saveAs, &QAction::triggered, this, [this] { saveProject(true); });
+
+    file->addSeparator();
+    auto* import = menuAction(file, tr("Import STEP…"), "importStep");
+    connect(import, &QAction::triggered, this, &MainWindow::importStep);
+    auto* exportStep = menuAction(file, tr("Export visible bodies to STEP…"), "exportStep");
+    connect(exportStep, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Step); });
+    auto* exportStl = menuAction(file, tr("Export visible bodies to STL…"), "exportStl");
+    connect(exportStl, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Stl); });
+    fileActions_ = {open, save, saveAs, import, exportStep, exportStl};
+
     file->addSeparator();
     auto* quit = file->addAction(tr("E&xit"), this, &QWidget::close);
     quit->setShortcut(QKeySequence::Quit);
@@ -297,6 +322,7 @@ void MainWindow::refreshDocument(int selection)
     }
     viewport_->selectObject(selectedId());
     updateSelection();
+    updateFileState();
 }
 
 int MainWindow::selectedId() const
@@ -327,6 +353,9 @@ void MainWindow::updateActions()
     };
     const auto bodies = std::count_if(document_.objects().begin(), document_.objects().end(), validBody);
     newScene_->setEnabled(!drawing);
+    for (auto* action : fileActions_) {
+        action->setEnabled(!drawing);
+    }
     undo_->setEnabled(!drawing && document_.canUndo());
     redo_->setEnabled(!drawing && document_.canRedo());
     createMenu_->setEnabled(!drawing);
@@ -356,6 +385,8 @@ QString MainWindow::objectName(const document::Object& object) const
             return tr("Extrude");
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
             return tr("Revolve");
+        } else if constexpr (std::is_same_v<Type, document::Imported>) {
+            return tr("Imported STEP");
         } else {
             switch (operation.operation) {
             case geometry::BooleanOperation::Union: return tr("Union");
@@ -389,6 +420,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
                 .arg(operation.axis == geometry::Axis::U ? "U" : "V").arg(operation.offset);
         } else if constexpr (std::is_same_v<Type, document::Boolean>) {
             return tr("%1 and %2").arg(source(operation.first), source(operation.second));
+        } else if constexpr (std::is_same_v<Type, document::Imported>) {
+            return QString::fromStdString(operation.name);
         }
         return {};
     }, object.parameters);
@@ -553,6 +586,142 @@ void MainWindow::combineCurrent(geometry::BooleanOperation operation)
                 return document_.addBoolean(first, second, operation);
             });
         }
+    }
+}
+
+void MainWindow::updateFileState()
+{
+    setWindowTitle(projectPath_.isEmpty() ? tr("Graph3D[*]")
+        : tr("Graph3D — %1[*]").arg(QFileInfo(projectPath_).fileName()));
+    setWindowModified(document_.revision() != savedRevision_);
+}
+
+bool MainWindow::saveProject(bool choosePath)
+{
+    auto path = projectPath_;
+    if (choosePath || path.isEmpty()) {
+        QFileDialog dialog(this, tr("Save Graph3D project"), path, tr("Graph3D projects (*.graph3d)"));
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setDefaultSuffix(QStringLiteral("graph3d"));
+        if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
+            return false;
+        }
+        path = dialog.selectedFiles().constFirst();
+    }
+    try {
+        if (!path.endsWith(QStringLiteral(".graph3d"), Qt::CaseInsensitive)) {
+            throw std::invalid_argument("Use the .graph3d extension for a project.");
+        }
+        io::saveProject(path, document_);
+        projectPath_ = path;
+        savedRevision_ = document_.revision();
+        updateFileState();
+        report(tr("Saved %1").arg(QFileInfo(path).fileName()));
+        return true;
+    } catch (const std::exception& error) {
+        const auto message = tr("Could not save project: %1").arg(QString::fromUtf8(error.what()));
+        showSceneError(message);
+        QMessageBox::warning(this, tr("Save project"), message);
+        return false;
+    }
+}
+
+bool MainWindow::confirmSave()
+{
+    if (document_.revision() == savedRevision_) {
+        return true;
+    }
+    const auto selection = QMessageBox::warning(this, tr("Unsaved changes"),
+        tr("Save changes to the current Graph3D project?"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    return selection == QMessageBox::Discard || (selection == QMessageBox::Save && saveProject(false));
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (pages_->currentWidget() == sketchEditor_ && QMessageBox::question(this, tr("Unfinished sketch"),
+            tr("Discard the unfinished sketch?"), QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel) != QMessageBox::Yes) {
+        event->ignore();
+        return;
+    }
+    if (confirmSave()) {
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
+void MainWindow::openProject()
+{
+    const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
+                                                  tr("Graph3D projects (*.graph3d)"));
+    if (path.isEmpty() || !confirmSave()) {
+        return;
+    }
+    try {
+        auto loaded = io::openProject(path);
+        {
+            const QSignalBlocker block(tree_);
+            items_.clear();
+            tree_->clear();
+        }
+        viewport_->syncDocument(document::Document{});
+        document_ = std::move(loaded);
+        projectPath_ = path;
+        savedRevision_ = document_.revision();
+        refreshDocument(0);
+        viewport_->resetCamera();
+        viewport_->fitScene();
+        const auto errors = std::count_if(document_.objects().begin(), document_.objects().end(),
+            [](const auto& item) { return item.status != document::Status::Ready; });
+        report(errors ? tr("Opened %1. %2 operations need attention in the model tree.")
+                         .arg(QFileInfo(path).fileName()).arg(errors)
+                      : tr("Opened %1").arg(QFileInfo(path).fileName()));
+    } catch (const std::exception& error) {
+        const auto message = tr("Could not open project: %1").arg(QString::fromUtf8(error.what()));
+        showSceneError(message);
+        QMessageBox::warning(this, tr("Open project"), message);
+    }
+}
+
+void MainWindow::importStep()
+{
+    const auto path = QFileDialog::getOpenFileName(this, tr("Import STEP"), projectPath_,
+                                                  tr("STEP files (*.step *.stp)"));
+    if (!path.isEmpty()) {
+        addFeature(tr("Import STEP"), [this, &path] {
+            const auto name = QFileInfo(path).fileName().toUtf8().toStdString();
+            return document_.addImported(name, io::readStep(path));
+        });
+    }
+}
+
+void MainWindow::exportModel(io::ExchangeFormat format)
+{
+    const bool step = format == io::ExchangeFormat::Step;
+    const auto filter = step ? tr("STEP files (*.step *.stp)") : tr("STL files (*.stl)");
+    auto path = projectPath_;
+    if (!path.isEmpty()) {
+        const QFileInfo info(path);
+        path = info.dir().filePath(info.completeBaseName());
+    }
+    QFileDialog dialog(this, tr("Export visible bodies"), path, filter);
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setDefaultSuffix(step ? QStringLiteral("step") : QStringLiteral("stl"));
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
+        return;
+    }
+    path = dialog.selectedFiles().constFirst();
+    try {
+        const auto suffix = QFileInfo(path).suffix().toLower();
+        if (step ? suffix != "step" && suffix != "stp" : suffix != "stl") {
+            throw std::invalid_argument("Use the extension for the selected export format.");
+        }
+        io::exportVisible(path, document_, format);
+        report(tr("Exported %1").arg(QFileInfo(path).fileName()));
+    } catch (const std::exception& error) {
+        showSceneError(tr("Could not export model: %1").arg(QString::fromUtf8(error.what())));
     }
 }
 

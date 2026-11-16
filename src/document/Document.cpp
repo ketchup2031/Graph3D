@@ -3,7 +3,9 @@
 #include "geometry/Primitives.h"
 #include "geometry/SketchModeling.h"
 
+#include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 
 #include <array>
@@ -60,6 +62,13 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [&state](const Boolean& p) {
             return geometry::booleanResult(objectAt(state, p.first).shape,
                                            objectAt(state, p.second).shape, p.operation);
+        },
+        [](const Imported& imported) {
+            if (imported.sourceShape.IsNull() || !TopExp_Explorer(imported.sourceShape, TopAbs_SOLID).More()
+                || !BRepCheck_Analyzer(imported.sourceShape).IsValid()) {
+                throw std::invalid_argument("The imported geometry is not a valid solid.");
+            }
+            return imported.sourceShape;
         }
     }, parameters);
 }
@@ -103,6 +112,47 @@ ObjectId Document::addBoolean(ObjectId first, ObjectId second, geometry::Boolean
         }
     }
     return append(Boolean{first, second, operation});
+}
+
+ObjectId Document::addImported(std::string name, TopoDS_Shape shape)
+{
+    return append(Imported{std::move(name), std::move(shape)});
+}
+
+Document Document::fromDefinitions(std::vector<Definition> definitions)
+{
+    Document document;
+    auto& records = document.objects_;
+    records.reserve(definitions.size());
+    for (auto& definition : definitions) {
+        const auto id = static_cast<ObjectId>(records.size() + 1);
+        const auto& parameters = definition.parameters;
+        const auto requirePrior = [&records](ObjectId source) -> const Object& {
+            return objectAt(records, source);
+        };
+        if (const auto* extrusion = std::get_if<Extrude>(&parameters)) {
+            requireSketch(requirePrior(extrusion->profile));
+        } else if (const auto* revolution = std::get_if<Revolve>(&parameters)) {
+            requireSketch(requirePrior(revolution->profile));
+        } else if (const auto* boolean = std::get_if<Boolean>(&parameters)) {
+            if (boolean->first == boolean->second
+                || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->first).parameters)
+                || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->second).parameters)) {
+                throw std::invalid_argument("Invalid references in a boolean operation.");
+            }
+        }
+        records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible});
+    }
+    rebuild(records, 0, true);
+    for (const auto& object : records) {
+        if (object.status != Status::Ready
+            && (std::holds_alternative<Primitive>(object.parameters)
+                || std::holds_alternative<geometry::Sketch>(object.parameters)
+                || std::holds_alternative<Imported>(object.parameters))) {
+            throw std::invalid_argument("Object #" + std::to_string(object.id) + ": " + object.error);
+        }
+    }
+    return document;
 }
 
 ObjectId Document::append(Parameters parameters)
@@ -155,9 +205,12 @@ bool Document::editRevolve(ObjectId id, geometry::Axis axis, double offset, doub
     return true;
 }
 
-void Document::rebuild(State& state, std::size_t first)
+void Document::rebuild(State& state, std::size_t first, bool all)
 {
-    std::vector<bool> changed(state.size());
+    if (state.empty()) {
+        return;
+    }
+    std::vector<bool> changed(state.size(), all);
     changed[first] = true;
     for (std::size_t i = first; i < state.size(); ++i) {
         auto& object = state[i];
@@ -218,8 +271,9 @@ bool Document::clear()
 
 void Document::commit(State next)
 {
-    undo_.push_back(std::move(objects_));
+    undo_.push_back({std::move(objects_), revision_});
     objects_ = std::move(next);
+    revision_ = nextRevision_++;
     redo_.clear();
 }
 
@@ -228,8 +282,9 @@ bool Document::undo()
     if (!canUndo()) {
         return false;
     }
-    redo_.push_back(std::move(objects_));
-    objects_ = std::move(undo_.back());
+    redo_.push_back({std::move(objects_), revision_});
+    revision_ = undo_.back().revision;
+    objects_ = std::move(undo_.back().objects);
     undo_.pop_back();
     return true;
 }
@@ -239,8 +294,9 @@ bool Document::redo()
     if (!canRedo()) {
         return false;
     }
-    undo_.push_back(std::move(objects_));
-    objects_ = std::move(redo_.back());
+    undo_.push_back({std::move(objects_), revision_});
+    revision_ = redo_.back().revision;
+    objects_ = std::move(redo_.back().objects);
     redo_.pop_back();
     return true;
 }

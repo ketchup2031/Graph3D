@@ -3,17 +3,21 @@
 #include "document/Document.h"
 
 #include <QHash>
+#include <QList>
 #include <QMainWindow>
 
 #include <functional>
 
 class QAction;
+class QCloseEvent;
 class QMenu;
 class QStackedWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
 
 namespace graph3d {
+
+namespace io { enum class ExchangeFormat; }
 
 class PropertyPanel;
 class SketchEditor;
@@ -26,8 +30,17 @@ public:
     MainWindow();
     bool initializeScene();
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private:
     void createMenus();
+    void updateFileState();
+    bool saveProject(bool choosePath);
+    bool confirmSave();
+    void openProject();
+    void importStep();
+    void exportModel(io::ExchangeFormat format);
     void createModelTree();
     void refreshDocument(int selection);
     void updateSelection();
@@ -65,7 +78,10 @@ private:
     QAction* extrude_ = nullptr;
     QAction* revolve_ = nullptr;
     QMenu* booleanMenu_ = nullptr;
+    QList<QAction*> fileActions_;
     QString logPath_;
+    QString projectPath_;
+    std::uint64_t savedRevision_ = 0;
 };
 
 }  // namespace graph3d

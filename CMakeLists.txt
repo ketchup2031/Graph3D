@@ -6,9 +6,9 @@ if(Qt6_VERSION VERSION_GREATER_EQUAL 7)
     message(FATAL_ERROR "Graph3D requires Qt 6")
 endif()
 find_package(OpenCASCADE REQUIRED COMPONENTS
-    FoundationClasses ModelingData ModelingAlgorithms Visualization)
-if(OpenCASCADE_MAJOR_VERSION LESS 7 OR OpenCASCADE_MAJOR_VERSION GREATER_EQUAL 8)
-    message(FATAL_ERROR "Graph3D requires Open CASCADE Technology 7.x")
+    FoundationClasses ModelingData ModelingAlgorithms Visualization ApplicationFramework DataExchange)
+if(NOT OpenCASCADE_MAJOR_VERSION EQUAL 7 OR OpenCASCADE_MINOR_VERSION LESS 9)
+    message(FATAL_ERROR "Graph3D requires Open CASCADE Technology 7.9 or newer within 7.x")
 endif()
 
 add_library(graph3d_geometry STATIC
@@ -29,6 +29,10 @@ add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
+add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/Exchange.cpp)
+set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core PRIVATE TKDESTEP TKXSBase TKMesh TKTopAlgo)
+
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
 qt_add_resources(Graph3D app_icon PREFIX "/" FILES resources/icons/graph3d.png)
@@ -46,7 +50,7 @@ add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/viewport/Viewport.h)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
-    PRIVATE TKV3d TKOpenGl TKService)
+    PRIVATE graph3d_io TKV3d TKOpenGl TKService)
 target_link_libraries(Graph3D PRIVATE graph3d_ui)
 
 include(CTest)
@@ -70,6 +74,11 @@ if(BUILD_TESTING)
     set_target_properties(document_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(document_test PRIVATE graph3d_document TKTopAlgo)
     add_test(NAME document COMMAND document_test)
+
+    add_executable(exchange_test tests/io/ExchangeTest.cpp)
+    set_target_properties(exchange_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(exchange_test PRIVATE graph3d_io TKTopAlgo)
+    add_test(NAME exchange COMMAND exchange_test)
 
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)
