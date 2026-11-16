@@ -9,12 +9,14 @@ namespace graph3d::drawing {
 
 struct Point { double x; double y; };
 using Linework = std::vector<std::vector<Point>>;
+struct RoundContour { Point center; double radius; };
 
 struct View {
     Linework visible;
     Linework hidden;
     double width;
     double height;
+    std::vector<RoundContour> circles;
 };
 
 struct Projections {

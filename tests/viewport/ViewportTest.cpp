@@ -4,6 +4,7 @@
 
 #include <QAction>
 #include <QAbstractButton>
+#include <array>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -418,6 +419,124 @@ private slots:
         QVERIFY(pdf.open(QIODevice::ReadOnly));
         QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
         QVERIFY(pdf.size() > 1000);
+        QVERIFY(!window.isWindowModified());
+    }
+
+    void flangeFromSketchToPdf()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow window;
+        window.resize(1040, 710);
+        window.show();
+        window.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* editor = window.findChild<graph3d::SketchEditor*>();
+        QVERIFY(tree && editor);
+        auto* canvas = editor->findChild<QWidget*>("sketchCanvas");
+        auto* circle = editor->findChild<QPushButton*>("sketchCircle");
+        auto* finish = editor->findChild<QPushButton*>("sketchFinish");
+        QVERIFY(canvas && circle && finish);
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        const auto chooseFile = [](const QString& path) {
+            QTimer::singleShot(0, [path] {
+                if (auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    dialog->selectFile(path);
+                    static_cast<QDialog*>(dialog)->accept();
+                }
+            });
+        };
+        const auto at = [canvas](int x, int y) {
+            const auto origin = QPoint(canvas->width() / 2, canvas->height() / 2);
+            return origin + QPoint(x * 3, -y * 3);
+        };
+        struct Circle { int x, y, r; };
+        const std::array circles{Circle{0, 0, 50}, Circle{0, 0, 20}, Circle{35, 0, 5},
+                                 Circle{0, 35, 5}, Circle{-35, 0, 5}, Circle{0, -35, 5}};
+
+        action("newScene")->trigger();
+        QTreeWidgetItem* body = nullptr;
+        for (const auto& item : circles) {
+            action("newSketchXY")->trigger();
+            QVERIFY(editor->isVisible());
+            circle->click();
+            QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, at(item.x, item.y));
+            QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, at(item.x + item.r, item.y));
+            finish->click();
+            QVERIFY(!editor->isVisible());
+            QVERIFY(action("extrudeSketch")->isEnabled());
+            QTimer::singleShot(0, [] {
+                if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    dialog->setDoubleValue(15);
+                    dialog->accept();
+                }
+            });
+            action("extrudeSketch")->trigger();
+            auto* tool = tree->currentItem();
+            QVERIFY(tool && tool->text(0).startsWith(QStringLiteral("Extrude")));
+            if (!body) {
+                body = tool;
+                continue;
+            }
+            const auto toolName = tool->text(0);
+            tree->setCurrentItem(body);
+            QVERIFY(action("booleanCut")->isEnabled());
+            QTimer::singleShot(0, [toolName] {
+                if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    auto* options = dialog->findChild<QComboBox*>();
+                    if (!options || options->findText(toolName) < 0) {
+                        dialog->reject();
+                        return;
+                    }
+                    options->setCurrentText(toolName);
+                    dialog->accept();
+                }
+            });
+            action("booleanCut")->trigger();
+            QVERIFY(tree->currentItem() && tree->currentItem() != body);
+            QCOMPARE(body->checkState(0), Qt::Unchecked);
+            QCOMPARE(tool->checkState(0), Qt::Unchecked);
+            body = tree->currentItem();
+            QVERIFY(body->text(0).startsWith(QStringLiteral("Cut")));
+        }
+        QCOMPARE(body->text(0), QStringLiteral("Cut 17"));
+        QCOMPARE(body->checkState(0), Qt::Checked);
+        const auto projectPath = folder.filePath(QStringLiteral("flange.graph3d"));
+        chooseFile(projectPath);
+        action("saveProject")->trigger();
+        QVERIFY(QFileInfo::exists(projectPath));
+        QVERIFY(!window.isWindowModified());
+        chooseFile(projectPath);
+        action("openProject")->trigger();
+        const auto results = tree->findItems(QStringLiteral("Cut 17"), Qt::MatchExactly);
+        QCOMPARE(results.size(), 1);
+        tree->setCurrentItem(results.constFirst());
+
+        const auto pdfPath = folder.filePath(QStringLiteral("flange.pdf"));
+        const auto* drawingAction = action("drawingPreview");
+        QVERIFY(drawingAction && drawingAction->isEnabled());
+        bool sawDrawing = false;
+        QTimer::singleShot(0, [&] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                sawDrawing = dialog->objectName() == "drawingDialog";
+                if (sawDrawing) {
+                    auto* save = dialog->findChild<QPushButton*>("drawingSavePdf");
+                    if (save) {
+                        chooseFile(pdfPath);
+                        save->click();
+                    }
+                }
+                dialog->reject();
+            }
+        });
+        action("drawingPreview")->trigger();
+        QVERIFY(sawDrawing);
+        QFile pdf(pdfPath);
+        QVERIFY(pdf.open(QIODevice::ReadOnly));
+        QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
         QVERIFY(!window.isWindowModified());
     }
 };

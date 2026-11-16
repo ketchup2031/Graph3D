@@ -15,13 +15,78 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 
 namespace graph3d::drawing {
 namespace {
 
-void appendEdges(Linework& lines, const TopoDS_Shape& edges, double tolerance)
+struct CircleCoverage {
+    RoundContour contour;
+    std::vector<std::pair<double, double>> intervals;
+};
+
+constexpr double turn = 2 * std::numbers::pi;
+constexpr double angularTolerance = 1.e-5;
+
+void addCircle(std::vector<CircleCoverage>& coverage, const BRepAdaptor_Curve& curve, double tolerance)
+{
+    if (curve.GetType() != GeomAbs_Circle) {
+        return;
+    }
+    const auto circle = curve.Circle();
+    const auto center = circle.Location();
+    const auto axis = circle.Axis().Direction().Z();
+    if (std::abs(axis) < 1 - angularTolerance) {
+        return;
+    }
+    const auto position = Point{center.X(), center.Y()};
+    const auto radius = circle.Radius();
+    const auto span = curve.LastParameter() - curve.FirstParameter();
+    if (!(span > 0 && radius > tolerance)) {
+        return;
+    }
+    const auto same = [position, radius, tolerance](const CircleCoverage& entry) {
+        return std::hypot(entry.contour.center.x - position.x, entry.contour.center.y - position.y)
+                   <= tolerance
+            && std::abs(entry.contour.radius - radius) <= tolerance;
+    };
+    auto match = std::find_if(coverage.begin(), coverage.end(), same);
+    if (match == coverage.end()) {
+        coverage.push_back({{position, radius}, {}});
+        match = std::prev(coverage.end());
+    }
+    if (span >= turn - angularTolerance) {
+        match->intervals.emplace_back(0, turn);
+        return;
+    }
+    const auto point = curve.Value(axis > 0 ? curve.FirstParameter() : curve.LastParameter());
+    const auto angle = std::atan2(point.Y() - position.y, point.X() - position.x);
+    const auto start = angle < 0 ? angle + turn : angle;
+    const auto end = start + span;
+    match->intervals.emplace_back(start, std::min(end, turn));
+    if (end > turn) {
+        match->intervals.emplace_back(0, end - turn);
+    }
+}
+
+bool isComplete(CircleCoverage& coverage)
+{
+    std::sort(coverage.intervals.begin(), coverage.intervals.end());
+    double end = 0;
+    for (const auto& [start, stop] : coverage.intervals) {
+        if (start > end + angularTolerance) {
+            return false;
+        }
+        end = std::max(end, stop);
+    }
+    return end >= turn - angularTolerance;
+}
+
+void appendEdges(Linework& lines, const TopoDS_Shape& edges, double tolerance,
+                 std::vector<CircleCoverage>* circles = nullptr)
 {
     if (edges.IsNull()) {
         return;
@@ -31,6 +96,9 @@ void appendEdges(Linework& lines, const TopoDS_Shape& edges, double tolerance)
     }
     for (TopExp_Explorer it(edges, TopAbs_EDGE); it.More(); it.Next()) {
         const BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
+        if (circles) {
+            addCircle(*circles, curve, std::max(1.e-8, tolerance * 0.001));
+        }
         const auto first = curve.FirstParameter();
         const auto last = curve.LastParameter();
         std::vector<Point> points;
@@ -70,8 +138,14 @@ View makeView(const TopoDS_Shape& solid, const gp_Ax2& placement, double width, 
     View view{{}, {}, width, height};
     // Approximate only the display of curves, to less than 0.02 mm on the A4 drawing.
     const double tolerance = std::max(width, height) * 0.00015;
-    appendEdges(view.visible, edges.VCompound(), tolerance);
-    appendEdges(view.visible, edges.OutLineVCompound(), tolerance);
+    std::vector<CircleCoverage> circles;
+    appendEdges(view.visible, edges.VCompound(), tolerance, &circles);
+    appendEdges(view.visible, edges.OutLineVCompound(), tolerance, &circles);
+    for (auto& circle : circles) {
+        if (isComplete(circle)) {
+            view.circles.push_back(circle.contour);
+        }
+    }
     appendEdges(view.hidden, edges.HCompound(), tolerance);
     appendEdges(view.hidden, edges.OutLineHCompound(), tolerance);
     if (view.visible.empty()) {

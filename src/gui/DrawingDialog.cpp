@@ -67,7 +67,8 @@ DrawingDialog::DrawingDialog(drawing::Projections projections, const QString& ob
 
     auto* options = new QHBoxLayout;
     auto* hidden = new QCheckBox(tr("Hidden edges"), this);
-    auto* dimensions = new QCheckBox(tr("Overall dimensions"), this);
+    auto* dimensions = new QCheckBox(tr("Dimensions and center marks"), this);
+    dimensions->setToolTip(tr("Overall dimensions plus complete circles in the top view"));
     hidden->setObjectName(QStringLiteral("drawingHidden"));
     dimensions->setObjectName(QStringLiteral("drawingDimensions"));
     hidden->setChecked(preview_->options.hiddenLines);

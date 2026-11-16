@@ -1,6 +1,7 @@
 #include "drawing/DrawingSheet.h"
 
 #include <QFontMetrics>
+#include <QLineF>
 #include <QPageLayout>
 #include <QPainter>
 #include <QPainterPath>
@@ -108,6 +109,112 @@ void dimension(QPainter& p, double from, double to, double modelEdge, double lin
     text(p, label, digits(value), 3, Qt::AlignCenter);
 }
 
+void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale)
+{
+    if (view.circles.empty()) {
+        return;
+    }
+    struct Group {
+        RoundContour representative;
+        int quantity = 1;
+    };
+    const auto paperPoint = [origin, scale](Point point) {
+        return origin + QPointF(point.x * scale, -point.y * scale);
+    };
+    const double tolerance = std::max(view.width, view.height) * 1.e-7;
+    std::vector<Group> groups;
+    std::vector<RoundContour> marked;
+    for (const auto& contour : view.circles) {
+        const auto same = [radius = contour.radius, tolerance](const Group& group) {
+            return std::abs(group.representative.radius - radius) <= tolerance;
+        };
+        auto group = std::find_if(groups.begin(), groups.end(), same);
+        if (group == groups.end()) {
+            groups.push_back({contour});
+        } else {
+            ++group->quantity;
+            if (contour.center.x < group->representative.center.x) {
+                group->representative = contour;
+            }
+        }
+        auto mark = std::find_if(marked.begin(), marked.end(), [c = contour.center, tolerance](const auto& item) {
+            return std::hypot(item.center.x - c.x, item.center.y - c.y) <= tolerance;
+        });
+        if (mark == marked.end()) {
+            marked.push_back(contour);
+        } else {
+            mark->radius = std::min(mark->radius, contour.radius);
+        }
+    }
+    pen(p, 0.16);
+    for (const auto& mark : marked) {
+        const auto point = paperPoint(mark.center);
+        const double halfMark = std::min(1.6, mark.radius * scale * 0.5);
+        if (halfMark >= 0.3) {
+            p.drawLine(point - QPointF(halfMark, 0), point + QPointF(halfMark, 0));
+            p.drawLine(point - QPointF(0, halfMark), point + QPointF(0, halfMark));
+        }
+    }
+
+    // Reserve the lower-left quadrant for callouts. Largest circles take the
+    // upper rows; stagger the touch points so concentric leaders do not coincide.
+    std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
+        return a.representative.radius > b.representative.radius;
+    });
+    constexpr std::size_t maxRows = 5;
+    const auto rows = std::min(maxRows, groups.size());
+    for (std::size_t i = 0; i < rows; ++i) {
+        const auto& entry = groups[i];
+        const auto center = paperPoint(entry.representative.center);
+        const auto radius = entry.representative.radius * scale;
+        const double relative = static_cast<double>(i) - (rows - 1) / 2.0;
+        const double angle = rows == 1 ? 0 : relative * 0.82 / (rows - 1);
+        const QPointF bend(136, origin.y() + 10 * relative);
+        const auto onCircle = [center, radius](double direction) {
+            return center + QPointF(-std::cos(direction), std::sin(direction)) * radius;
+        };
+        auto tip = onCircle(angle);
+        for (const double turn : {0.0, -0.22, 0.22, -0.44, 0.44, -0.66, 0.66}) {
+            const auto candidate = onCircle(std::clamp(angle + turn, -1.0, 1.0));
+            const auto path = candidate - bend;
+            const bool clear = std::none_of(view.circles.begin(), view.circles.end(),
+                [&](const RoundContour& other) {
+                    const auto at = paperPoint(other.center);
+                    const auto limit = other.radius * scale;
+                    if (QLineF(center, at).length() <= tolerance * scale
+                        || QLineF(candidate, at).length() <= limit + tolerance * scale) {
+                        return false;
+                    }
+                    const double t = std::clamp(QPointF::dotProduct(at - bend, path)
+                        / QPointF::dotProduct(path, path), 0.0, 1.0);
+                    return QLineF(at, bend + path * t).length() <= limit + 0.25;
+                });
+            if (clear) {
+                tip = candidate;
+                break;
+            }
+        }
+        pen(p, 0.16);
+        p.drawLine(QPointF(104, bend.y()), bend);
+        p.drawLine(bend, tip);
+
+        const auto ray = tip - bend;
+        const auto direction = ray / std::hypot(ray.x(), ray.y());
+        const auto normal = QPointF(-direction.y(), direction.x());
+        const auto wing = tip - direction * 2.3;
+        p.setBrush(Qt::black);
+        p.drawPolygon(QPolygonF{tip, wing + normal * 0.55, wing - normal * 0.55});
+        p.setBrush(Qt::NoBrush);
+
+        const auto diameter = QStringLiteral("⌀%1").arg(digits(entry.representative.radius * 2));
+        const auto label = entry.quantity > 1 ? QStringLiteral("%1× %2").arg(entry.quantity).arg(diameter) : diameter;
+        text(p, {104, bend.y() - 6, 32, 5.5}, label, 4, Qt::AlignHCenter | Qt::AlignVCenter);
+    }
+    if (groups.size() > maxRows) {
+        text(p, {104, origin.y() + 25, 46, 5}, QStringLiteral("More diameters omitted"), 3, Qt::AlignLeft);
+    }
+}
+
 void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
 {
     pen(p, 0.26);
@@ -159,6 +266,7 @@ void paintSheet(QPainter& painter, const QRectF& area, const Projections& views,
         painter.rotate(-90);
         dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
         painter.restore();
+        roundDimensions(painter, views.top, top, scale.factor);
     }
     const double frontLabels = front.y() + views.front.height * scale.factor / 2
                              + (options.dimensions ? 11 : 4);

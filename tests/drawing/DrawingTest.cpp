@@ -35,7 +35,9 @@ void check(bool condition, const char* message)
 struct Example {
     const char* file;
     const char* title;
+    const char* designation;
     double x, y, z, volume;
+    std::vector<double> diameters;
 };
 
 const doc::Object& finishedPart(const doc::Document& model)
@@ -98,6 +100,16 @@ void verifyExample(const QDir& source, const QDir& output, const Example& exampl
         check(views.top.visible.size() >= 6, "Flange top should show the outer rim and five holes");
     }
 
+    std::vector<double> diameters;
+    for (const auto& circle : views.top.circles) {
+        diameters.push_back(circle.radius * 2);
+    }
+    std::sort(diameters.begin(), diameters.end());
+    check(diameters.size() == example.diameters.size(), "A full circle was missed or counted twice");
+    for (std::size_t i = 0; i < diameters.size(); ++i) {
+        check(std::abs(diameters[i] - example.diameters[i]) < 1.e-5, "Incorrect analytic diameter");
+    }
+
     const auto restoredFile = output.filePath(name + "-roundtrip.graph3d");
     io::saveProject(restoredFile, model);
     const auto reopened = io::openProject(restoredFile);
@@ -107,7 +119,7 @@ void verifyExample(const QDir& source, const QDir& output, const Example& exampl
     checkView(newViews.right, example.y, example.z);
 
     const auto pdf = output.filePath(name + ".pdf");
-    draw::savePdf(pdf, views, {QString::fromLatin1(example.title), QStringLiteral("G3D-001"), true, true});
+    draw::savePdf(pdf, views, {QString::fromLatin1(example.title), QString::fromLatin1(example.designation), true, true});
     QFile generated(pdf);
     check(generated.open(QIODevice::ReadOnly) && generated.size() > 1000
           && generated.read(5) == "%PDF-", "Drawing PDF was not written");
@@ -144,10 +156,11 @@ int main(int argc, char** argv)
         check(output.exists(), "The drawing result directory does not exist");
         using std::numbers::pi;
         const std::array examples{
-            Example{"flange", "Mounting flange", 100, 100, 15, (2500 - 400 - 4 * 25) * 15 * pi},
-            Example{"stepped-bushing", "Stepped bushing", 40, 40, 30,
-                    ((400 - 100) * 10 + (225 - 100) * 20) * pi},
-            Example{"angle-bracket", "Angle bracket", 80, 45, 45, 52480 - 400 * pi}
+            Example{"flange", "Mounting flange", "G3D-001", 100, 100, 15,
+                    (2500 - 400 - 4 * 25) * 15 * pi, {10, 10, 10, 10, 40, 100}},
+            Example{"stepped-bushing", "Stepped bushing", "G3D-002", 40, 40, 30,
+                    ((400 - 100) * 10 + (225 - 100) * 20) * pi, {20, 30, 40}},
+            Example{"angle-bracket", "Angle bracket", "G3D-003", 80, 45, 45, 52480 - 400 * pi, {10, 10}}
         };
         for (const auto& example : examples) {
             verifyExample(QDir(args.at(1)), output, example);
@@ -160,6 +173,9 @@ int main(int argc, char** argv)
             rejected = true;
         }
         check(rejected, "Drawing accepted a face without a solid");
+        const auto radial = geom::makeProfile({geom::Plane::XZ, {geom::Rectangle{{10, 0}, {20, 30}}}});
+        const auto segment = draw::project(geom::revolve(radial, geom::Plane::XZ, geom::Axis::V, 0, 270));
+        check(segment.top.circles.empty(), "A 270 degree arc was mistaken for a complete circle");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
