@@ -41,6 +41,8 @@ private:
     void updateModelStatus(const QString& failure = {});
     void setModelViews(std::optional<drawing::ModelViews> model, const QString& description);
     void removeItem(int index);
+    void detachLostPoints(int index, const drawing::DraftItem* replacement);
+    void replaceCurve(int index, const std::vector<drawing::DraftItem>& items, const QString& description);
     bool confirmSave();
     void replaceDrawing(drawing::Draft draft, const QString& path = {});
     void updateTitle();

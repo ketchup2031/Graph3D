@@ -32,7 +32,7 @@ add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
-add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp)
+add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp src/drawing/DraftCurves.cpp)
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
 

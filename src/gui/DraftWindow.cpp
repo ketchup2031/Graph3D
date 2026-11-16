@@ -121,9 +121,10 @@ DraftWindow::DraftWindow(QWidget* parent)
     remove->setObjectName(QStringLiteral("removeDraftItem"));
     remove->setEnabled(false);
     properties->setEnabled(false);
-    connect(canvas_, &DraftCanvas::selectionChanged, this, [remove, properties](int selected) {
+    connect(canvas_, &DraftCanvas::selectionChanged, this, [this, remove, properties](int selected) {
         remove->setEnabled(selected >= 0);
-        properties->setEnabled(selected >= 0);
+        properties->setEnabled(selected >= 0 && draft_.items[selected].kind != DraftKind::Polyline
+                               && draft_.items[selected].kind != DraftKind::Hatch);
     });
     edit->addAction(tr("Cancel tool"), Qt::Key_Escape, canvas_, &DraftCanvas::cancel);
     auto* sheet = menuBar()->addMenu(tr("&Sheet"));
@@ -156,8 +157,8 @@ DraftWindow::DraftWindow(QWidget* parent)
     bar->setMovable(false);
     bar->setFloatable(false);
     auto* group = new QActionGroup(this);
-    const auto tool = [&](const QString& name, const char* objectName, std::optional<DraftKind> kind, const QString& hint) {
-        auto* action = bar->addAction(name);
+    const auto tool = [&](const QString& name, const char* objectName, std::optional<DraftKind> kind, const QString& hint, QMenu* menu = nullptr) {
+        auto* action = menu ? menu->addAction(name) : bar->addAction(name);
         action->setObjectName(QString::fromLatin1(objectName));
         action->setCheckable(true);
         action->setToolTip(hint);
@@ -176,6 +177,38 @@ DraftWindow::DraftWindow(QWidget* parent)
     bar->addSeparator();
     tool(tr("Horizontal dim."), "draftHorizontal", DraftKind::Horizontal, tr("Pick two points, then place the dimension line. Snapped points stay attached."));
     tool(tr("Vertical dim."), "draftVertical", DraftKind::Vertical, tr("Pick two points, then place the dimension line. Snapped points stay attached."));
+    auto* geometryTools = menuBar()->addMenu(tr("&Geometry"));
+    tool(tr("Three-point arc"), "draftArc", DraftKind::Arc,
+         tr("Pick the start, a point on the arc, and the end."), geometryTools);
+    tool(tr("Polyline"), "draftPolyline", DraftKind::Polyline,
+         tr("Pick vertices. Click the start to close, or press Enter to finish."), geometryTools);
+    tool(tr("Hatch"), "draftHatch", DraftKind::Hatch,
+         tr("Click inside a closed contour to hatch it."), geometryTools);
+    auto* modify = menuBar()->addMenu(tr("&Modify"));
+    const auto modification = [&](const QString& name, const char* id, DraftModify mode, const QString& hint) {
+        auto* action = modify->addAction(name);
+        action->setObjectName(QString::fromLatin1(id));
+        action->setCheckable(true);
+        action->setToolTip(hint);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode, hint] {
+            canvas_->setModify(mode);
+            statusBar()->showMessage(hint);
+        });
+    };
+    modification(tr("Trim"), "draftTrim", DraftModify::Trim, tr("Click the part of a curve to remove."));
+    modification(tr("Extend"), "draftExtend", DraftModify::Extend, tr("Click near the end to extend to another curve."));
+    modification(tr("Parallel offset"), "draftOffset", DraftModify::Offset,
+                 tr("Click an object to create an offset copy."));
+    auto* dimensions = menuBar()->addMenu(tr("D&imensions"));
+    tool(tr("Aligned dimension"), "draftAligned", DraftKind::Aligned,
+         tr("Pick two points, then place the dimension line."), dimensions);
+    tool(tr("Angular dimension"), "draftAngular", DraftKind::Angular,
+         tr("Pick the vertex, one point on each arm, and the label position."), dimensions);
+    tool(tr("Radius dimension"), "draftRadius", DraftKind::Radius,
+         tr("Click a circle or arc, then place the dimension label."), dimensions);
+    tool(tr("Diameter dimension"), "draftDiameter", DraftKind::Diameter,
+         tr("Click a circle or arc, then place the dimension label."), dimensions);
     auto* stroke = new QComboBox(bar);
     stroke->setAccessibleName(tr("Line style"));
     stroke->addItems({tr("Solid"), tr("Hidden"), tr("Center")});
@@ -185,7 +218,7 @@ DraftWindow::DraftWindow(QWidget* parent)
         canvas_->setStroke(line);
         if (const int index = canvas_->selected(); index >= 0) {
             auto item = draft_.items[index];
-            if (item.kind == DraftKind::Line || item.kind == DraftKind::Rectangle || item.kind == DraftKind::Circle) {
+            if (!drawing::draftAnchors(item.kind).empty()) {
                 item.stroke = line;
                 if (item != draft_.items[index]) {
                     editItem(index, item, tr("Change line style"));
@@ -212,7 +245,13 @@ DraftWindow::DraftWindow(QWidget* parent)
         editItem(static_cast<int>(draft_.items.size()), identified, tr("Create item"));
     });
     connect(canvas_, &DraftCanvas::itemMoved, this, [this](int index, const DraftItem& item) {
-        editItem(index, item, tr("Move item"));
+        replaceCurve(index, {item}, tr("Move item"));
+    });
+    connect(canvas_, &DraftCanvas::changeRequested, this, [this](int index, const auto& items) {
+        replaceCurve(index, items, tr("Modify curve"));
+    });
+    connect(canvas_, &DraftCanvas::toolMessage, this, [this](const QString& text) {
+        statusBar()->showMessage(text);
     });
     connect(&history_, &QUndoStack::indexChanged, this, [this] {
         canvas_->cancel();
@@ -225,14 +264,43 @@ DraftWindow::DraftWindow(QWidget* parent)
 
 void DraftWindow::removeItem(int index)
 {
-    const auto id = draft_.items[index].id;
-    const drawing::DraftGeometry geometry(draft_);
     history_.beginMacro(tr("Delete item"));
+    detachLostPoints(index, nullptr);
+    editItem(index, {}, tr("Delete item"));
+    history_.endMacro();
+}
+
+void DraftWindow::replaceCurve(int index, const std::vector<DraftItem>& items, const QString& description)
+{
+    history_.beginMacro(description);
+    detachLostPoints(index, &items.front());
+    editItem(index, items.front(), description);
+    for (std::size_t i = 1; i < items.size(); ++i) {
+        editItem(static_cast<int>(draft_.items.size()), items[i], description);
+    }
+    history_.endMacro();
+}
+
+void DraftWindow::detachLostPoints(int index, const DraftItem* replacement)
+{
+    const auto id = draft_.items[index].id;
+    if (drawing::draftAnchors(draft_.items[index].kind).empty()) {
+        return;
+    }
+    const drawing::DraftGeometry geometry(draft_);
+    const drawing::DraftGeometry changed(draft_, replacement);
+    const auto detach = [&](const auto& anchor) {
+        return anchor && (anchor->item == id || anchor->crossing == id)
+            && (!replacement || !changed.validReference(*anchor)
+                || (anchor->anchor == drawing::DraftAnchor::Intersection
+                    && geometry.point(*anchor) && !changed.point(*anchor)));
+    };
     for (int i = 0; i < static_cast<int>(draft_.items.size()); ++i) {
         const auto& dimension = draft_.items[i];
-        const bool detachA = dimension.anchorA && dimension.anchorA->item == id;
-        const bool detachB = dimension.anchorB && dimension.anchorB->item == id;
-        if (detachA || detachB) {
+        const bool detachA = detach(dimension.anchorA);
+        const bool detachB = detach(dimension.anchorB);
+        const bool detachC = detach(dimension.anchorC);
+        if (detachA || detachB || detachC) {
             auto fixed = geometry.resolve(dimension);
             if (detachA) {
                 fixed.anchorA.reset();
@@ -240,11 +308,12 @@ void DraftWindow::removeItem(int index)
             if (detachB) {
                 fixed.anchorB.reset();
             }
+            if (detachC) {
+                fixed.anchorC.reset();
+            }
             editItem(i, fixed, tr("Detach dimension point"));
         }
     }
-    editItem(index, {}, tr("Delete item"));
-    history_.endMacro();
 }
 
 void DraftWindow::editItem(int index, const std::optional<DraftItem>& after, const QString& description)
@@ -595,6 +664,9 @@ void DraftWindow::editSelected()
         return;
     }
     auto item = draft_.items[index];
+    if (item.kind == DraftKind::Polyline || item.kind == DraftKind::Hatch) {
+        return;
+    }
     const auto measured = drawing::DraftGeometry(draft_).resolve(item);
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("draftItemDialog"));
@@ -632,7 +704,7 @@ void DraftWindow::editSelected()
         return CoordinateFields{x, y, point, {x->value(), y->value()}};
     };
     const auto a = pair(tr("First point X"), tr("First point Y"), measured.a, item.anchorA.has_value());
-    std::optional<CoordinateFields> b, label;
+    std::optional<CoordinateFields> b, label, third;
     QLineEdit* text = nullptr;
     if (item.kind == DraftKind::Text) {
         text = new QLineEdit(item.text, &dialog);
@@ -641,8 +713,13 @@ void DraftWindow::editSelected()
     } else {
         b = pair(tr("Second point X"), tr("Second point Y"), measured.b, item.anchorB.has_value());
     }
-    if (item.kind == DraftKind::Horizontal || item.kind == DraftKind::Vertical) {
+    if (drawing::isDimension(item.kind)) {
         label = pair(tr("Dimension line X"), tr("Dimension line Y"), measured.label);
+    } else if (item.kind == DraftKind::Arc) {
+        label = pair(tr("End point X"), tr("End point Y"), measured.label);
+    }
+    if (item.kind == DraftKind::Angular) {
+        third = pair(tr("Third point X"), tr("Third point Y"), measured.points.front(), item.anchorC.has_value());
     }
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
@@ -657,6 +734,9 @@ void DraftWindow::editSelected()
         if (label) {
             item.label += label->point() - measured.label;
         }
+        if (third && !item.anchorC) {
+            item.points.front() = third->point();
+        }
         if (text) {
             item.text = text->text();
         }
@@ -667,7 +747,7 @@ void DraftWindow::editSelected()
         }
     });
     if (dialog.exec() == QDialog::Accepted && item != draft_.items[index]) {
-        editItem(index, item, tr("Edit item"));
+        replaceCurve(index, {item}, tr("Edit item"));
     }
 }
 

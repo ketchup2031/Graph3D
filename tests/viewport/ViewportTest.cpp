@@ -2,6 +2,7 @@
 #include "gui/InterfaceLanguage.h"
 #include "gui/SketchEditor.h"
 #include "io/ProjectIO.h"
+#include "io/DraftIO.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
@@ -359,6 +360,128 @@ private slots:
         auto* restored = main.findChild<QMainWindow*>("draftWindow");
         QVERIFY(restored && restored->windowTitle().startsWith(QStringLiteral("plate.g3draw")));
         QVERIFY(!restored->isWindowModified());
+    }
+
+    void advancedDraftToolsWorkflow()
+    {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        graph3d::MainWindow main;
+        main.show();
+        main.findChild<QPushButton*>("startNewDrawing")->click();
+        auto* draft = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(draft && QTest::qWaitForWindowExposed(draft));
+        auto* canvas = draft->findChild<QWidget*>("draftCanvas");
+        QVERIFY(canvas);
+        const auto action = [draft](const char* name) { return draft->findChild<QAction*>(name); };
+        const auto paperPoint = [canvas](QPointF point) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            return (origin + point * scale).toPoint();
+        };
+        const auto click = [&](double x, double y) {
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, paperPoint({x, y}));
+        };
+        action("draftArc")->trigger();
+        click(60, 45);
+        click(40, 75);
+        click(60, 105);
+        action("draftPolyline")->trigger();
+        click(200, 45);
+        click(200, 105);
+        click(60, 105);
+        QTest::keyClick(canvas, Qt::Key_Return);
+        action("draftLine")->trigger();
+        click(35, 45);
+        click(200, 45);
+        action("draftTrim")->trigger();
+        click(45, 45);
+        action("undoDraft")->trigger();
+        action("redoDraft")->trigger();
+
+        action("draftCircle")->trigger();
+        click(90, 70);
+        click(100, 70);
+        click(150, 82);
+        click(159, 82);
+        action("draftDiameter")->trigger();
+        click(100, 70);
+        click(119, 62);
+        action("draftRadius")->trigger();
+        click(159, 82);
+        click(178, 74);
+        action("draftAligned")->trigger();
+        click(130, 45);
+        click(150, 82);
+        click(132, 67);
+        action("draftAngular")->trigger();
+        click(200, 45);
+        click(60, 45);
+        click(200, 105);
+        click(179, 68);
+        action("draftSelect")->trigger();
+        click(90, 60);
+        QVERIFY(action("draftItemProperties")->isEnabled());
+        QTimer::singleShot(0, [] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                const auto fields = dialog->findChildren<QDoubleSpinBox*>();
+                if (fields.size() == 4) {
+                    fields.at(2)->setValue(102);
+                    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                } else {
+                    dialog->reject();
+                }
+            }
+        });
+        action("draftItemProperties")->trigger();
+        action("undoDraft")->trigger();
+        action("redoDraft")->trigger();
+        action("draftHatch")->trigger();
+        click(75, 66);
+
+        action("draftLine")->trigger();
+        click(210, 140);
+        click(225, 140);
+        click(246, 121);
+        click(246, 150);
+        action("draftExtend")->trigger();
+        click(224, 140);
+        QTimer::singleShot(0, [] {
+            if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                dialog->setDoubleValue(5);
+                dialog->accept();
+            }
+        });
+        action("draftOffset")->trigger();
+        click(220, 140);
+
+        const auto path = folder.filePath("rounded-plate.g3draw");
+        QTimer::singleShot(0, [path] {
+            if (auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                dialog->selectFile(path);
+                static_cast<QDialog*>(dialog)->accept();
+            }
+        });
+        action("saveDraft")->trigger();
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto root = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        QCOMPARE(root.value("version").toInt(), 4);
+        const auto items = root.value("items").toArray();
+        QCOMPARE(items.size(), 13);
+        QCOMPARE(items.at(0).toObject().value("type").toString(), QStringLiteral("arc"));
+        QCOMPARE(items.at(1).toObject().value("points").toArray().size(), 3);
+        QCOMPARE(items.at(2).toObject().value("a").toArray().at(0).toDouble(), 60.0);
+        QCOMPARE(items.at(5).toObject().value("anchorB").toObject().value("point").toString(), QStringLiteral("curve"));
+        QCOMPARE(items.at(7).toObject().value("anchorA").toObject().value("parameter").toDouble(), .5);
+        QCOMPARE(items.at(9).toObject().value("loops").toArray().size(), 3);
+        QCOMPARE(items.at(10).toObject().value("b").toArray().at(0).toDouble(), 246.0);
+        QCOMPARE(items.at(12).toObject().value("a").toArray().at(1).toDouble(), 135.0);
+        const auto restored = graph3d::io::openDraft(path);
+        const graph3d::drawing::DraftGeometry geometry(restored);
+        QCOMPARE(graph3d::drawing::draftDimensionText(geometry.resolve(restored.items.at(5))), QStringLiteral("⌀24"));
     }
 
     void linkedModelDrawingWorkflow()

@@ -1,4 +1,5 @@
 #include "drawing/DrawingSheet.h"
+#include "drawing/DraftCurves.h"
 #include "io/DraftIO.h"
 #include "io/ModelViewsIO.h"
 #include "geometry/SketchModeling.h"
@@ -385,6 +386,91 @@ void verifyModelViews(const QDir& output)
           "Could not export the combined drawing");
 }
 
+void verifyDraftTools(const QDir& output)
+{
+    using enum draw::DraftKind;
+    draw::Draft draft{"Plate", "G3D-012", "Graph3D"};
+    const auto add = [&](draw::DraftItem item) {
+        item.id = QUuid::createUuid();
+        draft.items.push_back(std::move(item));
+    };
+    add({Arc, {60, 45}, {40, 77.5}, {60, 110}});
+    draw::DraftItem profile{Polyline};
+    profile.points = {{200, 45}, {200, 110}, {60, 110}};
+    add(profile);
+    add({Line, {35, 45}, {200, 45}});
+    add({Circle, {90, 70}, {97, 70}});
+    add({Circle, {150, 85}, {159, 85}});
+
+    const auto trimmed = draw::trimDraft(draft.items[2], draft, {44, 45});
+    check(trimmed.size() == 1 && std::abs(trimmed[0].a.x() - 60) < .001
+          && trimmed[0].b == QPointF(200, 45), "Trimming failed to stop at the arc");
+    draft.items[2] = trimmed[0];
+
+    const auto hatch = draw::hatchDraft(draft, {75, 65});
+    check(hatch && hatch->loops.size() == 3, "Hatch failed to include both inner holes");
+    check(draw::draftHit(*hatch, {75, 65}, .1) && !draw::draftHit(*hatch, {90, 70}, .1)
+          && !draw::draftHit(*hatch, {150, 85}, .1), "A hole was filled by the hatch");
+    add(*hatch);
+
+    add({Line, {211, 140}, {225, 140}});
+    add({Line, {246, 120}, {246, 154}});
+    const auto extension = draw::extendDraft(draft.items[6], draft, {225, 140});
+    check(extension && extension->b == QPointF(246, 140), "Extending failed to meet the boundary");
+    draft.items[6] = *extension;
+    const auto parallel = draw::offsetDraft(draft.items[6], 5);
+    check(parallel && parallel->a.y() == 135 && parallel->b.y() == 135, "Offset distance is incorrect");
+    add(*parallel);
+    const auto copiedArc = draw::offsetDraft(draft.items[0], 4);
+    check(copiedArc && std::abs(draw::draftCurves(*copiedArc).front().radius
+                              - draw::draftCurves(draft.items[0]).front().radius - 4) < .001,
+          "Offset arc failed");
+
+    draw::DraftItem diameter{Diameter, {90, 70}, {97, 70}, {116, 61}};
+    diameter.anchorA = draw::DraftReference{draft.items[3].id, draw::DraftAnchor::Center};
+    diameter.anchorB = draw::DraftReference{draft.items[3].id, draw::DraftAnchor::Curve, 0};
+    add(diameter);
+    auto radius = diameter;
+    radius.kind = Radius;
+    radius.label = {95, 91};
+    add(radius);
+    draw::DraftItem angular{Angular, {200, 45}, {60, 45}, {185, 60}};
+    angular.anchorA = draw::DraftReference{draft.items[2].id, draw::DraftAnchor::End};
+    angular.anchorB = draw::DraftReference{draft.items[2].id, draw::DraftAnchor::Start};
+    angular.anchorC = draw::DraftReference{draft.items[1].id, draw::DraftAnchor::Curve, 1};
+    angular.points = {{200, 110}};
+    add(angular);
+
+    draw::DraftItem aligned{Aligned, {130, 45}, {150, 85}, {123, 70}};
+    aligned.anchorA = draw::DraftReference{draft.items[2].id, draw::DraftAnchor::Curve, .5};
+    aligned.anchorB = draw::DraftReference{draft.items[4].id, draw::DraftAnchor::Center};
+    add(aligned);
+    draw::DraftItem crossing{Horizontal, {246, 140}, {211, 140}, {225, 164}};
+    crossing.anchorA = draw::DraftReference{draft.items[6].id, draw::DraftAnchor::Intersection, 1, draft.items[7].id};
+    crossing.anchorB = draw::DraftReference{draft.items[6].id, draw::DraftAnchor::Start};
+    add(crossing);
+
+    draft.items[3].b = {100, 70};
+    const draw::DraftGeometry resolved(draft);
+    check(draw::draftDimensionText(resolved.resolve(draft.items[9])) == "⌀20", "Diameter did not update");
+    check(draw::draftDimensionText(resolved.resolve(draft.items[10])) == "R10", "Radius did not update");
+    check(draw::draftDimensionText(resolved.resolve(draft.items[11])) == "90°", "Wrong angle");
+    check(draw::draftDimensionText(resolved.resolve(draft.items[12])) == "44.72136", "Wrong aligned length");
+    check(draw::draftDimensionText(resolved.resolve(draft.items[13])) == "35", "Wrong intersection attachment");
+
+    // Recreate the fill after the boundary edit, then verify the saved vector sheet.
+    draft.items[5].loops = draw::hatchDraft(draft, {75, 65})->loops;
+    const auto path = output.filePath("rounded-plate.g3draw");
+    io::saveDraft(path, draft);
+    const auto reopened = io::openDraft(path);
+    check(reopened.items == draft.items, "Stage 12 geometry or references did not round-trip");
+    const auto text = draw::draftDimensionText(draw::DraftGeometry(reopened).resolve(reopened.items[9]));
+    check(text == "⌀20", "Reopened drawing lost the diameter association");
+    QFile pdf(output.filePath("rounded-plate.pdf"));
+    draw::exportDraftPdf(pdf.fileName(), reopened);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.size() > 1000 && pdf.read(5) == "%PDF-", "PDF export failed");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -412,6 +498,7 @@ int main(int argc, char** argv)
         verifyDraft(output);
         verifyAttachedDimensions(output);
         verifyModelViews(output);
+        verifyDraftTools(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

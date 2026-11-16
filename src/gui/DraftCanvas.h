@@ -9,6 +9,7 @@
 namespace graph3d {
 
 class LineInput;
+enum class DraftModify { Trim, Extend, Offset };
 
 class DraftCanvas final : public QWidget {
     Q_OBJECT
@@ -16,6 +17,7 @@ class DraftCanvas final : public QWidget {
 public:
     explicit DraftCanvas(const drawing::Draft& draft, LineInput& lineInput, QWidget* parent = nullptr);
     void setTool(std::optional<drawing::DraftKind> tool);
+    void setModify(DraftModify mode);
     void setStroke(drawing::DraftStroke stroke);
     void setGrid(bool enabled);
     void fit();
@@ -29,12 +31,15 @@ signals:
     void selectionChanged(int index);
     void positionChanged(QPointF point);
     void lineOutsideSheet();
+    void changeRequested(int index, const std::vector<drawing::DraftItem>& items);
+    void toolMessage(const QString& text);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
 
 private:
@@ -50,10 +55,15 @@ private:
 
     bool canPlace(QPointF point) const;
     void addLine(QPointF end);
+    void finishPolyline();
+    void handleModify(QPointF point);
+    std::optional<Pick> circularPick(QPointF point) const;
+    int hitItem(QPointF point, bool curvesOnly = false) const;
 
     const drawing::Draft& draft_;
     LineInput& lineInput_;
     std::optional<drawing::DraftKind> tool_;
+    std::optional<DraftModify> modify_;
     drawing::DraftStroke stroke_ = drawing::DraftStroke::Solid;
     std::vector<Pick> points_;
     QPointF cursor_;

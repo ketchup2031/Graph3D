@@ -14,10 +14,12 @@
 namespace graph3d::io {
 namespace {
 
-constexpr std::array kinds{"line", "rectangle", "circle", "text", "horizontal", "vertical"};
+constexpr std::array kinds{"line", "rectangle", "circle", "text", "horizontal", "vertical", "arc", "polyline",
+                           "aligned", "angular", "radius", "diameter", "hatch"};
 constexpr std::array strokes{"solid", "hidden", "center"};
-constexpr std::array anchors{"start", "end", "corner-ab", "corner-ba", "center", "right", "left", "top", "bottom"};
+constexpr std::array anchors{"start", "end", "corner-ab", "corner-ba", "center", "right", "left", "top", "bottom", "curve", "intersection"};
 constexpr int maxItems = 20000;
+constexpr int maxDraftPoints = 750000;
 
 template<class Enum, std::size_t Size>
 Enum readName(const QJsonValue& value, const std::array<const char*, Size>& names)
@@ -52,6 +54,34 @@ QJsonArray writePoint(QPointF point)
     return {point.x(), point.y()};
 }
 
+std::vector<QPointF> readPoints(const QJsonValue& value, int& remaining)
+{
+    const auto array = value.toArray();
+    if (!value.isArray() || array.size() > remaining) {
+        fileError(QStringLiteral("Invalid drawing coordinates."));
+    }
+    remaining -= static_cast<int>(array.size());
+    std::vector<QPointF> points;
+    points.reserve(array.size());
+    for (const auto point : array) {
+        points.push_back(readPoint(point));
+    }
+    return points;
+}
+
+QJsonArray writePoints(const std::vector<QPointF>& points, int& remaining)
+{
+    if (points.size() > static_cast<std::size_t>(remaining)) {
+        fileError(QStringLiteral("This drawing exceeds the file limits."));
+    }
+    remaining -= static_cast<int>(points.size());
+    QJsonArray out;
+    for (const auto point : points) {
+        out.append(writePoint(point));
+    }
+    return out;
+}
+
 QUuid readId(const QJsonValue& value)
 {
     const QUuid id(value.toString());
@@ -67,14 +97,28 @@ std::optional<drawing::DraftReference> readAnchor(const QJsonValue& value)
         return {};
     }
     const auto anchor = value.toObject();
-    return drawing::DraftReference{readId(anchor.value("item")),
-                                    readName<drawing::DraftAnchor>(anchor.value("point"), anchors)};
+    drawing::DraftReference reference{readId(anchor.value("item")),
+        readName<drawing::DraftAnchor>(anchor.value("point"), anchors)};
+    if (reference.anchor == drawing::DraftAnchor::Curve || reference.anchor == drawing::DraftAnchor::Intersection) {
+        reference.parameter = anchor.value("parameter").toDouble(-1);
+    }
+    if (reference.anchor == drawing::DraftAnchor::Intersection) {
+        reference.crossing = readId(anchor.value("crossing"));
+    }
+    return reference;
 }
 
 QJsonObject writeAnchor(const drawing::DraftReference& anchor)
 {
-    return {{"item", anchor.item.toString(QUuid::WithoutBraces)},
-            {"point", anchors.at(static_cast<std::size_t>(anchor.anchor))}};
+    QJsonObject out{{"item", anchor.item.toString(QUuid::WithoutBraces)},
+                    {"point", anchors.at(static_cast<std::size_t>(anchor.anchor))}};
+    if (anchor.anchor == drawing::DraftAnchor::Curve || anchor.anchor == drawing::DraftAnchor::Intersection) {
+        out.insert("parameter", anchor.parameter);
+    }
+    if (anchor.anchor == drawing::DraftAnchor::Intersection) {
+        out.insert("crossing", anchor.crossing.toString(QUuid::WithoutBraces));
+    }
+    return out;
 }
 
 void validateLinks(const drawing::Draft& draft)
@@ -86,12 +130,14 @@ void validateLinks(const drawing::Draft& draft)
             fileError(QStringLiteral("Invalid or duplicate drawing item ID."));
         }
         ids.insert(item.id);
-        if ((item.anchorA || item.anchorB) && !drawing::isLinearDimension(item.kind)) {
-            fileError(QStringLiteral("Only linear dimensions can have attached points."));
-        }
-        if ((item.anchorA && !geometry.point(*item.anchorA)) ||
-            (item.anchorB && !geometry.point(*item.anchorB))) {
+        if (((item.anchorA || item.anchorB) && !drawing::isDimension(item.kind))
+            || (item.anchorC && item.kind != drawing::DraftKind::Angular)) {
             fileError(QStringLiteral("Invalid dimension attachment."));
+        }
+        for (const auto& anchor : {item.anchorA, item.anchorB, item.anchorC}) {
+            if (anchor && !geometry.validReference(*anchor)) {
+                fileError(QStringLiteral("Invalid dimension attachment."));
+            }
         }
     }
 }
@@ -102,7 +148,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const auto version = root.value("version").toDouble();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || (version != 1 && version != 2 && version != 3)
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || (version != 1 && version != 2 && version != 3 && version != 4)
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }
@@ -114,11 +160,28 @@ drawing::Draft openDraft(const QString& path)
     drawing::Draft draft{readText(root.value("title")), readText(root.value("number")),
                          readText(root.value("author")), paper == "A3", {}};
     draft.items.reserve(items.size());
+    int remaining = maxDraftPoints;
     for (const auto value : items) {
         const auto entry = value.toObject();
         drawing::DraftItem item{readName<drawing::DraftKind>(entry.value("type"), kinds),
             readPoint(entry.value("a")), readPoint(entry.value("b")), readPoint(entry.value("label")),
             readText(entry.value("text")), readName<drawing::DraftStroke>(entry.value("stroke"), strokes)};
+        if (version >= 4) {
+            if (entry.contains("points")) {
+                item.points = readPoints(entry.value("points"), remaining);
+            }
+            if (entry.contains("loops")) {
+                if (!entry.value("loops").isArray()) {
+                    fileError(QStringLiteral("Invalid drawing coordinates."));
+                }
+                for (const auto loop : entry.value("loops").toArray()) {
+                    item.loops.push_back(readPoints(loop, remaining));
+                }
+            }
+            item.anchorC = readAnchor(entry.value("anchorC"));
+        } else if (item.kind > drawing::DraftKind::Vertical) {
+            fileError(QStringLiteral("Invalid drawing geometry."));
+        }
         if (!drawing::validItem(item)) {
             fileError(QStringLiteral("Invalid drawing geometry."));
         }
@@ -132,7 +195,7 @@ drawing::Draft openDraft(const QString& path)
     if (version >= 2) {
         validateLinks(draft);
     }
-    if (version == 3) {
+    if (version == 3 || (version == 4 && root.contains("modelViews"))) {
         draft.modelViews = readModelViews(root.value("modelViews").toObject(), path);
     }
     return draft;
@@ -144,11 +207,19 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
         || draft.author.size() > 200) {
         fileError(QStringLiteral("This drawing exceeds the file limits."));
     }
-    const bool linked = std::ranges::any_of(draft.items, [](const auto& item) { return item.anchorA || item.anchorB; });
+    const bool linked = std::ranges::any_of(draft.items, [](const auto& item) { return item.anchorA || item.anchorB || item.anchorC; });
     if (linked) {
         validateLinks(draft);
     }
-    const int version = draft.modelViews ? 3 : linked ? 2 : 1;
+    const auto curveAnchor = [](const auto& reference) {
+        return reference && (reference->anchor == drawing::DraftAnchor::Curve
+                          || reference->anchor == drawing::DraftAnchor::Intersection);
+    };
+    const bool modern = std::ranges::any_of(draft.items, [&](const auto& item) {
+        return item.kind > drawing::DraftKind::Vertical || curveAnchor(item.anchorA) || curveAnchor(item.anchorB);
+    });
+    const int version = modern ? 4 : draft.modelViews ? 3 : linked ? 2 : 1;
+    int remaining = maxDraftPoints;
     QJsonArray items;
     for (const auto& item : draft.items) {
         if (!drawing::validItem(item) || item.text.size() > 200) {
@@ -166,6 +237,21 @@ void saveDraft(const QString& path, const drawing::Draft& draft)
             }
             if (item.anchorB) {
                 entry.insert("anchorB", writeAnchor(*item.anchorB));
+            }
+        }
+        if (version == 4) {
+            if (item.anchorC) {
+                entry.insert("anchorC", writeAnchor(*item.anchorC));
+            }
+            if (!item.points.empty()) {
+                entry.insert("points", writePoints(item.points, remaining));
+            }
+            if (!item.loops.empty()) {
+                QJsonArray loops;
+                for (const auto& loop : item.loops) {
+                    loops.append(writePoints(loop, remaining));
+                }
+                entry.insert("loops", loops);
             }
         }
         items.append(entry);

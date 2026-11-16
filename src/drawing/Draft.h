@@ -16,14 +16,19 @@ class QPainter;
 
 namespace graph3d::drawing {
 
-enum class DraftKind { Line, Rectangle, Circle, Text, Horizontal, Vertical };
+enum class DraftKind {
+    Line, Rectangle, Circle, Text, Horizontal, Vertical,
+    Arc, Polyline, Aligned, Angular, Radius, Diameter, Hatch
+};
 enum class DraftStroke { Solid, Hidden, Center };
 
-enum class DraftAnchor { Start, End, CornerAB, CornerBA, Center, Right, Left, Top, Bottom };
+enum class DraftAnchor { Start, End, CornerAB, CornerBA, Center, Right, Left, Top, Bottom, Curve, Intersection };
 
 struct DraftReference {
     QUuid item;
     DraftAnchor anchor;
+    double parameter = 0;
+    QUuid crossing;
     bool operator==(const DraftReference&) const = default;
 };
 
@@ -37,6 +42,9 @@ struct DraftItem {
     QUuid id;
     std::optional<DraftReference> anchorA;
     std::optional<DraftReference> anchorB;
+    std::optional<DraftReference> anchorC;
+    std::vector<QPointF> points;
+    std::vector<std::vector<QPointF>> loops;
     bool operator==(const DraftItem&) const = default;
 };
 
@@ -52,11 +60,14 @@ struct Draft {
 std::span<const DraftAnchor> draftAnchors(DraftKind kind);
 std::optional<QPointF> draftAnchorPoint(const DraftItem& item, DraftAnchor anchor);
 bool isLinearDimension(DraftKind kind);
+bool isDimension(DraftKind kind);
+QString draftDimensionText(const DraftItem& item);
 
 class DraftGeometry {
 public:
     explicit DraftGeometry(const Draft& draft, const DraftItem* preview = nullptr);
     std::optional<QPointF> point(const DraftReference& reference) const;
+    bool validReference(const DraftReference& reference) const;
     DraftItem resolve(const DraftItem& item) const;
 
 private:
