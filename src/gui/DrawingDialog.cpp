@@ -1,6 +1,7 @@
 #include "gui/DrawingDialog.h"
 
 #include "drawing/DrawingSheet.h"
+#include "gui/InterfaceLanguage.h"
 #include "gui/UserPreferences.h"
 
 #include <QApplication>
@@ -136,7 +137,7 @@ DrawingDialog::DrawingDialog(const TopoDS_Shape& body, drawing::Projections proj
                 const auto orientation = static_cast<Plane>(plane->currentData().toInt());
                 preview_->section = drawing::section(body_, orientation, offset->value());
             } catch (const std::exception& error) {
-                sectionError->setText(QString::fromUtf8(error.what()));
+                sectionError->setText(localizedDiagnostic(error.what()));
                 sectionError->show();
                 pdf->setEnabled(false);
             }
@@ -181,7 +182,7 @@ DrawingDialog::DrawingDialog(const TopoDS_Shape& body, drawing::Projections proj
 void DrawingDialog::exportPdf()
 {
     QFileDialog dialog(this, tr("Save drawing"), {}, tr("PDF files (*.pdf)"));
-    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
+    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled() || russianInterface());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix(QStringLiteral("pdf"));
     dialog.selectFile(QStringLiteral("Graph3D-drawing.pdf"));
@@ -197,7 +198,7 @@ void DrawingDialog::exportPdf()
         drawing::savePdf(path, preview_->views, preview_->options,
                          preview_->section ? &*preview_->section : nullptr);
     } catch (const std::exception& error) {
-        QMessageBox::warning(this, tr("Save drawing"), QString::fromUtf8(error.what()));
+        QMessageBox::warning(this, tr("Save drawing"), localizedDiagnostic(error.what()));
     }
 }
 

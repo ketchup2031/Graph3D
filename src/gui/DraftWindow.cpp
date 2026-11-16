@@ -1,6 +1,7 @@
 #include "gui/DraftWindow.h"
 
 #include "gui/DraftCanvas.h"
+#include "gui/InterfaceLanguage.h"
 #include "gui/UserPreferences.h"
 #include "io/DraftIO.h"
 
@@ -45,7 +46,7 @@ QString chooseSavePath(QWidget* parent, const QString& title, const QString& pat
                        const QString& filter, const QString& suffix)
 {
     QFileDialog dialog(parent, title, path, filter);
-    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
+    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled() || russianInterface());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix(suffix);
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
@@ -239,7 +240,7 @@ bool DraftWindow::openDrawing(const QString& path)
         emit fileUsed(path);
         return true;
     } catch (const std::exception& error) {
-        QMessageBox::warning(this, tr("Open drawing"), QString::fromUtf8(error.what()));
+        QMessageBox::warning(this, tr("Open drawing"), localizedDiagnostic(error.what()));
         return false;
     }
 }
@@ -247,7 +248,7 @@ bool DraftWindow::openDrawing(const QString& path)
 void DraftWindow::browseDrawing()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open drawing"), path_, tr("Graph3D drawings (*.g3draw)"),
-        nullptr, darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+        nullptr, (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openDrawing(path);
     }
@@ -269,7 +270,7 @@ bool DraftWindow::saveDrawing(bool saveAs)
         emit fileUsed(path);
         return true;
     } catch (const std::exception& error) {
-        QMessageBox::warning(this, tr("Save drawing"), QString::fromUtf8(error.what()));
+        QMessageBox::warning(this, tr("Save drawing"), localizedDiagnostic(error.what()));
         return false;
     }
 }
@@ -284,7 +285,7 @@ void DraftWindow::exportPdf()
         drawing::exportDraftPdf(path, draft_);
         statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
-        QMessageBox::warning(this, tr("Export drawing PDF"), QString::fromUtf8(error.what()));
+        QMessageBox::warning(this, tr("Export drawing PDF"), localizedDiagnostic(error.what()));
     }
 }
 

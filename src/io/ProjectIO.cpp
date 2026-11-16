@@ -6,6 +6,7 @@
 #include <BRep_Builder.hxx>
 #include <Standard_Failure.hxx>
 
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -49,13 +50,13 @@ Enum parseName(const QJsonValue& value, const std::array<const char*, N>& names,
             return static_cast<Enum>(i);
         }
     }
-    fileError(QStringLiteral("Invalid value for %1.").arg(QLatin1String(field)));
+    fileError(QCoreApplication::translate("Diagnostic", "Invalid value for %1.").arg(QLatin1String(field)));
 }
 
 double number(const QJsonValue& value, const char* field)
 {
     if (!value.isDouble() || !std::isfinite(value.toDouble())) {
-        fileError(QStringLiteral("Expected a finite number for %1.").arg(QLatin1String(field)));
+        fileError(QCoreApplication::translate("Diagnostic", "Expected a finite number for %1.").arg(QLatin1String(field)));
     }
     return value.toDouble();
 }
@@ -64,7 +65,7 @@ int integer(const QJsonValue& value, const char* field)
 {
     const auto parsed = number(value, field);
     if (parsed < 1 || parsed > maxObjects || std::floor(parsed) != parsed) {
-        fileError(QStringLiteral("Invalid integer for %1.").arg(QLatin1String(field)));
+        fileError(QCoreApplication::translate("Diagnostic", "Invalid integer for %1.").arg(QLatin1String(field)));
     }
     return static_cast<int>(parsed);
 }
@@ -73,7 +74,7 @@ int signedInteger(const QJsonValue& value, const char* field)
 {
     const auto parsed = value.toInteger(std::numeric_limits<qint64>::min());
     if (parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max()) {
-        fileError(QStringLiteral("Invalid integer for %1.").arg(QLatin1String(field)));
+        fileError(QCoreApplication::translate("Diagnostic", "Invalid integer for %1.").arg(QLatin1String(field)));
     }
     return static_cast<int>(parsed);
 }
@@ -81,7 +82,7 @@ int signedInteger(const QJsonValue& value, const char* field)
 QString string(const QJsonValue& value, const char* field)
 {
     if (!value.isString() || value.toString().isEmpty()) {
-        fileError(QStringLiteral("Missing %1.").arg(QLatin1String(field)));
+        fileError(QCoreApplication::translate("Diagnostic", "Missing %1.").arg(QLatin1String(field)));
     }
     return value.toString();
 }
@@ -368,7 +369,7 @@ void saveProject(const QString& path, const document::Document& document)
             encoded.append(encodeObject(object));
         }
     } catch (const Standard_Failure& error) {
-        fileError(QStringLiteral("Cannot encode project geometry: %1").arg(QString::fromUtf8(error.GetMessageString())));
+        fileError(QCoreApplication::translate("Diagnostic", "Cannot encode project geometry: %1").arg(QString::fromUtf8(error.GetMessageString())));
     }
     const auto data = QJsonDocument(QJsonObject{{"format", format}, {"version", version},
                                               {"unit", "mm"}, {"objects", encoded}}).toJson();
@@ -383,7 +384,7 @@ document::Document openProject(const QString& path)
     QJsonParseError error;
     const auto json = QJsonDocument::fromJson(readFile(path), &error);
     if (error.error != QJsonParseError::NoError || !json.isObject()) {
-        fileError(QStringLiteral("Invalid project JSON: %1").arg(error.errorString()));
+        fileError(QCoreApplication::translate("Diagnostic", "Invalid project JSON: %1").arg(error.errorString()));
     }
     const auto root = json.object();
     if (root.value("format").toString() != QLatin1String(format)) {
@@ -413,7 +414,7 @@ document::Document openProject(const QString& path)
         }
         return document::Document::fromDefinitions(std::move(definitions));
     } catch (const Standard_Failure& failure) {
-        fileError(QStringLiteral("Cannot read project geometry: %1").arg(QString::fromUtf8(failure.GetMessageString())));
+        fileError(QCoreApplication::translate("Diagnostic", "Cannot read project geometry: %1").arg(QString::fromUtf8(failure.GetMessageString())));
     }
 }
 

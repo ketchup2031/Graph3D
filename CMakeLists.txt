@@ -57,12 +57,13 @@ add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/TransformEditor.cpp
     src/gui/AssemblyDialog.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
-    src/gui/UserPreferences.cpp
+    src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
     src/gui/DraftCanvas.cpp src/gui/DraftCanvas.h src/gui/DraftWindow.cpp src/gui/DraftWindow.h
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 qt_add_resources(graph3d_ui start_examples PREFIX "/" FILES
     examples/flange.graph3d examples/stepped-bushing.graph3d examples/angle-bracket.graph3d)
+qt_add_resources(graph3d_ui interface_language PREFIX "/" FILES resources/translations/ru.json)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
     PRIVATE graph3d_io graph3d_drawing TKV3d TKOpenGl TKService)

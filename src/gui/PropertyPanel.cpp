@@ -1,6 +1,7 @@
 #include "gui/PropertyPanel.h"
 
 #include "document/Document.h"
+#include "gui/InterfaceLanguage.h"
 #include "gui/TransformEditor.h"
 
 #include <QCheckBox>
@@ -90,7 +91,7 @@ void PropertyPanel::showObject(const document::Object* object, const QString& na
     details_->setText(details);
     QString status;
     if (object) {
-        const auto error = QString::fromStdString(object->error);
+        const auto error = localizedDiagnostic(object->error.c_str());
         switch (object->status) {
         case document::Status::Ready: status = tr("Ready"); break;
         case document::Status::Failed: status = tr("Invalid: %1").arg(error); break;

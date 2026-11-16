@@ -1,4 +1,5 @@
 #include "gui/MainWindow.h"
+#include "gui/InterfaceLanguage.h"
 #include "gui/SketchEditor.h"
 #include "viewport/Viewport.h"
 
@@ -11,6 +12,7 @@
 #include <QComboBox>
 #include <cmath>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
@@ -65,6 +67,61 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir_.path());
         QStandardPaths::setTestModeEnabled(true);
         QApplication::setApplicationName(QStringLiteral("Graph3D-test"));
+    }
+
+    void russianInterfacePreference()
+    {
+        QVERIFY(!graph3d::russianLanguagePreferred());
+        QVERIFY(!graph3d::russianInterface());
+        const auto dismissNotice = [] {
+            QTimer::singleShot(0, [] {
+                if (auto* notice = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    notice->accept();
+                }
+            });
+        };
+        {
+            graph3d::MainWindow english;
+            auto* button = english.findChild<QPushButton*>("startNewDrawing");
+            auto* englishChoice = english.findChild<QAction*>("languageEnglish");
+            auto* russianChoice = english.findChild<QAction*>("languageRussian");
+            QVERIFY(button && englishChoice && russianChoice);
+            QCOMPARE(button->text(), QStringLiteral("New drawing"));
+            QVERIFY(englishChoice->isChecked());
+            dismissNotice();
+            russianChoice->trigger();
+            QVERIFY(graph3d::russianLanguagePreferred());
+            QCOMPARE(button->text(), QStringLiteral("New drawing"));
+        }
+        {
+            const graph3d::InterfaceLanguage language(graph3d::russianLanguagePreferred());
+            QVERIFY(graph3d::russianInterface());
+            graph3d::MainWindow russian;
+            auto* button = russian.findChild<QPushButton*>("startNewDrawing");
+            QVERIFY(button);
+            QCOMPARE(button->text(), QStringLiteral("Новый чертёж"));
+            QCOMPARE(russian.findChild<QAction*>("newDrawing")->text(), QStringLiteral("Новый 2D-чертёж…"));
+            QCOMPARE(russian.findChild<QAction*>("darkTheme")->text(), QStringLiteral("Тёмная тема"));
+            QCOMPARE(graph3d::localizedDiagnostic("Move the section plane inside the body bounds."),
+                     QStringLiteral("Переместите секущую плоскость внутрь габаритов тела."));
+            button->click();
+            auto* draft = russian.findChild<QMainWindow*>("draftWindow");
+            QVERIFY(draft);
+            QCOMPARE(draft->findChild<QAction*>("draftRect")->text(), QStringLiteral("Прямоугольник"));
+            QDialogButtonBox dialogButtons(QDialogButtonBox::Cancel);
+            auto* cancel = dialogButtons.button(QDialogButtonBox::Cancel);
+            QVERIFY(cancel);
+            QCOMPARE(QString(cancel->text()).remove(QLatin1Char('&')), QStringLiteral("Отмена"));
+            QVERIFY(draft->close());
+            auto* englishChoice = russian.findChild<QAction*>("languageEnglish");
+            QVERIFY(englishChoice);
+            dismissNotice();
+            englishChoice->trigger();
+            QVERIFY(!graph3d::russianLanguagePreferred());
+        }
+        QVERIFY(!graph3d::russianInterface());
+        graph3d::MainWindow restored;
+        QCOMPARE(restored.findChild<QPushButton*>("startNewDrawing")->text(), QStringLiteral("New drawing"));
     }
 
     void startPageWorkflow()

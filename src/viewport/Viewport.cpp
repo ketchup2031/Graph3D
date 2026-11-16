@@ -1,4 +1,5 @@
 #include "viewport/Viewport.h"
+#include "gui/InterfaceLanguage.h"
 
 #include "document/Document.h"
 
@@ -126,9 +127,9 @@ bool Viewport::runOperation(const QString& operation, const std::function<void()
         action();
         return true;
     } catch (const Standard_Failure& error) {
-        reason = QString::fromUtf8(error.GetMessageString());
+        reason = localizedDiagnostic(error.GetMessageString());
     } catch (const std::exception& error) {
-        reason = QString::fromUtf8(error.what());
+        reason = localizedDiagnostic(error.what());
     }
     if (reason.isEmpty()) {
         reason = tr("Unknown error");

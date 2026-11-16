@@ -3,6 +3,7 @@
 #include "gui/AssemblyDialog.h"
 #include "gui/DraftWindow.h"
 #include "gui/DrawingDialog.h"
+#include "gui/InterfaceLanguage.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
 #include "gui/StartPage.h"
@@ -13,6 +14,7 @@
 #include "viewport/Viewport.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -351,6 +353,27 @@ void MainWindow::createMenus()
         startPage_->setDarkTheme(dark);
     });
 
+    auto* languageMenu = settings->addMenu(tr("Language"));
+    auto* languages = new QActionGroup(languageMenu);
+    const auto languageChoice = [this, languageMenu, languages](const QString& label, const char* name, bool russian) {
+        auto* action = menuAction(languageMenu, label, name);
+        action->setCheckable(true);
+        languages->addAction(action);
+        action->setChecked(russian == russianLanguagePreferred());
+        connect(action, &QAction::triggered, this, [this, russian] {
+            if (russian == russianLanguagePreferred()) {
+                return;
+            }
+            setRussianLanguagePreferred(russian);
+            if (russian != russianInterface()) {
+                QMessageBox::information(this, tr("Language settings"),
+                    tr("Restart Graph3D to apply the language change."));
+            }
+        });
+    };
+    languageChoice(QStringLiteral("English"), "languageEnglish", false);
+    languageChoice(QStringLiteral("Русский"), "languageRussian", true);
+
     auto* help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("Mouse controls"), this, &MainWindow::showMouseControls);
     auto* openLog = help->addAction(tr("Open log folder"), this, [this] {
@@ -446,7 +469,7 @@ void MainWindow::refreshDocument(int selection)
                 }
             }
             const auto details = objectDetails(object);
-            const auto error = QString::fromStdString(object.error);
+            const auto error = localizedDiagnostic(object.error.c_str());
             item->setText(0, objectName(object));
             item->setText(1, details);
             item->setToolTip(1, details);
@@ -641,7 +664,7 @@ int MainWindow::addFeature(const QString& operation, const std::function<int()>&
         report(tr("Created %1").arg(objectName(*document_.find(id))));
         return id;
     } catch (const std::exception& error) {
-        showSceneError(tr("%1: %2").arg(operation, QString::fromUtf8(error.what())));
+        showSceneError(tr("%1: %2").arg(operation, localizedDiagnostic(error.what())));
         return 0;
     }
 }
@@ -655,7 +678,7 @@ void MainWindow::editFeature(int id, const std::function<bool()>& action)
         refreshDocument(id);
         const auto& object = *document_.find(id);
         if (object.status != document::Status::Ready) {
-            showSceneError(tr("%1: %2").arg(objectName(object), QString::fromStdString(object.error)));
+            showSceneError(tr("%1: %2").arg(objectName(object), localizedDiagnostic(object.error.c_str())));
             return;
         }
         const auto waiting = std::count_if(document_.objects().begin(), document_.objects().end(),
@@ -664,7 +687,7 @@ void MainWindow::editFeature(int id, const std::function<bool()>& action)
                          .arg(objectName(object)).arg(waiting)
                        : tr("Rebuilt %1 and its dependent operations.").arg(objectName(object)));
     } catch (const std::exception& error) {
-        showSceneError(QString::fromUtf8(error.what()));
+        showSceneError(localizedDiagnostic(error.what()));
     }
 }
 
@@ -778,7 +801,7 @@ bool MainWindow::saveProject(bool choosePath)
     auto path = projectPath_;
     if (choosePath || path.isEmpty()) {
         QFileDialog dialog(this, tr("Save Graph3D project"), path, tr("Graph3D projects (*.graph3d)"));
-        dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
+        dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled() || russianInterface());
         dialog.setAcceptMode(QFileDialog::AcceptSave);
         dialog.setDefaultSuffix(QStringLiteral("graph3d"));
         if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
@@ -798,7 +821,7 @@ bool MainWindow::saveProject(bool choosePath)
         report(tr("Saved %1").arg(QFileInfo(path).fileName()));
         return true;
     } catch (const std::exception& error) {
-        const auto message = tr("Could not save project: %1").arg(QString::fromUtf8(error.what()));
+        const auto message = tr("Could not save project: %1").arg(localizedDiagnostic(error.what()));
         showSceneError(message);
         QMessageBox::warning(this, tr("Save project"), message);
         return false;
@@ -835,7 +858,7 @@ void MainWindow::openProject()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
                                                   tr("Graph3D files (*.graph3d *.g3draw);;3D projects (*.graph3d);;2D drawings (*.g3draw)"), nullptr,
-                                                  darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+                                                  (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openProjectPath(path);
     }
@@ -891,7 +914,7 @@ void MainWindow::openProjectPath(const QString& path, bool example)
                          .arg(QFileInfo(path).fileName()).arg(errors)
                       : tr("Opened %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
-        const auto message = tr("Could not open project: %1").arg(QString::fromUtf8(error.what()));
+        const auto message = tr("Could not open project: %1").arg(localizedDiagnostic(error.what()));
         showSceneError(message);
         QMessageBox::warning(this, tr("Open project"), message);
     }
@@ -901,7 +924,7 @@ void MainWindow::importStep()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Import STEP"), projectPath_,
                                                   tr("STEP files (*.step *.stp)"), nullptr,
-                                                  darkThemeEnabled() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+                                                  (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         addFeature(tr("Import STEP"), [this, &path] {
             const auto name = QFileInfo(path).fileName().toUtf8().toStdString();
@@ -920,7 +943,7 @@ void MainWindow::exportModel(io::ExchangeFormat format)
         path = info.dir().filePath(info.completeBaseName());
     }
     QFileDialog dialog(this, tr("Export visible bodies"), path, filter);
-    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled());
+    dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled() || russianInterface());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setDefaultSuffix(step ? QStringLiteral("step") : QStringLiteral("stl"));
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
@@ -935,7 +958,7 @@ void MainWindow::exportModel(io::ExchangeFormat format)
         io::exportVisible(path, document_, format);
         report(tr("Exported %1").arg(QFileInfo(path).fileName()));
     } catch (const std::exception& error) {
-        showSceneError(tr("Could not export model: %1").arg(QString::fromUtf8(error.what())));
+        showSceneError(tr("Could not export model: %1").arg(localizedDiagnostic(error.what())));
     }
 }
 
@@ -1092,7 +1115,7 @@ void MainWindow::showDrawing()
         DrawingDialog dialog(object->shape, create(), objectName(*object), object->id, this);
         dialog.exec();
     } catch (const std::exception& error) {
-        const auto message = tr("Could not create drawing: %1").arg(QString::fromUtf8(error.what()));
+        const auto message = tr("Could not create drawing: %1").arg(localizedDiagnostic(error.what()));
         showSceneError(message);
         QMessageBox::warning(this, tr("Drawing"), message);
     }

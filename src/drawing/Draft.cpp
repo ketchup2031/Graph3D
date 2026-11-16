@@ -1,5 +1,6 @@
 #include "drawing/Draft.h"
 
+#include <QCoreApplication>
 #include <QFontMetricsF>
 #include <QLineF>
 #include <QPageLayout>
@@ -96,7 +97,7 @@ void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame)
     };
     cell({x + 2, y, 141, 9}, draft.title);
     cell({x + 2, y + 9, 102, 8}, draft.number);
-    cell({x + 108, y + 9, 35, 8}, QStringLiteral("1:1   mm"));
+    cell({x + 108, y + 9, 35, 8}, QCoreApplication::translate("DraftSheet", "1:1   mm"));
     cell({x + 2, y + 17, 102, 7}, draft.author);
     cell({x + 108, y + 17, 35, 7}, draft.a3 ? QStringLiteral("A3   1/1") : QStringLiteral("A4   1/1"));
 }

@@ -1,5 +1,7 @@
 #include "io/Exchange.h"
 
+#include <QCoreApplication>
+
 #include "io/FileIO.h"
 
 #include <BRepBuilderAPI_Copy.hxx>
@@ -40,7 +42,7 @@ TopoDS_Shape visibleSolids(const document::Document& document)
             continue;
         }
         if (object.status != document::Status::Ready || object.shape.IsNull()) {
-            fileError(QStringLiteral("Visible body #%1 has an error. Fix or hide it before exporting.").arg(object.id));
+            fileError(QCoreApplication::translate("Diagnostic", "Visible body #%1 has an error. Fix or hide it before exporting.").arg(object.id));
         }
         builder.Add(group, object.shape);
         hasBody = true;
@@ -158,7 +160,7 @@ void exportVisible(const QString& path, const document::Document& document, Exch
         case ExchangeFormat::Stl: writeStl(path, shape); break;
         }
     } catch (const Standard_Failure& error) {
-        fileError(QStringLiteral("Geometry export failed: %1").arg(QString::fromUtf8(error.GetMessageString())));
+        fileError(QCoreApplication::translate("Diagnostic", "Geometry export failed: %1").arg(QString::fromUtf8(error.GetMessageString())));
     }
 }
 
@@ -191,7 +193,7 @@ TopoDS_Shape readStep(const QString& path)
         }
         return result;
     } catch (const Standard_Failure& error) {
-        fileError(QStringLiteral("STEP import failed: %1").arg(QString::fromUtf8(error.GetMessageString())));
+        fileError(QCoreApplication::translate("Diagnostic", "STEP import failed: %1").arg(QString::fromUtf8(error.GetMessageString())));
     }
 }
 

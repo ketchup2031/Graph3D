@@ -1,5 +1,6 @@
 #include "drawing/DrawingSheet.h"
 
+#include <QCoreApplication>
 #include <QFontMetrics>
 #include <QLineF>
 #include <QPageLayout>
@@ -211,7 +212,7 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
         text(p, {104, bend.y() - 6, 32, 5.5}, label, 4, Qt::AlignHCenter | Qt::AlignVCenter);
     }
     if (groups.size() > maxRows) {
-        text(p, {104, origin.y() + 25, 46, 5}, QStringLiteral("More diameters omitted"), 3, Qt::AlignLeft);
+        text(p, {104, origin.y() + 25, 46, 5}, QCoreApplication::translate("DrawingSheet", "More diameters omitted"), 3, Qt::AlignLeft);
     }
 }
 
@@ -267,7 +268,7 @@ void paintCutLine(QPainter& p, const Section& section, const Projections& views,
         p.drawPolygon(QPolygonF{tip, base + along * 0.75, base - along * 0.75});
         p.setBrush(Qt::NoBrush);
         const auto labelAt = tip + (vertical ? QPointF(-4, 0) : QPointF(0, onTop ? -3 : 3));
-        text(p, {labelAt.x() - 2, labelAt.y() - 2.5, 4, 5}, QStringLiteral("A"), 3, Qt::AlignCenter, true);
+        text(p, {labelAt.x() - 2, labelAt.y() - 2.5, 4, 5}, QCoreApplication::translate("DrawingSheet", "A"), 3, Qt::AlignCenter, true);
     }
 }
 
@@ -283,9 +284,9 @@ void titleBlock(QPainter& p, const SheetOptions& options, const Scale& scale)
     text(p, {146, 175, 138, 9}, options.title, 5, Qt::AlignVCenter | Qt::AlignLeft, true);
     text(p, {146, 185, 61, 7.5}, options.designation, 4, Qt::AlignVCenter | Qt::AlignLeft);
     text(p, {210, 185, 28, 7.5}, scale.text, 4, Qt::AlignCenter);
-    text(p, {238, 185, 28, 7.5}, QStringLiteral("mm"), 3, Qt::AlignCenter);
+    text(p, {238, 185, 28, 7.5}, QCoreApplication::translate("DrawingSheet", "mm"), 3, Qt::AlignCenter);
     text(p, {266, 185, 21, 7.5}, QStringLiteral("1 / 1"), 3, Qt::AlignCenter);
-    text(p, {146, 192.5, 118, 7}, QStringLiteral("Graph3D  |  First-angle projection"), 3,
+    text(p, {146, 192.5, 118, 7}, QCoreApplication::translate("DrawingSheet", "Graph3D  |  First-angle projection"), 3,
          Qt::AlignVCenter | Qt::AlignLeft);
     text(p, {266, 192.5, 21, 7}, QStringLiteral("A4"), 3, Qt::AlignCenter);
 }
@@ -349,12 +350,12 @@ void paintSheet(QPainter& painter, const QRectF& area, const Projections& views,
     const auto label = [&](const View& view, QPointF origin, const QString& name, bool cut, bool dimensioned) {
         const double offset = options.dimensions && dimensioned && !cut ? 11 : 4;
         const double y = origin.y() + view.height * scale.factor / 2 + offset;
-        text(painter, {origin.x() - 25, y, 50, 6}, cut ? QStringLiteral("A–A") : name,
+        text(painter, {origin.x() - 25, y, 50, 6}, cut ? QCoreApplication::translate("DrawingSheet", "A–A") : name,
              4, Qt::AlignCenter, cut);
     };
-    label(views.right, right, QStringLiteral("Right"), cutRight, true);
-    label(views.front, front, QStringLiteral("Front"), cutFront, true);
-    label(views.top, top, QStringLiteral("Top"), cutTop, false);
+    label(views.right, right, QCoreApplication::translate("DrawingSheet", "Right"), cutRight, true);
+    label(views.front, front, QCoreApplication::translate("DrawingSheet", "Front"), cutFront, true);
+    label(views.top, top, QCoreApplication::translate("DrawingSheet", "Top"), cutTop, false);
     titleBlock(painter, options, scale);
     painter.restore();
 }
