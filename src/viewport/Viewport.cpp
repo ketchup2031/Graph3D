@@ -1,6 +1,7 @@
 #include "viewport/Viewport.h"
 
 #include "geometry/Primitives.h"
+#include "geometry/SketchModeling.h"
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
@@ -8,6 +9,7 @@
 #include <OpenGl_GraphicDriver.hxx>
 #include <Quantity_Color.hxx>
 #include <Standard_Failure.hxx>
+#include <TopoDS.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 
@@ -64,6 +66,7 @@ struct Viewport::Scene {
     struct Object {
         Handle(AIS_Shape) shape;
         QString name;
+        std::optional<geometry::Plane> plane;
     };
 
     Handle(OpenGl_GraphicDriver) driver;
@@ -71,6 +74,14 @@ struct Viewport::Scene {
     Handle(AIS_InteractiveContext) context;
     Handle(V3d_View) view;
     std::vector<Object> objects;
+
+    const Object& object(int id) const
+    {
+        if (id < 1 || static_cast<std::size_t>(id) > objects.size()) {
+            throw std::invalid_argument("Select an object in the model tree.");
+        }
+        return objects[id - 1];
+    }
     QPoint previousMouse;
     bool ready = false;
 
@@ -150,6 +161,7 @@ void Viewport::newScene()
     runOperation(tr("Create new scene"), [this] {
         scene_->context->RemoveAll(false);
         scene_->objects.clear();
+        emit sceneCleared();
         scene_->view->Reset(false);
         scene_->view->SetProj(V3d_TypeOfOrientation_Zup_AxoRight);
         scene_->view->Redraw();
@@ -163,20 +175,130 @@ void Viewport::addPrimitive(geometry::Primitive primitive)
         const auto index = scene_->objects.size();
         const double x = spacing * static_cast<double>(index % columns);
         const double y = spacing * static_cast<double>(index / columns);
-        const Handle(AIS_Shape) shape = new AIS_Shape(geometry::makePrimitive(primitive, x, y));
-        const auto name = tr("%1 %2").arg(primitiveName(primitive)).arg(index + 1);
-        shape->SetColor(Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB));
-        scene_->objects.push_back({shape, name});
-        try {
-            scene_->context->Display(shape, AIS_Shaded, 0, false);
-        } catch (...) {
-            scene_->objects.pop_back();
-            throw;
+        addObject(geometry::makePrimitive(primitive, x, y), primitiveName(primitive));
+    });
+}
+
+int Viewport::addObject(const TopoDS_Shape& shape, const QString& baseName,
+                        std::optional<geometry::Plane> plane, const QString& detail, int parentId)
+{
+    const auto id = static_cast<int>(scene_->objects.size()) + 1;
+    const auto name = tr("%1 %2").arg(baseName).arg(id);
+    const Handle(AIS_Shape) ais = new AIS_Shape(shape);
+    if (plane) {
+        ais->SetColor(Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB));
+        ais->SetWidth(2.0);
+    } else {
+        ais->SetColor(Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB));
+    }
+    scene_->objects.push_back({ais, name, plane});
+    try {
+        scene_->context->Display(ais, plane ? AIS_WireFrame : AIS_Shaded, 0, false);
+    } catch (...) {
+        scene_->objects.pop_back();
+        throw;
+    }
+    emit objectAdded(id, name, plane.has_value(), detail, parentId);
+    fitScene();
+    emit sceneMessage(tr("Created %1").arg(name));
+    return id;
+}
+
+int Viewport::addSketch(const geometry::Sketch& sketch)
+{
+    int result = 0;
+    runOperation(tr("Finish sketch"), [this, &sketch, &result] {
+        const auto face = geometry::makeProfile(sketch);
+        QString plane;
+        switch (sketch.plane) {
+        case geometry::Plane::XY: plane = QStringLiteral("XY"); break;
+        case geometry::Plane::XZ: plane = QStringLiteral("XZ"); break;
+        case geometry::Plane::YZ: plane = QStringLiteral("YZ"); break;
         }
-        scene_->view->FitAll(0.12, false);
-        scene_->view->ZFitAll();
-        scene_->view->Redraw();
-        emit sceneMessage(tr("Created %1").arg(name));
+        result = addObject(face, tr("Sketch"), sketch.plane, tr("Plane %1").arg(plane));
+    });
+    return result;
+}
+
+int Viewport::extrudeSketch(int id, double distance)
+{
+    int result = 0;
+    runOperation(tr("Extrude"), [this, id, distance, &result] {
+        const auto& profile = scene_->object(id);
+        if (!profile.plane) {
+            throw std::invalid_argument("Select a finished sketch.");
+        }
+        const auto shape = geometry::extrude(TopoDS::Face(profile.shape->Shape()), *profile.plane, distance);
+        result = addObject(shape, tr("Extrude"), {}, tr("%1 · %2 mm").arg(profile.name).arg(distance), id);
+        setObjectVisible(id, false);
+    });
+    return result;
+}
+
+int Viewport::revolveSketch(int id, geometry::Axis axis, double offset, double angle)
+{
+    int result = 0;
+    runOperation(tr("Revolve"), [this, id, axis, offset, angle, &result] {
+        const auto& profile = scene_->object(id);
+        if (!profile.plane) {
+            throw std::invalid_argument("Select a finished sketch.");
+        }
+        const auto shape = geometry::revolve(TopoDS::Face(profile.shape->Shape()), *profile.plane, axis, offset, angle);
+        const auto detail = tr("%1 · %2° · %3 axis, offset %4 mm")
+            .arg(profile.name).arg(angle).arg(axis == geometry::Axis::U ? "U" : "V").arg(offset);
+        result = addObject(shape, tr("Revolve"), {}, detail, id);
+        setObjectVisible(id, false);
+    });
+    return result;
+}
+
+int Viewport::combineBodies(int first, int second, geometry::BooleanOperation operation)
+{
+    int result = 0;
+    runOperation(tr("Combine bodies"), [this, first, second, operation, &result] {
+        const auto& a = scene_->object(first);
+        const auto& b = scene_->object(second);
+        if (a.plane || b.plane) {
+            throw std::invalid_argument("Choose two bodies rather than sketches.");
+        }
+        const auto shape = geometry::booleanResult(a.shape->Shape(), b.shape->Shape(), operation);
+        QString name;
+        switch (operation) {
+        case geometry::BooleanOperation::Union: name = tr("Union"); break;
+        case geometry::BooleanOperation::Difference: name = tr("Cut"); break;
+        case geometry::BooleanOperation::Intersection: name = tr("Intersection"); break;
+        }
+        result = addObject(shape, name, {}, tr("%1 + %2").arg(a.name, b.name));
+        setObjectVisible(first, false);
+        setObjectVisible(second, false);
+    });
+    return result;
+}
+
+void Viewport::selectObject(int id)
+{
+    runOperation(tr("Select object"), [this, id] {
+        scene_->context->ClearSelected(false);
+        if (id > 0) {
+            const auto& object = scene_->object(id);
+            if (scene_->context->IsDisplayed(object.shape)) {
+                scene_->context->SetSelected(object.shape, false);
+            }
+        }
+        scene_->context->UpdateCurrentViewer();
+    });
+}
+
+bool Viewport::setObjectVisible(int id, bool visible)
+{
+    return runOperation(tr("Change object visibility"), [this, id, visible] {
+        const auto& object = scene_->object(id);
+        if (visible) {
+            scene_->context->Display(object.shape, object.plane ? AIS_WireFrame : AIS_Shaded, 0, true);
+        } else {
+            scene_->context->Erase(object.shape, true);
+        }
+        emit objectVisibilityChanged(id, visible);
     });
 }
 
@@ -184,6 +306,7 @@ void Viewport::clearSelection()
 {
     runOperation(tr("Clear selection"), [this] {
         scene_->context->ClearSelected(true);
+        emit objectSelected(0);
         emit sceneMessage(tr("No selection"));
     });
 }
@@ -277,8 +400,10 @@ void Viewport::mousePressEvent(QMouseEvent* event)
             const auto selected = scene_->context->FirstSelectedObject();
             const auto match = std::find_if(scene_->objects.begin(), scene_->objects.end(),
                 [&selected](const Scene::Object& object) { return selected == object.shape; });
-            emit sceneMessage(match == scene_->objects.end()
-                ? tr("No selection") : tr("Selected %1").arg(match->name));
+            const auto id = match == scene_->objects.end() ? 0
+                          : static_cast<int>(match - scene_->objects.begin()) + 1;
+            emit objectSelected(id);
+            emit sceneMessage(id == 0 ? tr("No selection") : tr("Selected %1").arg(match->name));
         }
     });
 }

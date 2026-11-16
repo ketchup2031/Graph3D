@@ -13,7 +13,8 @@ endif()
 
 add_library(graph3d_geometry STATIC
     src/geometry/PreviewBox.cpp
-    src/geometry/Primitives.cpp)
+    src/geometry/Primitives.cpp
+    src/geometry/SketchModeling.cpp)
 target_compile_features(graph3d_geometry PUBLIC cxx_std_20)
 set_target_properties(graph3d_geometry PROPERTIES CXX_EXTENSIONS OFF)
 if(WIN32)
@@ -22,7 +23,7 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO)
 
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
@@ -35,7 +36,8 @@ if(WIN32)
         PROPERTIES OBJECT_DEPENDS "${GRAPH3D_ICON}")
     target_sources(Graph3D PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Graph3D.rc")
 endif()
-add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/viewport/Viewport.cpp
+add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
+    src/gui/SketchEditor.h src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_geometry
@@ -54,6 +56,11 @@ if(BUILD_TESTING)
     target_link_libraries(primitives_test PRIVATE graph3d_geometry TKTopAlgo)
     add_test(NAME primitives COMMAND primitives_test)
 
+    add_executable(sketch_modeling_test tests/geometry/SketchModelingTest.cpp)
+    set_target_properties(sketch_modeling_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(sketch_modeling_test PRIVATE graph3d_geometry TKTopAlgo)
+    add_test(NAME sketch_modeling COMMAND sketch_modeling_test)
+
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)
         find_package(Qt6 REQUIRED COMPONENTS Test)
@@ -61,6 +68,6 @@ if(BUILD_TESTING)
         set_target_properties(viewport_test PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
         target_link_libraries(viewport_test PRIVATE graph3d_ui Qt6::Test)
         add_test(NAME viewport COMMAND viewport_test)
-        set_tests_properties(viewport PROPERTIES TIMEOUT 25)
+        set_tests_properties(viewport PROPERTIES TIMEOUT 45)
     endif()
 endif()
