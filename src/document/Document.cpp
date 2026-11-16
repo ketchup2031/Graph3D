@@ -1,0 +1,262 @@
+#include "document/Document.h"
+
+#include "geometry/Primitives.h"
+#include "geometry/SketchModeling.h"
+
+#include <Standard_Failure.hxx>
+#include <TopoDS.hxx>
+
+#include <array>
+#include <stdexcept>
+#include <utility>
+
+namespace graph3d::document {
+namespace {
+
+template<class... Functions>
+struct Visit : Functions... { using Functions::operator()...; };
+
+std::array<ObjectId, 2> inputs(const Parameters& parameters)
+{
+    return std::visit(Visit{
+        [](const Extrude& p) { return std::array{p.profile, 0}; },
+        [](const Revolve& p) { return std::array{p.profile, 0}; },
+        [](const Boolean& p) { return std::array{p.first, p.second}; },
+        [](const auto&) { return std::array{0, 0}; }
+    }, parameters);
+}
+
+const Object& objectAt(const std::vector<Object>& state, ObjectId id)
+{
+    if (id < 1 || static_cast<std::size_t>(id) > state.size()) {
+        throw std::invalid_argument("The requested object does not exist.");
+    }
+    return state[id - 1];
+}
+
+const geometry::Sketch& requireSketch(const Object& object)
+{
+    const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
+    if (!sketch) {
+        throw std::invalid_argument("Select a finished sketch.");
+    }
+    return *sketch;
+}
+
+TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters)
+{
+    return std::visit(Visit{
+        [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
+        [](const geometry::Sketch& p) -> TopoDS_Shape { return geometry::makeProfile(p); },
+        [&state](const Extrude& p) {
+            const auto& profile = objectAt(state, p.profile);
+            return geometry::extrude(TopoDS::Face(profile.shape), requireSketch(profile).plane, p.distance);
+        },
+        [&state](const Revolve& p) {
+            const auto& profile = objectAt(state, p.profile);
+            return geometry::revolve(TopoDS::Face(profile.shape), requireSketch(profile).plane,
+                                     p.axis, p.offset, p.angle);
+        },
+        [&state](const Boolean& p) {
+            return geometry::booleanResult(objectAt(state, p.first).shape,
+                                           objectAt(state, p.second).shape, p.operation);
+        }
+    }, parameters);
+}
+
+}  // namespace
+
+ObjectId Document::addPrimitive(geometry::Primitive kind)
+{
+    constexpr double spacing = 140;
+    constexpr std::size_t columns = 5;
+    const auto index = objects_.size();
+    return append(Primitive{kind, spacing * static_cast<double>(index % columns),
+                                  spacing * static_cast<double>(index / columns)});
+}
+
+ObjectId Document::addSketch(geometry::Sketch sketch)
+{
+    return append(std::move(sketch));
+}
+
+ObjectId Document::addExtrude(ObjectId profile, double distance)
+{
+    requireSketch(objectAt(objects_, profile));
+    return append(Extrude{profile, distance});
+}
+
+ObjectId Document::addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle)
+{
+    requireSketch(objectAt(objects_, profile));
+    return append(Revolve{profile, axis, offset, angle});
+}
+
+ObjectId Document::addBoolean(ObjectId first, ObjectId second, geometry::BooleanOperation operation)
+{
+    if (first == second) {
+        throw std::invalid_argument("Choose two different bodies.");
+    }
+    for (const auto id : {first, second}) {
+        if (std::holds_alternative<geometry::Sketch>(objectAt(objects_, id).parameters)) {
+            throw std::invalid_argument("Choose bodies rather than sketches.");
+        }
+    }
+    return append(Boolean{first, second, operation});
+}
+
+ObjectId Document::append(Parameters parameters)
+{
+    auto next = objects_;
+    const auto id = static_cast<ObjectId>(next.size() + 1);
+    next.push_back({id, std::move(parameters), {}, Status::Ready, {}, true});
+    rebuild(next, next.size() - 1);
+    if (next.back().status != Status::Ready) {
+        throw std::invalid_argument(next.back().error);
+    }
+    for (const auto input : inputs(next.back().parameters)) {
+        if (input != 0) {
+            next[input - 1].visible = false;
+        }
+    }
+    commit(std::move(next));
+    return id;
+}
+
+bool Document::editExtrude(ObjectId id, double distance)
+{
+    const auto* operation = std::get_if<Extrude>(&objectAt(objects_, id).parameters);
+    if (!operation) {
+        throw std::invalid_argument("Select an Extrude operation.");
+    }
+    if (operation->distance == distance) {
+        return false;
+    }
+    auto next = objects_;
+    std::get<Extrude>(next[id - 1].parameters).distance = distance;
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle)
+{
+    const auto* operation = std::get_if<Revolve>(&objectAt(objects_, id).parameters);
+    if (!operation) {
+        throw std::invalid_argument("Select a Revolve operation.");
+    }
+    if (operation->axis == axis && operation->offset == offset && operation->angle == angle) {
+        return false;
+    }
+    auto next = objects_;
+    next[id - 1].parameters = Revolve{operation->profile, axis, offset, angle};
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
+void Document::rebuild(State& state, std::size_t first)
+{
+    std::vector<bool> changed(state.size());
+    changed[first] = true;
+    for (std::size_t i = first; i < state.size(); ++i) {
+        auto& object = state[i];
+        const auto source = inputs(object.parameters);
+        for (const auto id : source) {
+            if (id && changed[id - 1]) {
+                changed[i] = true;
+            }
+        }
+        if (!changed[i]) {
+            continue;
+        }
+        object.shape.Nullify();
+        object.status = Status::Ready;
+        object.error.clear();
+        for (const auto id : source) {
+            if (id && state[id - 1].status != Status::Ready) {
+                object.status = Status::Blocked;
+                object.error = "Input #" + std::to_string(id) + " has an error. Fix it to rebuild this operation.";
+                break;
+            }
+        }
+        if (object.status == Status::Blocked) {
+            continue;
+        }
+        try {
+            object.shape = evaluate(state, object.parameters);
+        } catch (const Standard_Failure& error) {
+            object.status = Status::Failed;
+            const auto* message = error.GetMessageString();
+            object.error = message && *message ? message : "Open CASCADE could not build this object.";
+        } catch (const std::exception& error) {
+            object.status = Status::Failed;
+            object.error = error.what();
+        }
+    }
+}
+
+bool Document::setVisible(ObjectId id, bool visible)
+{
+    if (objectAt(objects_, id).visible == visible) {
+        return false;
+    }
+    auto next = objects_;
+    next[id - 1].visible = visible;
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::clear()
+{
+    if (objects_.empty()) {
+        return false;
+    }
+    commit({});
+    return true;
+}
+
+void Document::commit(State next)
+{
+    undo_.push_back(std::move(objects_));
+    objects_ = std::move(next);
+    redo_.clear();
+}
+
+bool Document::undo()
+{
+    if (!canUndo()) {
+        return false;
+    }
+    redo_.push_back(std::move(objects_));
+    objects_ = std::move(undo_.back());
+    undo_.pop_back();
+    return true;
+}
+
+bool Document::redo()
+{
+    if (!canRedo()) {
+        return false;
+    }
+    undo_.push_back(std::move(objects_));
+    objects_ = std::move(redo_.back());
+    redo_.pop_back();
+    return true;
+}
+
+void Document::clearHistory()
+{
+    undo_.clear();
+    redo_.clear();
+}
+
+const Object* Document::find(ObjectId id) const
+{
+    if (id < 1 || static_cast<std::size_t>(id) > objects_.size()) {
+        return nullptr;
+    }
+    return &objects_[id - 1];
+}
+
+}  // namespace graph3d::document

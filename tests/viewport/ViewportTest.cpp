@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QInputDialog>
 #include <QLabel>
 #include <QMouseEvent>
@@ -156,7 +157,7 @@ private slots:
         QVERIFY(editor->isVisible());
         QVERIFY(feedback->text().contains(QStringLiteral("open"), Qt::CaseInsensitive));
         QCOMPARE(tree->topLevelItemCount(), 0);
-        QCOMPARE(errors.count(), 1);
+        QCOMPARE(errors.count(), 0);
         button("sketchCancel")->click();
         QVERIFY(viewport->isVisible());
         QCOMPARE(tree->topLevelItemCount(), 0);
@@ -179,7 +180,7 @@ private slots:
             QVERIFY(sketch->child(0)->text(1).contains(QStringLiteral("30 mm")));
         }
 
-        const auto* firstBody = tree->topLevelItem(0)->child(0);
+        auto* firstBody = tree->topLevelItem(0)->child(0);
         const auto* secondBody = tree->topLevelItem(1)->child(0);
         QVERIFY(action("booleanUnion")->isEnabled());
         acceptInput();
@@ -188,6 +189,39 @@ private slots:
         QCOMPARE(tree->currentItem()->text(0), QStringLiteral("Union 5"));
         QCOMPARE(firstBody->checkState(0), Qt::Unchecked);
         QCOMPARE(secondBody->checkState(0), Qt::Unchecked);
+
+        auto* unionBody = tree->topLevelItem(2);
+        auto* distance = window.findChild<QDoubleSpinBox*>("propertyDistance");
+        auto* apply = window.findChild<QPushButton*>("applyProperties");
+        auto* state = window.findChild<QLabel*>("propertyState");
+        QVERIFY(distance && apply && state);
+        tree->setCurrentItem(firstBody);
+        QVERIFY(distance->isVisible() && apply->isVisible());
+        QCOMPARE(distance->value(), 30.0);
+        const auto renderedBeforeEdit = frame(viewport);
+        QVERIFY(!renderedBeforeEdit.isNull());
+        distance->setValue(0);
+        apply->click();
+        QCOMPARE(firstBody->text(2), QStringLiteral("Invalid"));
+        QCOMPARE(unionBody->text(2), QStringLiteral("Blocked"));
+        QVERIFY(state->text().contains(QStringLiteral("nonzero")));
+        QTRY_VERIFY(frame(viewport) != renderedBeforeEdit);
+        const auto renderedAfterFailure = frame(viewport);
+        action("undoDocument")->trigger();
+        QCOMPARE(firstBody->text(2), QString{});
+        QCOMPARE(unionBody->text(2), QString{});
+        QCOMPARE(distance->value(), 30.0);
+        QTRY_VERIFY(frame(viewport) != renderedAfterFailure);
+        action("redoDocument")->trigger();
+        QCOMPARE(distance->value(), 0.0);
+        QCOMPARE(unionBody->text(2), QStringLiteral("Blocked"));
+        distance->setValue(10.0);
+        apply->click();
+        QCOMPARE(firstBody->text(2), QString{});
+        QCOMPARE(unionBody->text(2), QString{});
+        QVERIFY(firstBody->text(1).contains(QStringLiteral("10 mm")));
+        QTRY_VERIFY(frame(viewport) != renderedAfterFailure);
+        QVERIFY(!action("redoDocument")->isEnabled());
 
         action("newSketchXZ")->trigger();
         button("sketchRectangle")->click();
@@ -205,6 +239,16 @@ private slots:
         action("revolveSketch")->trigger();
         QCOMPARE(radial->childCount(), 1);
         QCOMPARE(radial->child(0)->text(0), QStringLiteral("Revolve 7"));
+        auto* angle = window.findChild<QDoubleSpinBox*>("propertyAngle");
+        auto* offset = window.findChild<QDoubleSpinBox*>("propertyOffset");
+        QVERIFY(angle && offset && angle->isVisible() && offset->isVisible());
+        QCOMPARE(angle->value(), 360.0);
+        angle->setValue(180);
+        offset->setValue(5.0);
+        apply->click();
+        QVERIFY(radial->child(0)->text(1).contains(QStringLiteral("180°")));
+        QVERIFY(radial->child(0)->text(1).contains(QStringLiteral("offset 5 mm")));
+        QCOMPARE(radial->child(0)->text(2), QString{});
 
         action("newSketchYZ")->trigger();
         button("sketchCircle")->click();
@@ -212,7 +256,7 @@ private slots:
         click(20, 0);
         button("sketchFinish")->click();
         QCOMPARE(tree->currentItem()->text(1), QStringLiteral("Plane YZ"));
-        QCOMPARE(errors.count(), 1);
+        QCOMPARE(errors.count(), 0);
     }
 };
 

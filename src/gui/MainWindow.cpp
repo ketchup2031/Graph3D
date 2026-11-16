@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
 #include "viewport/Viewport.h"
 
@@ -17,6 +18,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QInputDialog>
+#include <QIcon>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -25,16 +27,19 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTreeWidget>
+#include <QStyle>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <exception>
+#include <type_traits>
 
 namespace graph3d {
 namespace {
 
 constexpr int objectIdRole = Qt::UserRole;
-constexpr int sketchRole = Qt::UserRole + 1;
+
 
 QAction* menuAction(QMenu* menu, const QString& label, const char* name)
 {
@@ -47,7 +52,8 @@ QAction* menuAction(QMenu* menu, const QString& label, const char* name)
 
 MainWindow::MainWindow()
     : viewport_(new Viewport(this)), pages_(new QStackedWidget(this)),
-      sketchEditor_(new SketchEditor(this)), tree_(new QTreeWidget(this))
+      sketchEditor_(new SketchEditor(this)), tree_(new QTreeWidget(this)),
+      properties_(new PropertyPanel(this))
 {
     setWindowTitle(QStringLiteral("Graph3D"));
     resize(1040, 710);
@@ -68,10 +74,15 @@ MainWindow::MainWindow()
     }
     createMenus();
     updateActions();
-    connect(viewport_, &Viewport::sceneMessage, this, [this](const QString& message) {
-        statusBar()->showMessage(message);
-        writeLog(message);
+    connect(properties_, &PropertyPanel::extrudeEdited, this, [this](int id, double distance) {
+        editFeature(id, [this, id, distance] { return document_.editExtrude(id, distance); });
     });
+    connect(properties_, &PropertyPanel::revolveEdited, this,
+        [this](int id, geometry::Axis axis, double offset, double angle) {
+            editFeature(id, [this, id, axis, offset, angle] {
+                return document_.editRevolve(id, axis, offset, angle);
+            });
+        });
     connect(viewport_, &Viewport::operationFailed, this, &MainWindow::showSceneError);
     statusBar()->showMessage(tr("Starting 3D viewport…"));
 }
@@ -82,7 +93,11 @@ bool MainWindow::initializeScene()
         return false;
     }
     writeLog(tr("3D viewport initialized"));
-    viewport_->addPrimitive(geometry::Primitive::Cube);
+    if (!addFeature(tr("Create cube"), [this] { return document_.addPrimitive(geometry::Primitive::Cube); }, false)) {
+        return false;
+    }
+    document_.clearHistory();
+    updateActions();
     statusBar()->showMessage(tr("Left click: select   |   Right drag: orbit   |   Middle drag: pan   |   Wheel: zoom"));
     return true;
 }
@@ -92,12 +107,25 @@ void MainWindow::createMenus()
     auto* file = menuBar()->addMenu(tr("&File"));
     newScene_ = menuAction(file, tr("&New scene"), "newScene");
     newScene_->setShortcut(QKeySequence::New);
-    connect(newScene_, &QAction::triggered, viewport_, &Viewport::newScene);
+    connect(newScene_, &QAction::triggered, this, [this] {
+        if (document_.clear()) {
+            refreshDocument(0);
+        }
+        viewport_->resetCamera();
+        report(tr("New scene"));
+    });
     file->addSeparator();
     auto* quit = file->addAction(tr("E&xit"), this, &QWidget::close);
     quit->setShortcut(QKeySequence::Quit);
 
     editMenu_ = menuBar()->addMenu(tr("&Edit"));
+    undo_ = menuAction(editMenu_, tr("Undo"), "undoDocument");
+    undo_->setShortcuts(QKeySequence::Undo);
+    connect(undo_, &QAction::triggered, this, [this] { restoreHistory(true); });
+    redo_ = menuAction(editMenu_, tr("Redo"), "redoDocument");
+    redo_->setShortcuts(QKeySequence::Redo);
+    connect(redo_, &QAction::triggered, this, [this] { restoreHistory(false); });
+    editMenu_->addSeparator();
     auto* clear = menuAction(editMenu_, tr("Clear selection"), "clearSelection");
     clear->setShortcut(Qt::Key_Escape);
     connect(clear, &QAction::triggered, viewport_, &Viewport::clearSelection);
@@ -105,7 +133,9 @@ void MainWindow::createMenus()
     createMenu_ = menuBar()->addMenu(tr("&Create"));
     const auto add = [this](const QString& label, const char* name, geometry::Primitive kind) {
         auto* action = menuAction(createMenu_, label, name);
-        connect(action, &QAction::triggered, viewport_, [this, kind] { viewport_->addPrimitive(kind); });
+        connect(action, &QAction::triggered, this, [this, kind] {
+            addFeature(tr("Create primitive"), [this, kind] { return document_.addPrimitive(kind); }, false);
+        });
     };
     add(tr("Cube"), "createCube", geometry::Primitive::Cube);
     add(tr("Cylinder"), "createCylinder", geometry::Primitive::Cylinder);
@@ -181,60 +211,106 @@ void MainWindow::createModelTree()
     dock->setObjectName(QStringLiteral("modelDock"));
     dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     tree_->setObjectName(QStringLiteral("modelTree"));
-    tree_->setHeaderLabels({tr("Object"), tr("Source / settings")});
+    tree_->setHeaderLabels({tr("Object"), tr("Source / settings"), tr("State")});
     dock->setWidget(tree_);
     addDockWidget(Qt::RightDockWidgetArea, dock);
-    resizeDocks({dock}, {260}, Qt::Horizontal);
-    connect(viewport_, &Viewport::sceneCleared, this, [this] {
-        items_.clear();
-        tree_->clear();
-        updateActions();
-    });
-    connect(viewport_, &Viewport::objectAdded, this,
-        [this](int id, const QString& name, bool sketch, const QString& detail, int parentId) {
-            auto* parent = items_.value(parentId);
-            auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree_);
-            const QSignalBlocker block(tree_);
-            item->setText(0, name);
-            item->setText(1, detail);
-            item->setToolTip(1, detail);
-            item->setData(0, objectIdRole, id);
-            item->setData(0, sketchRole, sketch);
-            item->setCheckState(0, Qt::Checked);
-            items_.insert(id, item);
-            if (parent) {
-                parent->setExpanded(true);
-            }
-            updateActions();
-        });
+
+    auto* propertyDock = new QDockWidget(tr("Properties"), this);
+    propertyDock->setObjectName(QStringLiteral("propertiesDock"));
+    propertyDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    propertyDock->setWidget(properties_);
+    splitDockWidget(dock, propertyDock, Qt::Vertical);
+    resizeDocks({dock}, {310}, Qt::Horizontal);
+
     connect(viewport_, &Viewport::objectSelected, this, [this](int id) {
-        const QSignalBlocker block(tree_);
-        tree_->setCurrentItem(items_.value(id));
-        if (auto* item = tree_->currentItem()) {
-            tree_->scrollToItem(item);
-        }
-        updateActions();
-    });
-    connect(viewport_, &Viewport::objectVisibilityChanged, this, [this](int id, bool visible) {
-        if (auto* item = items_.value(id)) {
+        {
             const QSignalBlocker block(tree_);
-            item->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
+            tree_->setCurrentItem(items_.value(id));
+            if (auto* item = tree_->currentItem()) {
+                tree_->scrollToItem(item);
+            }
         }
+        updateSelection();
+        const auto* object = document_.find(id);
+        report(object ? tr("Selected %1").arg(objectName(*object)) : tr("No selection"));
     });
-    connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
-        viewport_->selectObject(item ? item->data(0, objectIdRole).toInt() : 0);
-        updateActions();
+    connect(tree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*) {
+        viewport_->selectObject(selectedId());
+        updateSelection();
     });
     connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column != 0) {
             return;
         }
+        const auto id = item->data(0, objectIdRole).toInt();
         const bool visible = item->checkState(0) == Qt::Checked;
-        if (!viewport_->setObjectVisible(item->data(0, objectIdRole).toInt(), visible)) {
-            const QSignalBlocker block(tree_);
-            item->setCheckState(0, visible ? Qt::Unchecked : Qt::Checked);
+        if (document_.find(id) && document_.setVisible(id, visible)) {
+            refreshDocument(selectedId());
         }
     });
+}
+
+void MainWindow::refreshDocument(int selection)
+{
+    viewport_->syncDocument(document_);
+    {
+        const QSignalBlocker block(tree_);
+        auto ids = items_.keys();
+        std::sort(ids.begin(), ids.end(), std::greater<int>{});
+        for (const int id : ids) {
+            if (!document_.find(id)) {
+                delete items_.take(id);
+            }
+        }
+        for (const auto& object : document_.objects()) {
+            auto* item = items_.value(object.id);
+            if (!item) {
+                int parentId = 0;
+                if (const auto* extrusion = std::get_if<document::Extrude>(&object.parameters)) {
+                    parentId = extrusion->profile;
+                } else if (const auto* revolution = std::get_if<document::Revolve>(&object.parameters)) {
+                    parentId = revolution->profile;
+                }
+                auto* parent = items_.value(parentId);
+                item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree_);
+                items_.insert(object.id, item);
+                item->setData(0, objectIdRole, object.id);
+                if (parent) {
+                    parent->setExpanded(true);
+                }
+            }
+            const auto details = objectDetails(object);
+            const auto error = QString::fromStdString(object.error);
+            item->setText(0, objectName(object));
+            item->setText(1, details);
+            item->setToolTip(1, details);
+            item->setText(2, object.status == document::Status::Failed ? tr("Invalid")
+                           : object.status == document::Status::Blocked ? tr("Blocked") : QString{});
+            item->setToolTip(2, error);
+            item->setIcon(0, error.isEmpty() ? QIcon{} : style()->standardIcon(QStyle::SP_MessageBoxWarning));
+            item->setCheckState(0, object.visible ? Qt::Checked : Qt::Unchecked);
+        }
+        tree_->setCurrentItem(items_.value(selection));
+        if (auto* current = tree_->currentItem()) {
+            tree_->scrollToItem(current);
+        }
+    }
+    viewport_->selectObject(selectedId());
+    updateSelection();
+}
+
+int MainWindow::selectedId() const
+{
+    const auto* item = tree_->currentItem();
+    return item ? item->data(0, objectIdRole).toInt() : 0;
+}
+
+void MainWindow::updateSelection()
+{
+    const auto* object = document_.find(selectedId());
+    properties_->showObject(object, object ? objectName(*object) : QString{},
+                            object ? objectDetails(*object) : QString{});
+    updateActions();
 }
 
 void MainWindow::updateActions()
@@ -243,19 +319,79 @@ void MainWindow::updateActions()
         return;
     }
     const bool drawing = pages_->currentWidget() == sketchEditor_;
-    const auto* item = tree_->currentItem();
-    const bool sketch = item && item->data(0, sketchRole).toBool();
-    const auto bodies = std::count_if(items_.begin(), items_.end(),
-        [](const QTreeWidgetItem* row) { return !row->data(0, sketchRole).toBool(); });
+    const auto* object = document_.find(selectedId());
+    const bool sketch = object && std::holds_alternative<geometry::Sketch>(object->parameters);
+    const auto validBody = [](const document::Object& candidate) {
+        return candidate.status == document::Status::Ready
+            && !std::holds_alternative<geometry::Sketch>(candidate.parameters);
+    };
+    const auto bodies = std::count_if(document_.objects().begin(), document_.objects().end(), validBody);
     newScene_->setEnabled(!drawing);
+    undo_->setEnabled(!drawing && document_.canUndo());
+    redo_->setEnabled(!drawing && document_.canRedo());
     createMenu_->setEnabled(!drawing);
     editMenu_->setEnabled(!drawing);
     viewMenu_->setEnabled(!drawing);
     sketchMenu_->setEnabled(!drawing);
     tree_->setEnabled(!drawing);
+    properties_->setEnabled(!drawing);
     extrude_->setEnabled(!drawing && sketch);
     revolve_->setEnabled(!drawing && sketch);
-    booleanMenu_->setEnabled(!drawing && item && !sketch && bodies >= 2);
+    booleanMenu_->setEnabled(!drawing && object && validBody(*object) && bodies >= 2);
+}
+
+QString MainWindow::objectName(const document::Object& object) const
+{
+    const auto name = std::visit([this](const auto& operation) -> QString {
+        using Type = std::decay_t<decltype(operation)>;
+        if constexpr (std::is_same_v<Type, document::Primitive>) {
+            switch (operation.kind) {
+            case geometry::Primitive::Cube: return tr("Cube");
+            case geometry::Primitive::Cylinder: return tr("Cylinder");
+            case geometry::Primitive::Sphere: return tr("Sphere");
+            }
+        } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
+            return tr("Sketch");
+        } else if constexpr (std::is_same_v<Type, document::Extrude>) {
+            return tr("Extrude");
+        } else if constexpr (std::is_same_v<Type, document::Revolve>) {
+            return tr("Revolve");
+        } else {
+            switch (operation.operation) {
+            case geometry::BooleanOperation::Union: return tr("Union");
+            case geometry::BooleanOperation::Difference: return tr("Cut");
+            case geometry::BooleanOperation::Intersection: return tr("Intersection");
+            }
+        }
+        return tr("Object");
+    }, object.parameters);
+    return tr("%1 %2").arg(name).arg(object.id);
+}
+
+QString MainWindow::objectDetails(const document::Object& object) const
+{
+    return std::visit([this](const auto& operation) -> QString {
+        using Type = std::decay_t<decltype(operation)>;
+        const auto source = [this](int id) {
+            const auto* input = document_.find(id);
+            return input ? objectName(*input) : QString::number(id);
+        };
+        if constexpr (std::is_same_v<Type, geometry::Sketch>) {
+            switch (operation.plane) {
+            case geometry::Plane::XY: return tr("Plane XY");
+            case geometry::Plane::XZ: return tr("Plane XZ");
+            case geometry::Plane::YZ: return tr("Plane YZ");
+            }
+        } else if constexpr (std::is_same_v<Type, document::Extrude>) {
+            return tr("%1 · %2 mm").arg(source(operation.profile)).arg(operation.distance);
+        } else if constexpr (std::is_same_v<Type, document::Revolve>) {
+            return tr("%1 · %2° · %3 axis, offset %4 mm").arg(source(operation.profile)).arg(operation.angle)
+                .arg(operation.axis == geometry::Axis::U ? "U" : "V").arg(operation.offset);
+        } else if constexpr (std::is_same_v<Type, document::Boolean>) {
+            return tr("%1 and %2").arg(source(operation.first), source(operation.second));
+        }
+        return {};
+    }, object.parameters);
 }
 
 void MainWindow::beginSketch(geometry::Plane plane)
@@ -268,13 +404,13 @@ void MainWindow::beginSketch(geometry::Plane plane)
 
 void MainWindow::finishSketch()
 {
-    const auto id = viewport_->addSketch(sketchEditor_->sketch());
-    if (!id) {
-        return;
+    const auto id = addFeature(tr("Finish sketch"), [this] {
+        return document_.addSketch(sketchEditor_->sketch());
+    });
+    if (id) {
+        leaveSketch();
+        viewport_->fitScene();
     }
-    leaveSketch();
-    viewport_->fitScene();
-    selectTreeObject(id);
 }
 
 void MainWindow::leaveSketch()
@@ -284,18 +420,58 @@ void MainWindow::leaveSketch()
     updateActions();
 }
 
-void MainWindow::selectTreeObject(int id)
+int MainWindow::addFeature(const QString& operation, const std::function<int()>& action, bool select)
 {
-    if (auto* item = items_.value(id)) {
-        tree_->setCurrentItem(item);
-        tree_->scrollToItem(item);
+    try {
+        const auto id = action();
+        refreshDocument(select ? id : selectedId());
+        if (pages_->currentWidget() == viewport_) {
+            viewport_->fitScene();
+        }
+        report(tr("Created %1").arg(objectName(*document_.find(id))));
+        return id;
+    } catch (const std::exception& error) {
+        showSceneError(tr("%1: %2").arg(operation, QString::fromUtf8(error.what())));
+        return 0;
+    }
+}
+
+void MainWindow::editFeature(int id, const std::function<bool()>& action)
+{
+    try {
+        if (!action()) {
+            return;
+        }
+        refreshDocument(id);
+        const auto& object = *document_.find(id);
+        if (object.status != document::Status::Ready) {
+            showSceneError(tr("%1: %2").arg(objectName(object), QString::fromStdString(object.error)));
+            return;
+        }
+        const auto waiting = std::count_if(document_.objects().begin(), document_.objects().end(),
+            [](const auto& candidate) { return candidate.status != document::Status::Ready; });
+        report(waiting ? tr("Rebuilt %1. %2 operations need attention in the model tree.")
+                         .arg(objectName(object)).arg(waiting)
+                       : tr("Rebuilt %1 and its dependent operations.").arg(objectName(object)));
+    } catch (const std::exception& error) {
+        showSceneError(QString::fromUtf8(error.what()));
+    }
+}
+
+void MainWindow::restoreHistory(bool undo)
+{
+    const auto selection = selectedId();
+    if (undo ? document_.undo() : document_.redo()) {
+        refreshDocument(selection);
+        report(undo ? tr("Undone") : tr("Redone"));
     }
 }
 
 void MainWindow::extrudeCurrent()
 {
-    auto* item = tree_->currentItem();
-    if (!item || !item->data(0, sketchRole).toBool()) {
+    const auto id = selectedId();
+    const auto* object = document_.find(id);
+    if (!object || !std::holds_alternative<geometry::Sketch>(object->parameters)) {
         return;
     }
     bool accepted = false;
@@ -303,14 +479,15 @@ void MainWindow::extrudeCurrent()
         tr("Distance along the normal (mm). Negative values reverse direction."),
         30, -100000, 100000, 2, &accepted);
     if (accepted) {
-        selectTreeObject(viewport_->extrudeSketch(item->data(0, objectIdRole).toInt(), distance));
+        addFeature(tr("Extrude"), [this, id, distance] { return document_.addExtrude(id, distance); });
     }
 }
 
 void MainWindow::revolveCurrent()
 {
-    auto* item = tree_->currentItem();
-    if (!item || !item->data(0, sketchRole).toBool()) {
+    const auto id = selectedId();
+    const auto* object = document_.find(id);
+    if (!object || !std::holds_alternative<geometry::Sketch>(object->parameters)) {
         return;
     }
     QDialog dialog(this);
@@ -338,26 +515,27 @@ void MainWindow::revolveCurrent()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() == QDialog::Accepted) {
         const auto direction = axis->currentIndex() == 0 ? geometry::Axis::U : geometry::Axis::V;
-        selectTreeObject(viewport_->revolveSketch(item->data(0, objectIdRole).toInt(),
-                                                 direction, offset->value(), angle->value()));
+        addFeature(tr("Revolve"), [this, id, direction, offset, angle] {
+            return document_.addRevolve(id, direction, offset->value(), angle->value());
+        });
     }
 }
 
 void MainWindow::combineCurrent(geometry::BooleanOperation operation)
 {
-    const auto* current = tree_->currentItem();
-    if (!current || current->data(0, sketchRole).toBool()) {
+    const auto first = selectedId();
+    const auto* current = document_.find(first);
+    if (!current || current->status != document::Status::Ready
+        || std::holds_alternative<geometry::Sketch>(current->parameters)) {
         return;
     }
-    auto ids = items_.keys();
-    std::sort(ids.begin(), ids.end());
     QStringList names;
     QList<int> candidates;
-    for (const int id : ids) {
-        const auto* item = items_.value(id);
-        if (item != current && !item->data(0, sketchRole).toBool()) {
-            names.append(item->text(0));
-            candidates.append(id);
+    for (const auto& object : document_.objects()) {
+        if (object.id != first && object.status == document::Status::Ready
+            && !std::holds_alternative<geometry::Sketch>(object.parameters)) {
+            names.append(objectName(object));
+            candidates.append(object.id);
         }
     }
     if (names.isEmpty()) {
@@ -365,15 +543,23 @@ void MainWindow::combineCurrent(geometry::BooleanOperation operation)
     }
     bool accepted = false;
     const auto selected = QInputDialog::getItem(this, tr("Combine bodies"),
-        tr("First body: %1. Select the second body. Cut removes it from the first.").arg(current->text(0)),
+        tr("First body: %1. Select the second body. Cut removes it from the first.").arg(objectName(*current)),
         names, 0, false, &accepted);
     if (accepted) {
         const auto index = names.indexOf(selected);
         if (index >= 0) {
-            selectTreeObject(viewport_->combineBodies(current->data(0, objectIdRole).toInt(),
-                                                      candidates.at(index), operation));
+            const auto second = candidates.at(index);
+            addFeature(tr("Combine bodies"), [this, first, second, operation] {
+                return document_.addBoolean(first, second, operation);
+            });
         }
     }
+}
+
+void MainWindow::report(const QString& message)
+{
+    statusBar()->showMessage(message);
+    writeLog(message);
 }
 
 void MainWindow::writeLog(const QString& message)

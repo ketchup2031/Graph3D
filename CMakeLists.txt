@@ -25,6 +25,10 @@ target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
 target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO)
 
+add_library(graph3d_document STATIC src/document/Document.cpp)
+set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
+
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
 qt_add_resources(Graph3D app_icon PREFIX "/" FILES resources/icons/graph3d.png)
@@ -37,10 +41,11 @@ if(WIN32)
     target_sources(Graph3D PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Graph3D.rc")
 endif()
 add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
-    src/gui/SketchEditor.h src/viewport/Viewport.cpp
+    src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h
+    src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
-target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_geometry
+target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
     PRIVATE TKV3d TKOpenGl TKService)
 target_link_libraries(Graph3D PRIVATE graph3d_ui)
 
@@ -60,6 +65,11 @@ if(BUILD_TESTING)
     set_target_properties(sketch_modeling_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(sketch_modeling_test PRIVATE graph3d_geometry TKTopAlgo)
     add_test(NAME sketch_modeling COMMAND sketch_modeling_test)
+
+    add_executable(document_test tests/document/DocumentTest.cpp)
+    set_target_properties(document_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(document_test PRIVATE graph3d_document TKTopAlgo)
+    add_test(NAME document COMMAND document_test)
 
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)
