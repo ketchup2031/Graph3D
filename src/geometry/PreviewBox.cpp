@@ -1,7 +1,6 @@
 #include "geometry/PreviewBox.h"
 
-#include <BRepCheck_Analyzer.hxx>
-#include <BRepPrimAPI_MakeBox.hxx>
+#include "geometry/Primitives.h"
 #include <BRep_Tool.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -12,7 +11,7 @@
 
 #include <stdexcept>
 
-namespace mechforge::geometry {
+namespace graph3d::geometry {
 namespace {
 
 Point pointOf(const TopoDS_Vertex& vertex)
@@ -26,10 +25,7 @@ Point pointOf(const TopoDS_Vertex& vertex)
 std::vector<Segment> makePreviewBox()
 {
     try {
-        const TopoDS_Shape shape = BRepPrimAPI_MakeBox(100.0, 100.0, 100.0).Shape();
-        if (shape.IsNull() || !BRepCheck_Analyzer(shape).IsValid()) {
-            throw std::runtime_error("OCCT did not produce a valid test solid.");
-        }
+        const TopoDS_Shape shape = makePrimitive(Primitive::Cube);
 
         TopTools_IndexedMapOfShape edges;
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
@@ -47,4 +43,4 @@ std::vector<Segment> makePreviewBox()
     }
 }
 
-}  // namespace mechforge::geometry
+}  // namespace graph3d::geometry

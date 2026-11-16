@@ -8,9 +8,9 @@
 
 int main()
 {
-    const auto edges = mechforge::geometry::makePreviewBox();
+    const auto edges = graph3d::geometry::makePreviewBox();
     std::set<std::pair<int, int>> uniqueEdges;
-    auto cornerIndex = [](const mechforge::geometry::Point& p) {
+    auto cornerIndex = [](const graph3d::geometry::Point& p) {
         const std::array coordinates{p.x, p.y, p.z};
         int index = 0;
         for (double value : coordinates) {

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-namespace mechforge::geometry {
+namespace graph3d::geometry {
 
 struct Point {
     double x;
@@ -18,4 +18,4 @@ struct Segment {
 // Returns the straight edges of a valid 100 × 100 × 100 mm OCCT solid.
 std::vector<Segment> makePreviewBox();
 
-}  // namespace mechforge::geometry
+}  // namespace graph3d::geometry
