@@ -64,6 +64,11 @@ private:
     void measureBodyDistance();
     void transformCurrent(const QString& title, const geometry::BodyTransform& defaults);
     void configureAssembly(int id);
+    void insertLinkedComponent(bool replace);
+    void updateLinkedComponents(bool selected);
+    void editPartProperties();
+    void showAssemblyInterference();
+    void showAssemblyStructure();
     void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
@@ -114,6 +119,13 @@ private:
     QAction* revolve_ = nullptr;
     QAction* drawing_ = nullptr;
     QAction* createAssembly_ = nullptr;
+    QAction* insertLinked_ = nullptr;
+    QAction* updateLinked_ = nullptr;
+    QAction* updateSelectedLink_ = nullptr;
+    QAction* relink_ = nullptr;
+    QAction* partProperties_ = nullptr;
+    QAction* interference_ = nullptr;
+    QAction* assemblyStructure_ = nullptr;
     QList<QAction*> machiningActions_;
     std::optional<Machining> pendingMachining_;
     QAction* finishEdgeSet_ = nullptr;

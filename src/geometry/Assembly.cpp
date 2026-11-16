@@ -16,9 +16,8 @@
 #include <vector>
 
 namespace graph3d::geometry {
-namespace {
 
-gp_Trsf localPlacement(const Placement& placement)
+gp_Trsf assemblyPlacement(const Placement& placement)
 {
     gp_Trsf transform;
     for (const auto value : placement.offset) {
@@ -42,9 +41,7 @@ gp_Trsf localPlacement(const Placement& placement)
     return transform;
 }
 
-}  // namespace
-
-TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies)
+TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates)
 {
     if (bodies.size() < minAssemblyComponents || bodies.size() > maxAssemblyComponents) {
         throw std::invalid_argument("An assembly needs 2 to 100 components.");
@@ -52,15 +49,14 @@ TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies)
     BRep_Builder builder;
     TopoDS_Compound assembly;
     builder.MakeCompound(assembly);
-    std::vector<gp_Trsf> placements;
-    placements.reserve(bodies.size() + 1);
-    placements.emplace_back(); // Assembly origin, referenced as anchor 0.
+    const auto solution = solveAssembly(bodies, mates);
+    if (!solution.error.empty()) {
+        const auto prefix = solution.failedMate < 0 ? std::string{} : "Mate #" + std::to_string(solution.failedMate + 1) + ": ";
+        throw std::invalid_argument(prefix + solution.error);
+    }
     int totalSolids = 0;
-    for (const auto& body : bodies) {
-        const int anchor = body.placement.anchor;
-        if (anchor < 0 || static_cast<std::size_t>(anchor) >= placements.size()) {
-            throw std::invalid_argument("An anchor must be the origin or an earlier component.");
-        }
+    for (std::size_t index = 0; index < bodies.size(); ++index) {
+        const auto& body = bodies[index];
         if (body.shape.IsNull() || !TopExp_Explorer(body.shape, TopAbs_SOLID).More()) {
             throw std::invalid_argument("Each component needs a solid body.");
         }
@@ -69,9 +65,8 @@ TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies)
                 throw std::invalid_argument("An assembly can contain at most 1000 solids.");
             }
         }
-        placements.push_back(placements[anchor] * localPlacement(body.placement));
         // Copy geometry so coincident instances remain separate solids during export.
-        builder.Add(assembly, BRepBuilderAPI_Transform(body.shape, placements.back(), true).Shape());
+        builder.Add(assembly, BRepBuilderAPI_Transform(body.shape, solution.components[index].transform, true).Shape());
     }
     return assembly;
 }

@@ -19,7 +19,7 @@ PropertyPanel::PropertyPanel(QWidget* parent)
       axis_(new QComboBox(this)), offset_(new QDoubleSpinBox(this)), angle_(new QDoubleSpinBox(this)),
       diameter_(new QDoubleSpinBox(this)), depth_(new QDoubleSpinBox(this)),
       through_(new QCheckBox(tr("Through"), this)), edgeSize_(new QDoubleSpinBox(this)),
-      transform_(new TransformEditor(this)), editComponents_(new QPushButton(tr("Edit component placement…"), this)),
+      transform_(new TransformEditor(this)), editComponents_(new QPushButton(tr("Edit components and mates…"), this)),
       apply_(new QPushButton(tr("Apply"), this))
 {
     setObjectName(QStringLiteral("propertyPanel"));

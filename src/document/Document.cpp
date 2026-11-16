@@ -9,6 +9,7 @@
 #include <TopoDS.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <set>
 #include <stdexcept>
@@ -138,6 +139,16 @@ void validateAdvancedInputs(const std::vector<Object>& state, const Parameters& 
     }, parameters);
 }
 
+std::vector<geometry::PlacedBody> placedBodies(const std::vector<Object>& state, const Assembly& assembly)
+{
+    std::vector<geometry::PlacedBody> bodies;
+    bodies.reserve(assembly.components.size());
+    for (const auto& component : assembly.components) {
+        bodies.push_back({objectAt(state, component.body).shape, component.placement, component.fixed});
+    }
+    return bodies;
+}
+
 TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters)
 {
     return std::visit(Visit{
@@ -171,13 +182,13 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [&state](const Transform& p) {
             return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
         },
-        [&state](const Assembly& p) {
-            std::vector<geometry::PlacedBody> bodies;
-            bodies.reserve(p.components.size());
-            for (const auto& component : p.components) {
-                bodies.push_back({objectAt(state, component.body).shape, component.placement});
+        [&state](const Assembly& p) { return geometry::makeAssembly(placedBodies(state, p), p.mates); },
+        [](const LinkedComponent& p) {
+            if (p.snapshot.IsNull() || !TopExp_Explorer(p.snapshot, TopAbs_SOLID).More()
+                || !BRepCheck_Analyzer(p.snapshot).IsValid()) {
+                throw std::invalid_argument("The linked component has no valid saved geometry.");
             }
-            return geometry::makeAssembly(bodies);
+            return p.snapshot;
         },
         [](const geometry::DatumPlane& p) { return geometry::datumOutline(p); },
         [](const geometry::DatumAxis& p) { return geometry::datumOutline(p); },
@@ -387,6 +398,89 @@ ObjectId Document::addAssembly(Assembly assembly)
     return append(std::move(assembly));
 }
 
+ObjectId Document::addLinkedComponent(LinkedComponent component)
+{
+    return append(std::move(component));
+}
+
+bool Document::refreshLinkedComponents(std::vector<std::pair<ObjectId, LinkedComponent>> components)
+{
+    auto next = objects_;
+    std::size_t first = next.size();
+    std::vector<std::size_t> changed;
+    for (auto& [id, incoming] : components) {
+        const auto* before = std::get_if<LinkedComponent>(&objectAt(objects_, id).parameters);
+        if (!before) {
+            throw std::invalid_argument("Select a linked component.");
+        }
+        if (before->sourcePath == incoming.sourcePath && before->sourceObject == incoming.sourceObject
+            && before->digest == incoming.digest && before->record == incoming.record) {
+            continue;
+        }
+        const auto index = static_cast<std::size_t>(id - 1);
+        first = std::min(first, index);
+        changed.push_back(index);
+        next[index].parameters = std::move(incoming);
+    }
+    if (first == next.size()) {
+        return false;
+    }
+    // Rebuild once so simultaneous updates are evaluated against all new snapshots.
+    rebuild(next, first, true);
+    for (const auto index : changed) {
+        if (next[index].status != Status::Ready) {
+            throw std::invalid_argument(next[index].error);
+        }
+    }
+    commit(std::move(next));
+    return true;
+}
+
+bool Document::setPartProperties(ObjectId id, PartProperties properties)
+{
+    const auto& object = objectAt(objects_, id);
+    requireBody(object);
+    if (std::ranges::any_of(std::array{&properties.designation, &properties.name, &properties.material, &properties.note},
+        [](const auto* value) { return value->size() > 4000; })) {
+        throw std::invalid_argument("Invalid component properties.");
+    }
+    if (object.properties == properties) {
+        return false;
+    }
+    auto next = objects_;
+    next[id - 1].properties = std::move(properties);
+    commit(std::move(next));
+    return true;
+}
+
+ComponentRecord Document::componentRecord(ObjectId id) const
+{
+    const auto& object = objectAt(objects_, id);
+    ComponentRecord record;
+    if (const auto* linked = std::get_if<LinkedComponent>(&object.parameters)) {
+        record = linked->record;
+    }
+    for (auto field : {&PartProperties::name, &PartProperties::designation, &PartProperties::material, &PartProperties::note}) {
+        if (!(object.properties.*field).empty()) {
+            record.properties.*field = object.properties.*field;
+        }
+    }
+    if (object.densityKgM3) {
+        record.densityKgM3 = object.densityKgM3;
+    }
+    if (const auto* assembly = std::get_if<Assembly>(&object.parameters)) {
+        for (const auto& component : assembly->components) {
+            record.children.push_back(componentRecord(component.body));
+        }
+    }
+    return record;
+}
+
+geometry::AssemblySolution Document::assemblySolution(const Assembly& assembly) const
+{
+    return geometry::solveAssembly(placedBodies(objects_, assembly), assembly.mates);
+}
+
 Document Document::fromDefinitions(std::vector<Definition> definitions)
 {
     Document document;
@@ -429,7 +523,7 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
                 throw std::invalid_argument("Invalid references in a boolean operation.");
             }
         }
-        records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible, definition.densityKgM3});
+        records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible, definition.densityKgM3, std::move(definition.properties)});
     }
     rebuild(records, 0, true);
     for (const auto& object : records) {
@@ -555,7 +649,7 @@ bool Document::editAssembly(ObjectId id, Assembly assembly)
                                          &Component::body, &Component::body)) {
         throw std::invalid_argument("Edit the placement of the existing assembly components.");
     }
-    if (existing->components == assembly.components) {
+    if (existing->components == assembly.components && existing->mates == assembly.mates) {
         return false;
     }
     auto next = objects_;

@@ -13,6 +13,7 @@
 #include <array>
 #include <QApplication>
 #include <QCheckBox>
+#include <QTabWidget>
 #include <QColor>
 #include <QComboBox>
 #include <cmath>
@@ -1454,6 +1455,104 @@ private slots:
         apply->click();
         QCOMPARE(count->value(), 2);
         QVERIFY(source->text(2).isEmpty());
+    }
+
+    void linkedAssemblyThroughMenus()
+    {
+        using namespace graph3d;
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        const auto flange = folder.filePath("flange.graph3d");
+        const auto bushing = folder.filePath("bushing.graph3d");
+        document::Document source, second;
+        const auto profile = source.addSketch({geometry::Plane::XY, {geometry::Circle{{0, 0}, 25},
+            geometry::Circle{{0, 0}, 10}}});
+        const auto part = source.addExtrude(profile, 10);
+        source.setPartProperties(part, {"G3D-01", "Flange", "Steel", ""});
+        const auto otherProfile = second.addSketch({geometry::Plane::XY, {geometry::Circle{{0, 0}, 10}}});
+        second.addExtrude(otherProfile, 20);
+        io::saveProject(flange, source);
+        io::saveProject(bushing, second);
+
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        const auto action = [&window](const char* name) { return window.findChild<QAction*>(name); };
+        const auto choose = [&](const QString& path) {
+            QTimer::singleShot(0, [path] {
+                if (auto* chooser = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    chooser->selectFile(path);
+                    static_cast<QDialog*>(chooser)->accept();
+                }
+            });
+            action("insertLinkedComponent")->trigger();
+        };
+        choose(flange);
+        choose(bushing);
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        QCOMPARE(tree->topLevelItemCount(), 3);
+        bool sawMate = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != "assemblyDialog") {
+                return;
+            }
+            auto* table = dialog->findChild<QTableWidget*>("assemblyComponents");
+            if (!table || table->rowCount() != 2) {
+                dialog->reject();
+                return;
+            }
+            qobject_cast<QComboBox*>(table->cellWidget(0, 0))->setCurrentIndex(1);
+            qobject_cast<QComboBox*>(table->cellWidget(1, 0))->setCurrentIndex(2);
+            qobject_cast<QCheckBox*>(table->cellWidget(0, 8))->setChecked(true);
+            dialog->findChild<QTabWidget*>()->setCurrentIndex(1);
+            QTimer::singleShot(0, [] {
+                if (auto* mate = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    mate && mate->objectName() == "assemblyMateDialog") {
+                    auto* types = mate->findChild<QComboBox*>("mateKind");
+                    types->setCurrentIndex(1);
+                    auto* target = mate->findChild<QComboBox*>("mateReferenceSurface");
+                    for (int i = 0; i < target->count(); ++i) {
+                        if (target->itemText(i).contains("Ø20")) {
+                            target->setCurrentIndex(i);
+                        }
+                    }
+                    auto* ok = mate->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+                    if (ok->isEnabled()) {
+                        ok->click();
+                    } else {
+                        mate->reject();
+                    }
+                }
+            });
+            dialog->findChild<QPushButton*>("addAssemblyMate")->click();
+            const auto description = dialog->findChild<QLabel*>("assemblyMateStatus")->text();
+            sawMate = description.contains("Component 2: 1 translation, 1 rotation")
+                && dialog->findChild<QListWidget*>("assemblyMates")->count() == 1;
+            dialog->accept();
+        });
+        action("createAssembly")->trigger();
+        QVERIFY(sawMate);
+        auto* assembly = tree->currentItem();
+        QVERIFY(assembly && assembly->text(0).startsWith("Assembly") && assembly->text(2).isEmpty());
+        QVERIFY(action("updateLinkedComponents")->isEnabled());
+        QVERIFY(action("checkInterference")->isEnabled());
+        bool checkRan = false;
+        QTimer::singleShot(0, [&] {
+            if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                checkRan = box->text() == "No overlapping solids.";
+                box->accept();
+            }
+        });
+        action("checkInterference")->trigger();
+        QVERIFY(checkRan);
+        QVERIFY(source.editExtrude(part, 12));
+        io::saveProject(flange, source);
+        action("updateLinkedComponents")->trigger();
+        QVERIFY(assembly->text(2).isEmpty());
+        QVERIFY(window.statusBar()->currentMessage().contains("Linked components updated"));
     }
 
     void advancedModelingThroughMenus()

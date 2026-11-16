@@ -11,6 +11,7 @@
 #include "gui/TransformEditor.h"
 #include "gui/UserPreferences.h"
 #include "io/Exchange.h"
+#include "io/LinkedComponents.h"
 #include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
 
@@ -34,6 +35,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QIcon>
 #include <QMenu>
 #include <QMenuBar>
@@ -382,8 +384,23 @@ void MainWindow::createMenus()
     transformAction(tr("Circular array"), "makePolarArray", geometry::PolarArray{geometry::ModelAxis::Z, 4, 360});
     transformAction(tr("Mirror"), "makeMirror", geometry::Mirror{geometry::Plane::YZ, 0});
 
-    createAssembly_ = menuAction(model, tr("Create assembly…"), "createAssembly");
+    auto* assemblies = model->addMenu(tr("Assemblies"));
+    createAssembly_ = menuAction(assemblies, tr("Create assembly…"), "createAssembly");
     connect(createAssembly_, &QAction::triggered, this, [this] { configureAssembly(0); });
+    insertLinked_ = menuAction(assemblies, tr("Insert component from file…"), "insertLinkedComponent");
+    updateLinked_ = menuAction(assemblies, tr("Update all linked components"), "updateLinkedComponents");
+    updateSelectedLink_ = menuAction(assemblies, tr("Update selected component"), "updateSelectedLink");
+    relink_ = menuAction(assemblies, tr("Change component source…"), "relinkComponent");
+    partProperties_ = menuAction(assemblies, tr("Component properties…"), "componentProperties");
+    interference_ = menuAction(assemblies, tr("Check component interference…"), "checkInterference");
+    assemblyStructure_ = menuAction(assemblies, tr("Assembly structure…"), "assemblyStructure");
+    connect(insertLinked_, &QAction::triggered, this, [this] { insertLinkedComponent(false); });
+    connect(updateLinked_, &QAction::triggered, this, [this] { updateLinkedComponents(false); });
+    connect(updateSelectedLink_, &QAction::triggered, this, [this] { updateLinkedComponents(true); });
+    connect(relink_, &QAction::triggered, this, [this] { insertLinkedComponent(true); });
+    connect(partProperties_, &QAction::triggered, this, &MainWindow::editPartProperties);
+    connect(interference_, &QAction::triggered, this, &MainWindow::showAssemblyInterference);
+    connect(assemblyStructure_, &QAction::triggered, this, &MainWindow::showAssemblyStructure);
 
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
     auto* newDraft = menuAction(drawingMenu, tr("New 2D drawing…"), "newDrawing");
@@ -499,7 +516,9 @@ void MainWindow::createModelTree()
     connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
         const auto id = item->data(0, objectIdRole).toInt();
         const auto* object = document_.find(id);
-        if (object && document::isAdvanced(object->parameters)) {
+        if (object && std::holds_alternative<document::Assembly>(object->parameters)) {
+            configureAssembly(id);
+        } else if (object && document::isAdvanced(object->parameters)) {
             configureAdvanced(objectName(*object), object->parameters, id);
         } else {
             editSketch(id);
@@ -647,7 +666,20 @@ void MainWindow::updateActions()
     revolve_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
     booleanMenu_->setEnabled(modeling && object && validBody(*object) && bodies >= 2);
     transformMenu_->setEnabled(modeling && !pendingMachining_ && object && validBody(*object));
-    createAssembly_->setEnabled(modeling && !pendingMachining_ && bodies > 0);
+    createAssembly_->setEnabled(available && bodies > 0);
+    const auto* linked = object ? std::get_if<document::LinkedComponent>(&object->parameters) : nullptr;
+    const bool hasLinks = std::ranges::any_of(document_.objects(), [](const auto& candidate) {
+        return std::holds_alternative<document::LinkedComponent>(candidate.parameters);
+    });
+    const bool assemblyObject = object && (std::holds_alternative<document::Assembly>(object->parameters)
+        || (linked && !linked->record.children.empty()));
+    insertLinked_->setEnabled(available);
+    updateLinked_->setEnabled(available && hasLinks);
+    updateSelectedLink_->setEnabled(available && linked);
+    relink_->setEnabled(available && linked);
+    partProperties_->setEnabled(available && object && document::isBody(object->parameters));
+    interference_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
+    assemblyStructure_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
     drawing_->setEnabled(modeling && object && validBody(*object));
     for (auto* action : machiningActions_) {
         action->setEnabled(modeling && !pendingMachining_ && object && object->visible && validBody(*object));
@@ -656,7 +688,7 @@ void MainWindow::updateActions()
 
 QString MainWindow::objectName(const document::Object& object) const
 {
-    const auto name = std::visit([this](const auto& operation) -> QString {
+    const auto name = std::visit([this, &object](const auto& operation) -> QString {
         using Type = std::decay_t<decltype(operation)>;
         if constexpr (std::is_same_v<Type, document::Primitive>) {
             switch (operation.kind) {
@@ -682,6 +714,9 @@ QString MainWindow::objectName(const document::Object& object) const
             return tr("Extrude");
         } else if constexpr (std::is_same_v<Type, document::Revolve>) {
             return tr("Revolve");
+        } else if constexpr (std::is_same_v<Type, document::LinkedComponent>) {
+            const auto name = object.properties.name.empty() ? operation.record.properties.name : object.properties.name;
+            return name.empty() ? tr("Linked component") : QString::fromStdString(name);
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
             return tr("Imported STEP");
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
@@ -740,6 +775,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
                 .arg(operation.axis == geometry::Axis::U ? "U" : "V").arg(operation.offset);
         } else if constexpr (std::is_same_v<Type, document::Boolean>) {
             return tr("%1 and %2").arg(source(operation.first), source(operation.second));
+        } else if constexpr (std::is_same_v<Type, document::LinkedComponent>) {
+            return tr("%1 · object #%2").arg(QDir::toNativeSeparators(QString::fromStdString(operation.sourcePath))).arg(operation.sourceObject);
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
             return QString::fromStdString(operation.name);
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
@@ -1227,7 +1264,7 @@ void MainWindow::configureAssembly(int id)
     if (sources.isEmpty()) {
         return;
     }
-    AssemblyDialog dialog(std::move(sources), existing, this);
+    AssemblyDialog dialog(document_, std::move(sources), existing, this);
     if (dialog.exec() == QDialog::Accepted) {
         const auto assembly = dialog.assembly();
         if (existing) {
@@ -1236,6 +1273,197 @@ void MainWindow::configureAssembly(int id)
             addFeature(tr("Create assembly"), [this, &assembly] { return document_.addAssembly(assembly); });
         }
     }
+}
+
+void MainWindow::insertLinkedComponent(bool replace)
+{
+    const int id = selectedId();
+    const auto* selected = document_.find(id);
+    const auto* old = replace && selected ? std::get_if<document::LinkedComponent>(&selected->parameters) : nullptr;
+    if (replace && !old) {
+        return;
+    }
+    const auto title = replace ? tr("Change component source") : tr("Insert component from file");
+    const auto path = QFileDialog::getOpenFileName(this, title, old ? QString::fromStdString(old->sourcePath) : projectPath_,
+        tr("Graph3D projects (*.graph3d)"), nullptr,
+        (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+    if (path.isEmpty()) {
+        return;
+    }
+    try {
+        const auto source = io::openProject(path);
+        QStringList names;
+        std::vector<int> ids;
+        for (const auto& candidate : source.objects()) {
+            if (document::isBody(candidate.parameters) && candidate.status == document::Status::Ready) {
+                const auto record = source.componentRecord(candidate.id);
+                const auto name = record.properties.name.empty() ? objectName(candidate)
+                    : tr("%1 · object #%2").arg(QString::fromStdString(record.properties.name)).arg(candidate.id);
+                names << (candidate.visible ? name : tr("%1 (hidden)").arg(name));
+                ids.push_back(candidate.id);
+            }
+        }
+        if (ids.empty()) {
+            throw std::invalid_argument("The linked project has no ready solid or assembly.");
+        }
+        int selectedObject = ids.front();
+        if (ids.size() > 1) {
+            auto first = std::ranges::find_if(ids, [&](int object) {
+                return old ? old->sourceObject == object : source.find(object)->visible;
+            });
+            const int index = first == ids.end() ? 0 : static_cast<int>(first - ids.begin());
+            bool accepted = false;
+            const auto chosen = QInputDialog::getItem(this, title, tr("Source object"), names, index, false, &accepted);
+            if (!accepted) {
+                return;
+            }
+            selectedObject = ids.at(names.indexOf(chosen));
+        }
+        auto linked = io::readLinkedComponent(path, selectedObject, projectPath_);
+        if (replace) {
+            editFeature(id, [&] { return document_.refreshLinkedComponents({{id, std::move(linked)}}); });
+        } else {
+            addFeature(title, [&] { return document_.addLinkedComponent(std::move(linked)); });
+        }
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.GetMessageString()));
+    }
+}
+
+void MainWindow::updateLinkedComponents(bool selected)
+{
+    const int id = selectedId();
+    const auto title = tr("Update linked components");
+    try {
+        if (!io::updateLinkedComponents(document_, projectPath_, selected ? id : 0)) {
+            report(tr("Linked components are up to date."));
+            return;
+        }
+        refreshDocument(id);
+        const auto failed = std::ranges::find_if(document_.objects(), [](const auto& object) {
+            return std::holds_alternative<document::Assembly>(object.parameters) && object.status == document::Status::Failed;
+        });
+        report(failed == document_.objects().end() ? tr("Linked components updated.")
+            : tr("Linked components updated. Check the mates of %1.").arg(objectName(*failed)));
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.GetMessageString()));
+    }
+}
+
+void MainWindow::editPartProperties()
+{
+    const auto* object = document_.find(selectedId());
+    if (!object || !document::isBody(object->parameters)) {
+        return;
+    }
+    const int id = object->id;
+    const auto* linked = std::get_if<document::LinkedComponent>(&object->parameters);
+    const auto inherited = linked ? linked->record.properties : document::PartProperties{};
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("componentPropertiesDialog"));
+    dialog.setWindowTitle(tr("Component properties"));
+    QFormLayout form(&dialog);
+    const auto field = [&](const QString& label, const std::string& value, const std::string& fallback) {
+        auto* edit = new QLineEdit(QString::fromStdString(value), &dialog);
+        edit->setMaxLength(1000);
+        edit->setPlaceholderText(QString::fromStdString(fallback));
+        form.addRow(label, edit);
+        return edit;
+    };
+    const auto designation = field(tr("Designation"), object->properties.designation, inherited.designation);
+    const auto name = field(tr("Name"), object->properties.name, inherited.name);
+    const auto material = field(tr("Material"), object->properties.material, inherited.material);
+    const auto note = field(tr("Note"), object->properties.note, inherited.note);
+    designation->setObjectName(QStringLiteral("componentDesignation"));
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted) {
+        const document::PartProperties properties{designation->text().trimmed().toStdString(),
+            name->text().trimmed().toStdString(), material->text().trimmed().toStdString(), note->text().trimmed().toStdString()};
+        if (document_.setPartProperties(id, properties)) {
+            refreshDocument(id);
+        }
+    }
+}
+
+void MainWindow::showAssemblyInterference()
+{
+    const auto* object = document_.find(selectedId());
+    if (!object || object->status != document::Status::Ready || object->shape.IsNull()) {
+        return;
+    }
+    const auto title = tr("Component interference");
+    try {
+        const auto problems = geometry::checkInterference(object->shape);
+        QStringList lines;
+        const auto location = [](const auto& components) {
+            QStringList labels;
+            for (int part : components) {
+                labels << QString::number(part);
+            }
+            return labels.join(u'.');
+        };
+        for (std::size_t i = 0; i < std::min<std::size_t>(problems.size(), 100); ++i) {
+            const auto& overlap = problems[i];
+            lines << tr("Components %1 and %2: %3 mm³")
+                .arg(location(overlap.first), location(overlap.second)).arg(overlap.volumeMm3, 0, 'g', 8);
+        }
+        if (problems.size() > 100) {
+            lines << tr("Showing 100 of %1 intersections.").arg(problems.size());
+        }
+        QMessageBox dialog(QMessageBox::Information, title, problems.empty() ? tr("No overlapping solids.")
+            : tr("Overlapping solid pairs: %1").arg(problems.size()), QMessageBox::Ok, this);
+        if (!lines.isEmpty()) {
+            dialog.setDetailedText(lines.join(u'\n'));
+        }
+        dialog.exec();
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        QMessageBox::warning(this, title, localizedDiagnostic(error.GetMessageString()));
+    }
+}
+
+void MainWindow::showAssemblyStructure()
+{
+    const int id = selectedId();
+    if (!document_.find(id)) {
+        return;
+    }
+    const auto record = document_.componentRecord(id);
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Assembly structure"));
+    dialog.resize(720, 440);
+    QVBoxLayout layout(&dialog);
+    QTreeWidget tree;
+    tree.setHeaderLabels({tr("Component"), tr("Designation"), tr("Material"), tr("Note")});
+    layout.addWidget(&tree);
+    const auto append = [&](auto&& self, const document::ComponentRecord& item, QTreeWidgetItem* parent,
+                            const QString& number) -> void {
+        const auto& properties = item.properties;
+        auto* row = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(&tree);
+        const auto name = properties.name.empty() ? tr("Component") : QString::fromStdString(properties.name);
+        row->setText(0, number.isEmpty() ? name : number + QStringLiteral("  ") + name);
+        row->setText(1, QString::fromStdString(properties.designation));
+        row->setText(2, QString::fromStdString(properties.material));
+        row->setText(3, QString::fromStdString(properties.note));
+        for (std::size_t i = 0; i < item.children.size(); ++i) {
+            const auto index = QString::number(i + 1);
+            self(self, item.children[i], row, number.isEmpty() ? index : number + u'.' + index);
+        }
+    };
+    append(append, record, nullptr, {});
+    tree.expandAll();
+    QDialogButtonBox buttons(QDialogButtonBox::Close);
+    layout.addWidget(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.exec();
 }
 
 void MainWindow::makeHole(int id, const geometry::FaceReference& face)

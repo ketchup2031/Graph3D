@@ -229,7 +229,7 @@ QByteArray digest(const QByteArray& data)
 ModelSource openModelSource(const QString& path)
 {
     const auto bytes = readFile(path);
-    return {QDir::cleanPath(QFileInfo(path).absoluteFilePath()), digest(bytes), decodeProject(bytes)};
+    return {QDir::cleanPath(QFileInfo(path).absoluteFilePath()), digest(bytes), decodeProject(bytes, path)};
 }
 
 QByteArray currentModelDigest(const QString& path)

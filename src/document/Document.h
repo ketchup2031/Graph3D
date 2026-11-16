@@ -44,15 +44,39 @@ struct DraftAngle {
     bool operator==(const DraftAngle&) const = default;
 };
 struct Transform { ObjectId body; geometry::BodyTransform parameters; };
+struct PartProperties {
+    std::string designation;
+    std::string name;
+    std::string material;
+    std::string note;
+    bool operator==(const PartProperties&) const = default;
+};
+
+struct ComponentRecord {
+    PartProperties properties;
+    std::optional<double> densityKgM3;
+    std::vector<ComponentRecord> children;
+    bool operator==(const ComponentRecord&) const = default;
+};
+
+struct LinkedComponent {
+    std::string sourcePath;
+    ObjectId sourceObject;
+    std::string digest;
+    TopoDS_Shape snapshot;
+    ComponentRecord record;
+};
+
 struct Component {
     ObjectId body;
     geometry::Placement placement;
+    bool fixed = false;
     bool operator==(const Component&) const = default;
 };
-struct Assembly { std::vector<Component> components; };
+struct Assembly { std::vector<Component> components; std::vector<geometry::Mate> mates; };
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
-                                Sweep, Loft, Shell, DraftAngle>;
+                                Sweep, Loft, Shell, DraftAngle, LinkedComponent>;
 
 bool isBody(const Parameters& parameters);
 bool isAdvanced(const Parameters& parameters);
@@ -61,6 +85,7 @@ struct Definition {
     Parameters parameters;
     bool visible;
     std::optional<double> densityKgM3;
+    PartProperties properties;
 };
 
 enum class Status { Ready, Failed, Blocked };
@@ -73,6 +98,7 @@ struct Object {
     std::string error;
     bool visible = true;
     std::optional<double> densityKgM3;
+    PartProperties properties;
 };
 
 class Document {
@@ -91,6 +117,11 @@ public:
     bool setDensity(ObjectId id, std::optional<double> densityKgM3);
     ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
     ObjectId addAssembly(Assembly assembly);
+    ObjectId addLinkedComponent(LinkedComponent component);
+    bool refreshLinkedComponents(std::vector<std::pair<ObjectId, LinkedComponent>> components);
+    bool setPartProperties(ObjectId id, PartProperties properties);
+    ComponentRecord componentRecord(ObjectId id) const;
+    geometry::AssemblySolution assemblySolution(const Assembly& assembly) const;
     static Document fromDefinitions(std::vector<Definition> definitions);
     bool editSketch(ObjectId id, geometry::Sketch sketch);
     geometry::SketchContext sketchContext(const geometry::Sketch& sketch) const;

@@ -7,10 +7,13 @@
 #include <Standard_Failure.hxx>
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -28,6 +31,7 @@ constexpr int transformVersion = 3;
 constexpr int assemblyVersion = 4;
 constexpr int sketchVersion = 5;
 constexpr int advancedVersion = 6;
+constexpr int linkedVersion = 7;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -315,9 +319,105 @@ QJsonObject encodeTransform(const document::Transform& item)
     return data;
 }
 
-QJsonObject encodeObject(const document::Object& object)
+QJsonObject encodeProperties(const document::PartProperties& properties)
 {
-    auto data = std::visit([](const auto& item) -> QJsonObject {
+    return {{"designation", QString::fromStdString(properties.designation)}, {"name", QString::fromStdString(properties.name)},
+            {"material", QString::fromStdString(properties.material)}, {"note", QString::fromStdString(properties.note)}};
+}
+
+document::PartProperties decodeProperties(const QJsonObject& object)
+{
+    const auto read = [&](const char* field) {
+        const auto value = object.value(field);
+        if (!value.isString() || value.toString().size() > 1000) {
+            fileError(QStringLiteral("Invalid component properties."));
+        }
+        return value.toString().toStdString();
+    };
+    return {read("designation"), read("name"), read("material"), read("note")};
+}
+
+QJsonObject encodeRecord(const document::ComponentRecord& record, int depth, int& remaining)
+{
+    if (depth > 24 || --remaining < 0 || record.children.size() > geometry::maxAssemblyComponents) {
+        fileError(QStringLiteral("Invalid or oversized linked component hierarchy."));
+    }
+    QJsonArray children;
+    for (const auto& child : record.children) {
+        children.append(encodeRecord(child, depth + 1, remaining));
+    }
+    QJsonObject value{{"properties", encodeProperties(record.properties)}, {"children", children}};
+    if (record.densityKgM3) {
+        value.insert("densityKgM3", *record.densityKgM3);
+    }
+    return value;
+}
+
+document::ComponentRecord decodeRecord(const QJsonValue& value, int depth, int& remaining)
+{
+    if (depth > 24 || --remaining < 0 || !value.isObject()) {
+        fileError(QStringLiteral("Invalid or oversized linked component hierarchy."));
+    }
+    const auto object = value.toObject();
+    document::ComponentRecord result{decodeProperties(object.value("properties").toObject())};
+    if (object.contains("densityKgM3")) {
+        const auto density = number(object.value("densityKgM3"), "densityKgM3");
+        if (density <= 0 || density > 1.e9) {
+            fileError(QStringLiteral("Invalid saved material density."));
+        }
+        result.densityKgM3 = density;
+    }
+    const auto children = object.value("children").toArray();
+    if (!object.value("children").isArray() || children.size() > geometry::maxAssemblyComponents) {
+        fileError(QStringLiteral("Invalid or oversized linked component hierarchy."));
+    }
+    for (const auto child : children) {
+        result.children.push_back(decodeRecord(child, depth + 1, remaining));
+    }
+    return result;
+}
+
+QJsonObject encodeSurface(const geometry::MateSurface& surface)
+{
+    return {{"kind", surface.kind == geometry::MateKind::Plane ? "plane" : "cylinder"},
+            {"point", encodePoint3(surface.point)}, {"direction", encodePoint3(surface.direction)},
+            {"radius", encodeNumber(surface.radius)}};
+}
+
+geometry::MateSurface decodeSurface(const QJsonValue& value)
+{
+    const auto object = value.toObject();
+    const auto kind = object.value("kind").toString();
+    const auto direction = decodePoint3(object.value("direction"));
+    const double radius = number(object.value("radius"), "radius");
+    if ((kind != "plane" && kind != "cylinder")
+        || std::abs(std::hypot(direction[0], direction[1], direction[2]) - 1) > 1.e-6
+        || (kind == "plane" ? radius != 0 : radius <= 0)) {
+        fileError(QStringLiteral("Invalid mating surface."));
+    }
+    return {kind == "plane" ? geometry::MateKind::Plane : geometry::MateKind::Cylinder,
+            decodePoint3(object.value("point")), direction, radius};
+}
+
+QJsonObject encodeMate(const geometry::Mate& mate)
+{
+    return {{"component", mate.component}, {"target", mate.target}, {"moving", encodeSurface(mate.moving)},
+            {"reference", encodeSurface(mate.reference)}, {"opposite", mate.opposite}};
+}
+
+geometry::Mate decodeMate(const QJsonValue& value)
+{
+    const auto object = value.toObject();
+    if (!object.value("opposite").isBool()) {
+        fileError(QStringLiteral("Invalid assembly mate."));
+    }
+    return {integer(object.value("component"), "component"), integer(object.value("target"), "target"),
+            decodeSurface(object.value("moving")), decodeSurface(object.value("reference")), object.value("opposite").toBool()};
+}
+
+QJsonObject encodeObject(const document::Object& object, const QString& path)
+{
+    auto data = std::visit([&path](const auto& item) -> QJsonObject {
         using Type = std::decay_t<decltype(item)>;
         if constexpr (std::is_same_v<Type, document::Primitive>) {
             return {{"type", "primitive"}, {"kind", name(item.kind, primitives)}, {"x", encodeNumber(item.x)}, {"y", encodeNumber(item.y)}};
@@ -390,10 +490,28 @@ QJsonObject encodeObject(const document::Object& object)
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
             QJsonArray components;
             for (const auto& component : item.components) {
-                components.append(QJsonObject{{"body", component.body}, {"anchor", component.placement.anchor},
-                    {"offset", encodePoint3(component.placement.offset)}, {"angles", encodePoint3(component.placement.angles)}});
+                QJsonObject value{{"body", component.body}, {"anchor", component.placement.anchor},
+                    {"offset", encodePoint3(component.placement.offset)}, {"angles", encodePoint3(component.placement.angles)}};
+                if (component.fixed) {
+                    value.insert("fixed", true);
+                }
+                components.append(value);
             }
-            return {{"type", "assembly"}, {"components", components}};
+            QJsonObject result{{"type", "assembly"}, {"components", components}};
+            if (!item.mates.empty()) {
+                result.insert("mates", encodeList(item.mates, encodeMate));
+            }
+            return result;
+        } else if constexpr (std::is_same_v<Type, document::LinkedComponent>) {
+            const QFileInfo owner(path), source(QString::fromStdString(item.sourcePath));
+            if (owner == source || QDir::cleanPath(owner.absoluteFilePath()) == QDir::cleanPath(source.absoluteFilePath())) {
+                fileError(QStringLiteral("An assembly cannot be saved over one of its component sources."));
+            }
+            const auto storedPath = owner.absoluteDir().relativeFilePath(source.absoluteFilePath());
+            int remaining = 3000;
+            return {{"type", "linked-component"}, {"source", storedPath}, {"object", item.sourceObject},
+                    {"digest", QString::fromStdString(item.digest)}, {"brep", encodeBrep(item.snapshot)},
+                    {"record", encodeRecord(item.record, 0, remaining)}};
         } else {
             return {{"type", "imported"}, {"name", QString::fromStdString(item.name)},
                     {"brep", encodeBrep(item.sourceShape)}};
@@ -401,15 +519,34 @@ QJsonObject encodeObject(const document::Object& object)
     }, object.parameters);
     data.insert("id", object.id);
     data.insert("visible", object.visible);
+    if (object.properties != document::PartProperties{}) {
+        data.insert("properties", encodeProperties(object.properties));
+    }
     if (object.densityKgM3) {
         data.insert("densityKgM3", encodeNumber(*object.densityKgM3));
     }
     return data;
 }
 
-document::Parameters decodeObject(const QJsonObject& object, int version)
+document::Parameters decodeObject(const QJsonObject& object, int version, const QString& path)
 {
     const auto type = object.value("type").toString();
+    if (version < linkedVersion && (object.contains("properties") || object.contains("mates") || type == "linked-component")) {
+        fileError(QStringLiteral("This model requires project format version 7."));
+    }
+    if (type == "linked-component") {
+        const auto source = string(object.value("source"), "source");
+        const auto digest = string(object.value("digest"), "digest").toLatin1();
+        if (source.contains(QChar::Null) || source.size() > 32767 || digest.size() != 64
+            || QByteArray::fromHex(digest).toHex() != digest) {
+            fileError(QStringLiteral("Invalid linked component source."));
+        }
+        const auto base = path.isEmpty() ? QDir::current() : QFileInfo(path).absoluteDir();
+        int remaining = 3000;
+        return document::LinkedComponent{QDir::cleanPath(base.absoluteFilePath(source)).toStdString(),
+            integer(object.value("object"), "object"), digest.toStdString(), decodeBrep(object.value("brep")),
+            decodeRecord(object.value("record"), 0, remaining)};
+    }
     if (version < advancedVersion && (object.contains("datumPlane") || object.contains("datumAxis")
         || object.contains("additionalEdges") || object.contains("densityKgM3"))) {
         fileError(QStringLiteral("This model requires project format version 6."));
@@ -535,9 +672,15 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
         assembly.components.reserve(static_cast<std::size_t>(components.size()));
         for (const auto entry : components) {
             const auto component = entry.toObject();
+            if (component.contains("fixed") && (version < linkedVersion || !component.value("fixed").isBool())) {
+                fileError(QStringLiteral("Invalid component grounding flag."));
+            }
             assembly.components.push_back({integer(component.value("body"), "body"),
                 {signedInteger(component.value("anchor"), "anchor"), decodePoint3(component.value("offset")),
-                 decodePoint3(component.value("angles"))}});
+                 decodePoint3(component.value("angles"))}, component.value("fixed").toBool()});
+        }
+        if (object.contains("mates")) {
+            assembly.mates = decodeList(object.value("mates"), 0, 512, decodeMate);
         }
         return assembly;
     }
@@ -561,8 +704,13 @@ void saveProject(const QString& path, const document::Document& document)
             const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
             const auto* revolution = std::get_if<document::Revolve>(&object.parameters);
             const auto* edges = std::get_if<document::EdgeTreatment>(&object.parameters);
-            if (document::isAdvanced(object.parameters) || object.densityKgM3 || (sketch && sketch->datumPlane)
-                || (revolution && revolution->datumAxis) || (edges && !edges->additionalEdges.empty())) {
+            const auto* assembly = std::get_if<document::Assembly>(&object.parameters);
+            if (std::holds_alternative<document::LinkedComponent>(object.parameters) || object.properties != document::PartProperties{}
+                || (assembly && (!assembly->mates.empty() || std::ranges::any_of(assembly->components, &document::Component::fixed)))) {
+                version = linkedVersion;
+            } else if (version < advancedVersion && (document::isAdvanced(object.parameters) || object.densityKgM3
+                || (sketch && sketch->datumPlane) || (revolution && revolution->datumAxis)
+                || (edges && !edges->additionalEdges.empty()))) {
                 version = advancedVersion;
             } else if (version < sketchVersion && sketch && (sketch->support || !sketch->constraints.empty())) {
                 version = sketchVersion;
@@ -574,7 +722,7 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::holds_alternative<document::EdgeTreatment>(object.parameters))) {
                 version = featureVersion;
             }
-            encoded.append(encodeObject(object));
+            encoded.append(encodeObject(object, path));
         }
     } catch (const Standard_Failure& error) {
         fileError(QCoreApplication::translate("Diagnostic", "Cannot encode project geometry: %1").arg(QString::fromUtf8(error.GetMessageString())));
@@ -589,10 +737,10 @@ void saveProject(const QString& path, const document::Document& document)
 
 document::Document openProject(const QString& path)
 {
-    return decodeProject(readFile(path));
+    return decodeProject(readFile(path), path);
 }
 
-document::Document decodeProject(const QByteArray& data)
+document::Document decodeProject(const QByteArray& data, const QString& path)
 {
     QJsonParseError error;
     const auto json = QJsonDocument::fromJson(data, &error);
@@ -606,7 +754,7 @@ document::Document decodeProject(const QByteArray& data)
     const auto parsedVersion = root.value("version").toDouble();
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
-         && parsedVersion != advancedVersion)
+         && parsedVersion != advancedVersion && parsedVersion != linkedVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
@@ -626,7 +774,9 @@ document::Document decodeProject(const QByteArray& data)
             }
             const auto density = object.contains("densityKgM3")
                 ? std::optional(number(object.value("densityKgM3"), "densityKgM3")) : std::nullopt;
-            definitions.push_back({decodeObject(object, version), object.value("visible").toBool(), density});
+            const auto properties = object.contains("properties") ? decodeProperties(object.value("properties").toObject())
+                                                                  : document::PartProperties{};
+            definitions.push_back({decodeObject(object, version, path), object.value("visible").toBool(), density, properties});
         }
         return document::Document::fromDefinitions(std::move(definitions));
     } catch (const Standard_Failure& failure) {
