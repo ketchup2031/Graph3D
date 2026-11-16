@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <cmath>
+#include <numbers>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -238,6 +239,22 @@ private slots:
         QVERIFY(action("redoDraft")->isEnabled());
         action("redoDraft")->trigger();
 
+        action("draftLine")->trigger();
+        auto* length = window->findChild<QDoubleSpinBox*>("lineLength");
+        auto* angle = window->findChild<QDoubleSpinBox*>("lineAngle");
+        auto* addLine = window->findChild<QPushButton*>("addLine");
+        QVERIFY(length && angle && addLine);
+        QVERIFY(length->isVisible() && !length->isEnabled());
+        click(60, 130);
+        QVERIFY(length->isEnabled());
+        length->setValue(1000);
+        angle->setValue(30);
+        addLine->click();
+        QVERIFY(length->isEnabled());
+        length->setValue(25);
+        addLine->click();
+        QVERIFY(!length->isEnabled());
+
         QTimer::singleShot(0, window, [] {
             if (auto* sheet = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
                 sheet->findChild<QLineEdit*>("draftTitle")->setText(QStringLiteral("Пластина"));
@@ -262,7 +279,13 @@ private slots:
         QVERIFY(native.open(QIODevice::ReadOnly));
         const auto contents = QJsonDocument::fromJson(native.readAll()).object();
         native.close();
-        QCOMPARE(contents.value("items").toArray().size(), 2);
+        const auto items = contents.value("items").toArray();
+        QCOMPARE(items.size(), 3);
+        const auto line = items.at(2).toObject();
+        QCOMPARE(line.value("type").toString(), QStringLiteral("line"));
+        const auto endpoint = line.value("b").toArray();
+        QVERIFY(std::abs(endpoint.at(0).toDouble() - (60 + 25 * std::cos(std::numbers::pi / 6))) < 1.e-9);
+        QVERIFY(std::abs(endpoint.at(1).toDouble() - 117.5) < 1.e-9);
         QCOMPARE(contents.value("title").toString(), QStringLiteral("Пластина"));
         QCOMPARE(contents.value("paper").toString(), QStringLiteral("A3"));
         const auto pdfPath = folder.filePath("plate.pdf");
@@ -381,6 +404,45 @@ private slots:
         QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier, center);
         QCOMPARE(message(), QStringLiteral("Selected Cylinder 2"));
         QCOMPARE(errors.count(), 0);
+    }
+
+    void sketchLineByLengthAndAngle()
+    {
+        graph3d::SketchEditor editor;
+        editor.resize(740, 520);
+        editor.begin(graph3d::geometry::Plane::XY);
+        editor.show();
+        editor.raise();
+        QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        auto* canvas = editor.findChild<QWidget*>("sketchCanvas");
+        auto* length = editor.findChild<QDoubleSpinBox*>("lineLength");
+        auto* angle = editor.findChild<QDoubleSpinBox*>("lineAngle");
+        QVERIFY(canvas && length && angle && !length->isEnabled());
+        const auto center = QPoint(canvas->width() / 2, canvas->height() / 2);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, center);
+        QVERIFY(length->isEnabled());
+        const QPoint above = center + QPoint(0, -60);
+        QMouseEvent move(QEvent::MouseMove, above, canvas->mapToGlobal(above),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(canvas, &move);
+        QCOMPARE(length->value(), 20.0);
+        QCOMPARE(angle->value(), 90.0);
+        length->setValue(31.25);
+        angle->setValue(-90);
+        angle->setFocus();
+        QTest::keyClick(angle, Qt::Key_Return);
+        QCOMPARE(editor.sketch().entities.size(), std::size_t(1));
+        const auto& line = std::get<graph3d::geometry::Line>(editor.sketch().entities.front());
+        QCOMPARE(line.start.u, 0.0);
+        QCOMPARE(line.start.v, 0.0);
+        QCOMPARE(line.end.u, 0.0);
+        QCOMPARE(line.end.v, -31.25);
+        QVERIFY(!length->isEnabled());
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, center);
+        QVERIFY(length->isEnabled());
+        QTest::mouseClick(canvas, Qt::RightButton, {}, center);
+        QVERIFY(!length->isEnabled());
+        QCOMPARE(editor.sketch().entities.size(), std::size_t(1));
     }
 
     void sketchThroughModelTree()

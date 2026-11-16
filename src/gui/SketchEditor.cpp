@@ -1,4 +1,5 @@
 #include "gui/SketchEditor.h"
+#include "gui/LineInput.h"
 
 #include <QButtonGroup>
 #include <QHBoxLayout>
@@ -25,19 +26,25 @@ constexpr double snap = 5.0;
 
 class SketchEditor::Canvas final : public QWidget {
 public:
-    explicit Canvas(QWidget* parent) : QWidget(parent)
+    explicit Canvas(LineInput& input, QWidget* parent) : QWidget(parent), lineInput(input)
     {
         setObjectName(QStringLiteral("sketchCanvas"));
         setAccessibleName(SketchEditor::tr("Sketch drawing area"));
         setMouseTracking(true);
         setFocusPolicy(Qt::StrongFocus);
         setMinimumSize(320, 240);
+        connect(&lineInput, &LineInput::previewChanged, this, qOverload<>(&QWidget::update));
+        connect(&lineInput, &LineInput::lineRequested, this, [this](QPointF delta) {
+            if (activeTool == Tool::Line && pending) {
+                finishShape({pending->u + delta.x(), pending->v + delta.y()});
+            }
+        });
     }
 
     void begin(geometry::Plane plane)
     {
         sketch = {plane, {}};
-        pending.reset();
+        clearPending();
         cursor.reset();
         pan = {};
         pixelsPerMillimetre = 3.0;
@@ -47,14 +54,15 @@ public:
     void setTool(Tool tool)
     {
         activeTool = tool;
-        pending.reset();
+        clearPending();
+        lineInput.setVisible(activeTool == Tool::Line);
         update();
     }
 
     void undo()
     {
         if (pending) {
-            pending.reset();
+            clearPending();
         } else if (!sketch.entities.empty()) {
             sketch.entities.pop_back();
         }
@@ -91,7 +99,7 @@ protected:
         }
         if (pending && cursor) {
             painter.setPen(QPen(QColor(230, 240, 250), 1, Qt::DashLine));
-            draw(painter, makeEntity(*pending, *cursor));
+            draw(painter, makeEntity(*pending, endpoint(*cursor)));
         }
         if (cursor) {
             const auto p = toPixel(*cursor);
@@ -105,7 +113,7 @@ protected:
     {
         previous = event->position();
         if (event->button() == Qt::RightButton) {
-            pending.reset();
+            clearPending();
             update();
             return;
         }
@@ -115,17 +123,14 @@ protected:
         cursor = toSnappedModel(event->position());
         if (!pending) {
             pending = cursor;
-            feedback(SketchEditor::tr("Choose the second point."));
-        } else {
-            const double du = std::abs(pending->u - cursor->u);
-            const double dv = std::abs(pending->v - cursor->v);
-            if ((du == 0 && dv == 0) || (activeTool == Tool::Rectangle && (du == 0 || dv == 0))) {
-                feedback(SketchEditor::tr("Choose a distinct point with a nonzero size."));
+            if (activeTool == Tool::Line) {
+                lineInput.begin();
+                feedback(SketchEditor::tr("Click the endpoint or enter a length and angle."));
             } else {
-                sketch.entities.push_back(makeEntity(*pending, *cursor));
-                pending.reset();
-                reportPosition();
+                feedback(SketchEditor::tr("Choose the second point."));
             }
+        } else {
+            finishShape(endpoint(*cursor));
         }
         update();
     }
@@ -155,6 +160,37 @@ protected:
     }
 
 private:
+    void clearPending()
+    {
+        pending.reset();
+        lineInput.reset();
+    }
+
+    geometry::Point2 endpoint(geometry::Point2 mouse) const
+    {
+        if (activeTool == Tool::Line && pending) {
+            if (const auto delta = lineInput.exactDelta()) {
+                return {pending->u + delta->x(), pending->v + delta->y()};
+            }
+        }
+        return mouse;
+    }
+
+    void finishShape(geometry::Point2 end)
+    {
+        const double du = std::abs(pending->u - end.u);
+        const double dv = std::abs(pending->v - end.v);
+        if ((du == 0 && dv == 0) || (activeTool == Tool::Rectangle && (du == 0 || dv == 0))) {
+            feedback(SketchEditor::tr("Choose a distinct point with a nonzero size."));
+        } else {
+            sketch.entities.push_back(makeEntity(*pending, end));
+            clearPending();
+            setFocus();
+            reportPosition();
+        }
+        update();
+    }
+
     QPointF screenOrigin() const
     {
         return QPointF(width() / 2.0, height() / 2.0) + pan;
@@ -199,11 +235,15 @@ private:
     void reportPosition()
     {
         if (cursor) {
+            if (activeTool == Tool::Line && pending) {
+                lineInput.track({cursor->u - pending->u, cursor->v - pending->v});
+            }
             feedback(SketchEditor::tr("U: %1 mm   V: %2 mm   |   Snap: 5 mm")
                 .arg(cursor->u, 0, 'f', 0).arg(cursor->v, 0, 'f', 0));
         }
     }
 
+    LineInput& lineInput;
     Tool activeTool = Tool::Line;
     std::optional<geometry::Point2> pending;
     std::optional<geometry::Point2> cursor;
@@ -213,7 +253,8 @@ private:
 };
 
 SketchEditor::SketchEditor(QWidget* parent)
-    : QWidget(parent), canvas_(new Canvas(this)), planeLabel_(new QLabel(this)), feedback_(new QLabel(this))
+    : QWidget(parent), lineInput_(new LineInput(this)), canvas_(new Canvas(*lineInput_, this)),
+      planeLabel_(new QLabel(this)), feedback_(new QLabel(this))
 {
     setObjectName(QStringLiteral("sketchEditor"));
     auto* layout = new QVBoxLayout(this);
@@ -244,6 +285,7 @@ SketchEditor::SketchEditor(QWidget* parent)
     tools->addStretch();
     connect(button(tr("Finish"), "sketchFinish"), &QPushButton::clicked, this, &SketchEditor::finishRequested);
     connect(button(tr("Cancel"), "sketchCancel"), &QPushButton::clicked, this, &SketchEditor::cancelRequested);
+    layout->addWidget(lineInput_);
     layout->addWidget(canvas_, 1);
     feedback_->setObjectName(QStringLiteral("sketchFeedback"));
     feedback_->setWordWrap(true);

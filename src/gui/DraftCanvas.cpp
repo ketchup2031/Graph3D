@@ -1,4 +1,5 @@
 #include "gui/DraftCanvas.h"
+#include "gui/LineInput.h"
 
 #include <QInputDialog>
 #include <QLineF>
@@ -30,19 +31,27 @@ DraftItem moved(DraftItem item, QPointF delta)
 
 }  // namespace
 
-DraftCanvas::DraftCanvas(const drawing::Draft& draft, QWidget* parent) : QWidget(parent), draft_(draft)
+DraftCanvas::DraftCanvas(const drawing::Draft& draft, LineInput& lineInput, QWidget* parent)
+    : QWidget(parent), draft_(draft), lineInput_(lineInput)
 {
     setObjectName(QStringLiteral("draftCanvas"));
     setAccessibleName(tr("2D drawing sheet"));
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(320, 220);
+    connect(&lineInput_, &LineInput::previewChanged, this, qOverload<>(&QWidget::update));
+    connect(&lineInput_, &LineInput::lineRequested, this, [this](QPointF delta) {
+        if (tool_ == DraftKind::Line && !points_.empty()) {
+            addLine(points_.front() + QPointF(delta.x(), -delta.y()));
+        }
+    });
 }
 
 void DraftCanvas::setTool(std::optional<DraftKind> tool)
 {
     cancel();
     tool_ = tool;
+    lineInput_.setVisible(tool_ == DraftKind::Line);
     if (tool_) {
         select(-1);
     }
@@ -71,6 +80,7 @@ void DraftCanvas::fit()
 void DraftCanvas::cancel()
 {
     points_.clear();
+    lineInput_.reset();
     dragging_ = false;
     preview_.reset();
     update();
@@ -139,6 +149,11 @@ std::optional<DraftItem> DraftCanvas::pendingItem(QPointF end) const
     if (!tool_ || points_.empty()) {
         return {};
     }
+    if (*tool_ == DraftKind::Line) {
+        if (const auto delta = lineInput_.exactDelta()) {
+            end = points_.front() + QPointF(delta->x(), -delta->y());
+        }
+    }
     const bool dimension = *tool_ == DraftKind::Horizontal || *tool_ == DraftKind::Vertical;
     if (dimension && points_.size() == 1) {
         return DraftItem{DraftKind::Line, points_.front(), end};
@@ -167,6 +182,27 @@ void DraftCanvas::paintEvent(QPaintEvent*)
     }
 }
 
+bool DraftCanvas::canPlace(QPointF point) const
+{
+    const auto frame = QRectF(QPointF{}, drawing::draftSize(draft_)).marginsRemoved(QMarginsF(20, 5, 5, 5));
+    const QRectF title(frame.right() - 145, frame.bottom() - 24, 145, 24);
+    return frame.contains(point) && !title.contains(point);
+}
+
+void DraftCanvas::addLine(QPointF end)
+{
+    if (!canPlace(end)) {
+        emit lineOutsideSheet();
+        return;
+    }
+    const DraftItem item{DraftKind::Line, points_.front(), end, {}, {}, stroke_};
+    if (drawing::validItem(item)) {
+        cancel();
+        setFocus();
+        emit itemCreated(item);
+    }
+}
+
 void DraftCanvas::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::MiddleButton) {
@@ -180,12 +216,9 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
     }
     setFocus();
     const auto raw = toSheet(event->position());
-    const auto size = drawing::draftSize(draft_);
-    const auto frame = QRectF(QPointF{}, size).marginsRemoved(QMarginsF(20, 5, 5, 5));
-    const QRectF title(frame.right() - 145, frame.bottom() - 24, 145, 24);
     if (!tool_) {
         int index = -1;
-        if (frame.contains(raw) && !title.contains(raw)) {
+        if (canPlace(raw)) {
             for (int i = static_cast<int>(draft_.items.size()) - 1; i >= 0; --i) {
                 if (drawing::draftHit(draft_.items[i], raw, 6 / scale())) {
                     index = i;
@@ -198,7 +231,7 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
         dragStart_ = raw;
         return;
     }
-    if (!frame.contains(raw) || title.contains(raw)) {
+    if (!canPlace(raw)) {
         return;
     }
     const auto point = snapped(raw);
@@ -213,6 +246,12 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
     const bool dimension = *tool_ == DraftKind::Horizontal || *tool_ == DraftKind::Vertical;
     if (points_.empty()) {
         points_.push_back(point);
+        cursor_ = point;
+        if (*tool_ == DraftKind::Line) {
+            lineInput_.begin();
+        }
+    } else if (*tool_ == DraftKind::Line) {
+        addLine(pendingItem(point)->b);
     } else if (dimension && points_.size() == 1) {
         if (*tool_ == DraftKind::Horizontal ? point.x() != points_[0].x() : point.y() != points_[0].y()) {
             points_.push_back(point);
@@ -232,6 +271,10 @@ void DraftCanvas::mouseMoveEvent(QMouseEvent* event)
         const auto point = toSheet(event->position());
         cursor_ = tool_ ? snapped(point) : point;
         emit positionChanged(cursor_);
+        if (tool_ == DraftKind::Line && !points_.empty()) {
+            const auto offset = cursor_ - points_.front();
+            lineInput_.track({offset.x(), -offset.y()});
+        }
         if (dragging_) {
             const QPointF delta(std::round(point.x() - dragStart_.x()), std::round(point.y() - dragStart_.y()));
             preview_ = moved(draft_.items[selected_], delta);

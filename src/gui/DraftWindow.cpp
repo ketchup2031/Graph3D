@@ -2,6 +2,7 @@
 
 #include "gui/DraftCanvas.h"
 #include "gui/InterfaceLanguage.h"
+#include "gui/LineInput.h"
 #include "gui/UserPreferences.h"
 #include "io/DraftIO.h"
 
@@ -20,6 +21,7 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QUndoCommand>
+#include <QVBoxLayout>
 
 #include <exception>
 #include <functional>
@@ -63,12 +65,22 @@ QString chooseSavePath(QWidget* parent, const QString& title, const QString& pat
 }  // namespace
 
 DraftWindow::DraftWindow(QWidget* parent)
-    : QMainWindow(parent, Qt::Window), canvas_(new DraftCanvas(draft_, this))
+    : QMainWindow(parent, Qt::Window)
 {
     setObjectName(QStringLiteral("draftWindow"));
     setAttribute(Qt::WA_DeleteOnClose);
     resize(1100, 760);
-    setCentralWidget(canvas_);
+    auto* workspace = new QWidget(this);
+    auto* layout = new QVBoxLayout(workspace);
+    layout->setContentsMargins(8, 0, 8, 0);
+    auto* lineInput = new LineInput(workspace);
+    canvas_ = new DraftCanvas(draft_, *lineInput, workspace);
+    layout->addWidget(lineInput);
+    layout->addWidget(canvas_, 1);
+    setCentralWidget(workspace);
+    connect(canvas_, &DraftCanvas::lineOutsideSheet, this, [this] {
+        statusBar()->showMessage(tr("The line endpoint must be inside the drawing area."), 4000);
+    });
     auto* file = menuBar()->addMenu(tr("&File"));
     file->addAction(tr("New drawing"), QKeySequence::New, this, [this] { newDrawing(); });
     file->addAction(tr("Open drawing…"), QKeySequence::Open, this, &DraftWindow::browseDrawing);
@@ -129,7 +141,7 @@ DraftWindow::DraftWindow(QWidget* parent)
         return action;
     };
     auto* select = tool(tr("Select"), "draftSelect", {}, tr("Click an item to select it. Drag to move it."));
-    tool(tr("Line"), "draftLine", DraftKind::Line, tr("Pick the start and end of the line."));
+    tool(tr("Line"), "draftLine", DraftKind::Line, tr("Pick the start, then click the endpoint or enter a length and angle."));
     tool(tr("Rectangle"), "draftRect", DraftKind::Rectangle, tr("Pick two opposite corners."));
     tool(tr("Circle"), "draftCircle", DraftKind::Circle, tr("Pick the center and a point on the circle."));
     tool(tr("Text"), "draftText", DraftKind::Text, tr("Pick a position for a note."));

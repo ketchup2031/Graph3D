@@ -8,6 +8,8 @@ class QLabel;
 
 namespace graph3d {
 
+class LineInput;
+
 class SketchEditor final : public QWidget {
     Q_OBJECT
 
@@ -23,6 +25,7 @@ signals:
 
 private:
     class Canvas;
+    LineInput* lineInput_;
     Canvas* canvas_;
     QLabel* planeLabel_;
     QLabel* feedback_;

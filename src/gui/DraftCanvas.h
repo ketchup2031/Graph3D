@@ -8,11 +8,13 @@
 
 namespace graph3d {
 
+class LineInput;
+
 class DraftCanvas final : public QWidget {
     Q_OBJECT
 
 public:
-    explicit DraftCanvas(const drawing::Draft& draft, QWidget* parent = nullptr);
+    explicit DraftCanvas(const drawing::Draft& draft, LineInput& lineInput, QWidget* parent = nullptr);
     void setTool(std::optional<drawing::DraftKind> tool);
     void setStroke(drawing::DraftStroke stroke);
     void setGrid(bool enabled);
@@ -26,6 +28,7 @@ signals:
     void itemMoved(int index, const drawing::DraftItem& item);
     void selectionChanged(int index);
     void positionChanged(QPointF point);
+    void lineOutsideSheet();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -41,7 +44,11 @@ private:
     QPointF snapped(QPointF page) const;
     std::optional<drawing::DraftItem> pendingItem(QPointF end) const;
 
+    bool canPlace(QPointF point) const;
+    void addLine(QPointF end);
+
     const drawing::Draft& draft_;
+    LineInput& lineInput_;
     std::optional<drawing::DraftKind> tool_;
     drawing::DraftStroke stroke_ = drawing::DraftStroke::Solid;
     std::vector<QPointF> points_;
