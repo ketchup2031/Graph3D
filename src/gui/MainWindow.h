@@ -48,6 +48,7 @@ private:
     void makeEdgeTreatment(int id, const geometry::EdgeReference& edge);
     void endMachining(int id);
     void transformCurrent(const QString& title, const geometry::BodyTransform& defaults);
+    void configureAssembly(int id);
     void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
@@ -86,6 +87,7 @@ private:
     QAction* extrude_ = nullptr;
     QAction* revolve_ = nullptr;
     QAction* drawing_ = nullptr;
+    QAction* createAssembly_ = nullptr;
     QList<QAction*> machiningActions_;
     std::optional<Machining> pendingMachining_;
     QMenu* booleanMenu_ = nullptr;

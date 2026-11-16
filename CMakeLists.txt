@@ -16,7 +16,8 @@ add_library(graph3d_geometry STATIC
     src/geometry/Primitives.cpp
     src/geometry/SketchModeling.cpp
     src/geometry/PartFeatures.cpp
-    src/geometry/BodyTransform.cpp)
+    src/geometry/BodyTransform.cpp
+    src/geometry/Assembly.cpp)
 target_compile_features(graph3d_geometry PUBLIC cxx_std_20)
 set_target_properties(graph3d_geometry PROPERTIES CXX_EXTENSIONS OFF)
 if(WIN32)
@@ -53,6 +54,7 @@ endif()
 add_library(graph3d_ui STATIC src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp
+    src/gui/AssemblyDialog.cpp
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
@@ -96,6 +98,11 @@ if(BUILD_TESTING)
     set_target_properties(body_transform_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(body_transform_test PRIVATE graph3d_io TKTopAlgo)
     add_test(NAME body_transform COMMAND body_transform_test)
+
+    add_executable(assembly_test tests/document/AssemblyTest.cpp)
+    set_target_properties(assembly_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(assembly_test PRIVATE graph3d_io TKTopAlgo)
+    add_test(NAME assembly COMMAND assembly_test)
 
     add_executable(drawing_test tests/drawing/DrawingTest.cpp)
     set_target_properties(drawing_test PROPERTIES CXX_EXTENSIONS OFF)

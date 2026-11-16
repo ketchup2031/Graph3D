@@ -8,7 +8,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 
-#include <array>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -18,16 +18,24 @@ namespace {
 template<class... Functions>
 struct Visit : Functions... { using Functions::operator()...; };
 
-std::array<ObjectId, 2> inputs(const Parameters& parameters)
+std::vector<ObjectId> inputs(const Parameters& parameters)
 {
     return std::visit(Visit{
-        [](const Extrude& p) { return std::array{p.profile, 0}; },
-        [](const Revolve& p) { return std::array{p.profile, 0}; },
-        [](const Boolean& p) { return std::array{p.first, p.second}; },
-        [](const Hole& p) { return std::array{p.body, 0}; },
-        [](const EdgeTreatment& p) { return std::array{p.body, 0}; },
-        [](const Transform& p) { return std::array{p.body, 0}; },
-        [](const auto&) { return std::array{0, 0}; }
+        [](const Assembly& p) {
+            std::vector<ObjectId> ids;
+            ids.reserve(p.components.size());
+            for (const auto& component : p.components) {
+                ids.push_back(component.body);
+            }
+            return ids;
+        },
+        [](const Extrude& p) { return std::vector{p.profile}; },
+        [](const Revolve& p) { return std::vector{p.profile}; },
+        [](const Boolean& p) { return std::vector{p.first, p.second}; },
+        [](const Hole& p) { return std::vector{p.body}; },
+        [](const EdgeTreatment& p) { return std::vector{p.body}; },
+        [](const Transform& p) { return std::vector{p.body}; },
+        [](const auto&) { return std::vector<ObjectId>{}; }
     }, parameters);
 }
 
@@ -81,6 +89,14 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         },
         [&state](const Transform& p) {
             return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
+        },
+        [&state](const Assembly& p) {
+            std::vector<geometry::PlacedBody> bodies;
+            bodies.reserve(p.components.size());
+            for (const auto& component : p.components) {
+                bodies.push_back({objectAt(state, component.body).shape, component.placement});
+            }
+            return geometry::makeAssembly(bodies);
         },
         [](const Imported& imported) {
             if (imported.sourceShape.IsNull() || !TopExp_Explorer(imported.sourceShape, TopAbs_SOLID).More()
@@ -157,6 +173,14 @@ ObjectId Document::addTransform(ObjectId body, geometry::BodyTransform parameter
     return append(Transform{body, std::move(parameters)});
 }
 
+ObjectId Document::addAssembly(Assembly assembly)
+{
+    for (const auto& component : assembly.components) {
+        requireBody(objectAt(objects_, component.body));
+    }
+    return append(std::move(assembly));
+}
+
 Document Document::fromDefinitions(std::vector<Definition> definitions)
 {
     Document document;
@@ -178,6 +202,10 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
             requireBody(requirePrior(edge->body));
         } else if (const auto* transform = std::get_if<Transform>(&parameters)) {
             requireBody(requirePrior(transform->body));
+        } else if (const auto* assembly = std::get_if<Assembly>(&parameters)) {
+            for (const auto& component : assembly->components) {
+                requireBody(requirePrior(component.body));
+            }
         } else if (const auto* boolean = std::get_if<Boolean>(&parameters)) {
             if (boolean->first == boolean->second
                 || std::holds_alternative<geometry::Sketch>(requirePrior(boolean->first).parameters)
@@ -209,9 +237,7 @@ ObjectId Document::append(Parameters parameters)
         throw std::invalid_argument(next.back().error);
     }
     for (const auto input : inputs(next.back().parameters)) {
-        if (input != 0) {
-            next[input - 1].visible = false;
-        }
+        next[input - 1].visible = false;
     }
     commit(std::move(next));
     return id;
@@ -298,6 +324,23 @@ bool Document::editTransform(ObjectId id, geometry::BodyTransform parameters)
     return true;
 }
 
+bool Document::editAssembly(ObjectId id, Assembly assembly)
+{
+    const auto* existing = std::get_if<Assembly>(&objectAt(objects_, id).parameters);
+    if (!existing || !std::ranges::equal(existing->components, assembly.components, {},
+                                         &Component::body, &Component::body)) {
+        throw std::invalid_argument("Edit the placement of the existing assembly components.");
+    }
+    if (existing->components == assembly.components) {
+        return false;
+    }
+    auto next = objects_;
+    next[id - 1].parameters = std::move(assembly);
+    rebuild(next, id - 1);
+    commit(std::move(next));
+    return true;
+}
+
 void Document::rebuild(State& state, std::size_t first, bool all)
 {
     if (state.empty()) {
@@ -309,7 +352,7 @@ void Document::rebuild(State& state, std::size_t first, bool all)
         auto& object = state[i];
         const auto source = inputs(object.parameters);
         for (const auto id : source) {
-            if (id && changed[id - 1]) {
+            if (changed[id - 1]) {
                 changed[i] = true;
             }
         }
@@ -320,7 +363,7 @@ void Document::rebuild(State& state, std::size_t first, bool all)
         object.status = Status::Ready;
         object.error.clear();
         for (const auto id : source) {
-            if (id && state[id - 1].status != Status::Ready) {
+            if (state[id - 1].status != Status::Ready) {
                 object.status = Status::Blocked;
                 object.error = "Input #" + std::to_string(id) + " has an error. Fix it to rebuild this operation.";
                 break;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geometry/Assembly.h"
 #include "geometry/BodyTransform.h"
 #include "geometry/PartFeatures.h"
 #include "geometry/Primitive.h"
@@ -30,8 +31,14 @@ struct EdgeTreatment {
     double size;
 };
 struct Transform { ObjectId body; geometry::BodyTransform parameters; };
+struct Component {
+    ObjectId body;
+    geometry::Placement placement;
+    bool operator==(const Component&) const = default;
+};
+struct Assembly { std::vector<Component> components; };
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
-                                Hole, EdgeTreatment, Transform>;
+                                Hole, EdgeTreatment, Transform, Assembly>;
 
 struct Definition {
     Parameters parameters;
@@ -60,12 +67,14 @@ public:
     ObjectId addHole(ObjectId body, geometry::FaceReference face, geometry::HoleSize size);
     ObjectId addEdgeTreatment(ObjectId body, geometry::EdgeReference edge, geometry::EdgeTreatmentKind kind, double size);
     ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
+    ObjectId addAssembly(Assembly assembly);
     static Document fromDefinitions(std::vector<Definition> definitions);
     bool editExtrude(ObjectId id, double distance);
     bool editRevolve(ObjectId id, geometry::Axis axis, double offset, double angle);
     bool editHole(ObjectId id, geometry::HoleSize size);
     bool editEdgeTreatment(ObjectId id, double size);
     bool editTransform(ObjectId id, geometry::BodyTransform parameters);
+    bool editAssembly(ObjectId id, Assembly assembly);
     bool setVisible(ObjectId id, bool visible);
     bool clear();
 

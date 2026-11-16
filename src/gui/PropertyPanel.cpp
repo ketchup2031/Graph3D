@@ -18,7 +18,8 @@ PropertyPanel::PropertyPanel(QWidget* parent)
       axis_(new QComboBox(this)), offset_(new QDoubleSpinBox(this)), angle_(new QDoubleSpinBox(this)),
       diameter_(new QDoubleSpinBox(this)), depth_(new QDoubleSpinBox(this)),
       through_(new QCheckBox(tr("Through"), this)), edgeSize_(new QDoubleSpinBox(this)),
-      transform_(new TransformEditor(this)), apply_(new QPushButton(tr("Apply"), this))
+      transform_(new TransformEditor(this)), editComponents_(new QPushButton(tr("Edit component placement…"), this)),
+      apply_(new QPushButton(tr("Apply"), this))
 {
     setObjectName(QStringLiteral("propertyPanel"));
     object_->setObjectName(QStringLiteral("propertyObject"));
@@ -31,6 +32,7 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     depth_->setObjectName(QStringLiteral("propertyHoleDepth"));
     through_->setObjectName(QStringLiteral("propertyHoleThrough"));
     edgeSize_->setObjectName(QStringLiteral("propertyEdgeSize"));
+    editComponents_->setObjectName(QStringLiteral("editAssemblyComponents"));
     apply_->setObjectName(QStringLiteral("applyProperties"));
     for (auto* label : {object_, details_, state_}) {
         label->setWordWrap(true);
@@ -61,6 +63,8 @@ PropertyPanel::PropertyPanel(QWidget* parent)
     form_->addRow(tr("Distance / radius"), edgeSize_);
     connect(through_, &QCheckBox::toggled, depth_, &QDoubleSpinBox::setDisabled);
     form_->addRow(transform_);
+    form_->addRow(editComponents_);
+    connect(editComponents_, &QPushButton::clicked, this, [this] { emit assemblyEditRequested(id_); });
     form_->addRow(apply_);
     connect(apply_, &QPushButton::clicked, this, [this] {
         if (id_ && form_->isRowVisible(distance_)) {
@@ -110,6 +114,7 @@ void PropertyPanel::showObject(const document::Object* object, const QString& na
     form_->setRowVisible(edgeSize_, edge != nullptr);
     const auto* transform = object ? std::get_if<document::Transform>(&object->parameters) : nullptr;
     form_->setRowVisible(transform_, transform != nullptr);
+    form_->setRowVisible(editComponents_, object && std::holds_alternative<document::Assembly>(object->parameters));
     form_->setRowVisible(apply_, extrusion || revolution || hole || edge || transform);
     if (transform) {
         transform_->setParameters(transform->parameters);

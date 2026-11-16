@@ -26,6 +26,7 @@
 #include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTableWidget>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -541,6 +542,77 @@ private slots:
         QVERIFY(pdf.open(QIODevice::ReadOnly));
         QCOMPARE(pdf.read(5), QByteArrayLiteral("%PDF-"));
         QVERIFY(!window.isWindowModified());
+    }
+
+    void createAndEditAssembly()
+    {
+        graph3d::MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* create = window.findChild<QAction*>("createAssembly");
+        auto* edit = window.findChild<QPushButton*>("editAssemblyComponents");
+        QVERIFY(tree && create && edit);
+        QVERIFY(create->isEnabled());
+        QVERIFY(!edit->isVisible());
+
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) {
+                return;
+            }
+            auto* table = dialog->findChild<QTableWidget*>("assemblyComponents");
+            auto* count = dialog->findChild<QSpinBox*>("assemblyCount");
+            if (!table || !count) {
+                dialog->reject();
+                return;
+            }
+            count->setValue(3);
+            auto* anchor = qobject_cast<QComboBox*>(table->cellWidget(2, 1));
+            auto* z = qobject_cast<QDoubleSpinBox*>(table->cellWidget(2, 4));
+            anchor->setCurrentIndex(2);
+            z->setValue(140);
+            dialog->accept();
+        });
+        create->trigger();
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QCOMPARE(tree->topLevelItem(0)->checkState(0), Qt::Unchecked);
+        auto* assembly = tree->currentItem();
+        QVERIFY(assembly);
+        QCOMPARE(assembly->text(0), QStringLiteral("Assembly 2"));
+        QCOMPARE(assembly->text(1), QStringLiteral("Components: 3"));
+        QVERIFY(edit->isVisible());
+
+        const auto placementX = [&](double value, bool apply) {
+            double previous = -1;
+            QTimer::singleShot(0, &window, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog) {
+                    return;
+                }
+                auto* table = dialog->findChild<QTableWidget*>("assemblyComponents");
+                if (!table || table->rowCount() != 3) {
+                    dialog->reject();
+                    return;
+                }
+                auto* x = qobject_cast<QDoubleSpinBox*>(table->cellWidget(0, 2));
+                previous = x->value();
+                if (apply) {
+                    x->setValue(value);
+                }
+                dialog->done(apply ? QDialog::Accepted : QDialog::Rejected);
+            });
+            edit->click();
+            return previous;
+        };
+        QCOMPARE(placementX(75, true), 0.0);
+        QVERIFY(assembly->text(2).isEmpty());
+        QCOMPARE(placementX(0, false), 75.0);
+        window.findChild<QAction*>("undoDocument")->trigger();
+        QCOMPARE(placementX(0, false), 0.0);
+        window.findChild<QAction*>("redoDocument")->trigger();
+        QCOMPARE(placementX(0, false), 75.0);
     }
 
     void transformSelectedBody()

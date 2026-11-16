@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "gui/AssemblyDialog.h"
 #include "gui/DrawingDialog.h"
 #include "gui/PropertyPanel.h"
 #include "gui/SketchEditor.h"
@@ -102,6 +103,7 @@ MainWindow::MainWindow()
         [this](int id, const geometry::BodyTransform& parameters) {
             editFeature(id, [this, id, parameters] { return document_.editTransform(id, parameters); });
         });
+    connect(properties_, &PropertyPanel::assemblyEditRequested, this, &MainWindow::configureAssembly);
     connect(viewport_, &Viewport::operationFailed, this, &MainWindow::showSceneError);
     connect(viewport_, &Viewport::facePicked, this, &MainWindow::makeHole);
     connect(viewport_, &Viewport::edgePicked, this, &MainWindow::makeEdgeTreatment);
@@ -230,6 +232,9 @@ void MainWindow::createMenus()
     transformAction(tr("Linear array"), "makeLinearArray", geometry::LinearArray{geometry::ModelAxis::X, 3, 100});
     transformAction(tr("Circular array"), "makePolarArray", geometry::PolarArray{geometry::ModelAxis::Z, 4, 360});
     transformAction(tr("Mirror"), "makeMirror", geometry::Mirror{geometry::Plane::YZ, 0});
+
+    createAssembly_ = menuAction(model, tr("Create assembly…"), "createAssembly");
+    connect(createAssembly_, &QAction::triggered, this, [this] { configureAssembly(0); });
 
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
     drawing_ = menuAction(drawingMenu, tr("Create drawing from selected body…"), "drawingPreview");
@@ -421,6 +426,7 @@ void MainWindow::updateActions()
     revolve_->setEnabled(!drawing && sketch);
     booleanMenu_->setEnabled(!drawing && object && validBody(*object) && bodies >= 2);
     transformMenu_->setEnabled(!drawing && !pendingMachining_ && object && validBody(*object));
+    createAssembly_->setEnabled(!drawing && !pendingMachining_ && bodies > 0);
     drawing_->setEnabled(!drawing && object && validBody(*object));
     for (auto* action : machiningActions_) {
         action->setEnabled(!drawing && !pendingMachining_ && object && object->visible && validBody(*object));
@@ -457,6 +463,8 @@ QString MainWindow::objectName(const document::Object& object) const
                 return tr("Circular array");
             }
             return tr("Mirror");
+        } else if constexpr (std::is_same_v<Type, document::Assembly>) {
+            return tr("Assembly");
         } else {
             switch (operation.operation) {
             case geometry::BooleanOperation::Union: return tr("Union");
@@ -502,6 +510,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return tr("%1 · %2").arg(source(operation.body), size);
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
             return source(operation.body);
+        } else if constexpr (std::is_same_v<Type, document::Assembly>) {
+            return tr("Components: %1").arg(operation.components.size());
         }
         return {};
     }, object.parameters);
@@ -848,6 +858,37 @@ void MainWindow::transformCurrent(const QString& title, const geometry::BodyTran
     if (dialog.exec() == QDialog::Accepted) {
         const auto parameters = editor->parameters();
         addFeature(title, [this, id, parameters] { return document_.addTransform(id, parameters); });
+    }
+}
+
+void MainWindow::configureAssembly(int id)
+{
+    const auto* object = document_.find(id);
+    const auto* existing = object ? std::get_if<document::Assembly>(&object->parameters) : nullptr;
+    if (id && !existing) {
+        return;
+    }
+    AssemblyDialog::Sources sources;
+    for (const auto& candidate : document_.objects()) {
+        if (existing && candidate.id >= id) {
+            break;
+        }
+        if (!std::holds_alternative<geometry::Sketch>(candidate.parameters)
+            && (existing || candidate.status == document::Status::Ready)) {
+            sources.append({candidate.id, objectName(candidate)});
+        }
+    }
+    if (sources.isEmpty()) {
+        return;
+    }
+    AssemblyDialog dialog(std::move(sources), existing, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        const auto assembly = dialog.assembly();
+        if (existing) {
+            editFeature(id, [this, id, &assembly] { return document_.editAssembly(id, assembly); });
+        } else {
+            addFeature(tr("Create assembly"), [this, &assembly] { return document_.addAssembly(assembly); });
+        }
     }
 }
 

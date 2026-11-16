@@ -24,6 +24,7 @@ namespace {
 constexpr int legacyVersion = 1;
 constexpr int featureVersion = 2;
 constexpr int transformVersion = 3;
+constexpr int assemblyVersion = 4;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -63,6 +64,15 @@ int integer(const QJsonValue& value, const char* field)
 {
     const auto parsed = number(value, field);
     if (parsed < 1 || parsed > maxObjects || std::floor(parsed) != parsed) {
+        fileError(QStringLiteral("Invalid integer for %1.").arg(QLatin1String(field)));
+    }
+    return static_cast<int>(parsed);
+}
+
+int signedInteger(const QJsonValue& value, const char* field)
+{
+    const auto parsed = value.toInteger(std::numeric_limits<qint64>::min());
+    if (parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max()) {
         fileError(QStringLiteral("Invalid integer for %1.").arg(QLatin1String(field)));
     }
     return static_cast<int>(parsed);
@@ -226,6 +236,13 @@ QJsonObject encodeObject(const document::Object& object)
                     {"size", encodeNumber(item.size)}, {"curveType", item.edge.curveType}, {"samples", samples}};
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
             return encodeTransform(item);
+        } else if constexpr (std::is_same_v<Type, document::Assembly>) {
+            QJsonArray components;
+            for (const auto& component : item.components) {
+                components.append(QJsonObject{{"body", component.body}, {"anchor", component.placement.anchor},
+                    {"offset", encodePoint3(component.placement.offset)}, {"angles", encodePoint3(component.placement.angles)}});
+            }
+            return {{"type", "assembly"}, {"components", components}};
         } else {
             return {{"type", "imported"}, {"name", QString::fromStdString(item.name)},
                     {"brep", encodeBrep(item.sourceShape)}};
@@ -296,12 +313,7 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
     if (version >= transformVersion && (type == "linear-array" || type == "polar-array")) {
         const auto body = integer(object.value("body"), "body");
         const auto axis = parseName<geometry::ModelAxis>(object.value("axis"), modelAxes, "axis");
-        // An out-of-range instance count is a rebuild error, just like an invalid spacing.
-        const auto count = object.value("count").toInteger(std::numeric_limits<qint64>::min());
-        if (count < std::numeric_limits<int>::min() || count > std::numeric_limits<int>::max()) {
-            fileError(QStringLiteral("Invalid integer for count."));
-        }
-        const auto instances = static_cast<int>(count);
+        const auto instances = signedInteger(object.value("count"), "count");
         if (type == "linear-array") {
             return document::Transform{body, geometry::LinearArray{axis, instances, number(object.value("spacing"), "spacing")}};
         }
@@ -311,6 +323,22 @@ document::Parameters decodeObject(const QJsonObject& object, int version)
         return document::Transform{integer(object.value("body"), "body"),
             geometry::Mirror{parseName<geometry::Plane>(object.value("plane"), planes, "plane"),
                              number(object.value("offset"), "offset")}};
+    }
+    if (type == "assembly" && version >= assemblyVersion) {
+        const auto components = object.value("components").toArray();
+        if (!object.value("components").isArray() || components.size() < geometry::minAssemblyComponents
+            || components.size() > geometry::maxAssemblyComponents) {
+            fileError(QStringLiteral("Invalid assembly component list."));
+        }
+        document::Assembly assembly;
+        assembly.components.reserve(static_cast<std::size_t>(components.size()));
+        for (const auto entry : components) {
+            const auto component = entry.toObject();
+            assembly.components.push_back({integer(component.value("body"), "body"),
+                {signedInteger(component.value("anchor"), "anchor"), decodePoint3(component.value("offset")),
+                 decodePoint3(component.value("angles"))}});
+        }
+        return assembly;
     }
     if (type == "imported") {
         return document::Imported{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
@@ -329,7 +357,9 @@ void saveProject(const QString& path, const document::Document& document)
     int version = legacyVersion;
     try {
         for (const auto& object : document.objects()) {
-            if (std::holds_alternative<document::Transform>(object.parameters)) {
+            if (std::holds_alternative<document::Assembly>(object.parameters)) {
+                version = assemblyVersion;
+            } else if (version < transformVersion && std::holds_alternative<document::Transform>(object.parameters)) {
                 version = transformVersion;
             } else if (version == legacyVersion && (std::holds_alternative<document::Hole>(object.parameters)
                 || std::holds_alternative<document::EdgeTreatment>(object.parameters))) {
@@ -360,7 +390,8 @@ document::Document openProject(const QString& path)
         fileError(QStringLiteral("This is not a Graph3D project."));
     }
     const auto parsedVersion = root.value("version").toDouble();
-    if ((parsedVersion != legacyVersion && parsedVersion != featureVersion && parsedVersion != transformVersion)
+    if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
+         && parsedVersion != transformVersion && parsedVersion != assemblyVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

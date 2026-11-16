@@ -29,6 +29,7 @@ signals:
     void revolveEdited(int id, geometry::Axis axis, double offset, double angle);
     void holeEdited(int id, double diameter, double depth, bool through);
     void edgeTreatmentEdited(int id, double size);
+    void assemblyEditRequested(int id);
     void transformEdited(int id, const geometry::BodyTransform& parameters);
 
 private:
@@ -45,6 +46,7 @@ private:
     QCheckBox* through_;
     QDoubleSpinBox* edgeSize_;
     TransformEditor* transform_;
+    QPushButton* editComponents_;
     QPushButton* apply_;
     int id_ = 0;
 };
