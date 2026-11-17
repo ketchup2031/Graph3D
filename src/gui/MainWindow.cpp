@@ -1,4 +1,5 @@
 #include "gui/MainWindow.h"
+#include "gui/DocumentWindow.h"
 
 #include "gui/AdvancedDialog.h"
 #include "gui/AssemblyDialog.h"
@@ -69,8 +70,8 @@ QAction* menuAction(QMenu* menu, const QString& label, const char* name)
 
 }  // namespace
 
-MainWindow::MainWindow()
-    : viewport_(new Viewport(this)), pages_(new QStackedWidget(this)),
+MainWindow::MainWindow(DocumentWindow* host)
+    : QMainWindow(host), host_(host), viewport_(new Viewport(this)), pages_(new QStackedWidget(this)),
       sketchEditor_(new SketchEditor(this)), startPage_(new StartPage(this)), tree_(new QTreeWidget(this)),
       properties_(new PropertyPanel(this))
 {
@@ -222,11 +223,21 @@ void MainWindow::createMenus()
 {
     auto* file = menuBar()->addMenu(tr("&File"));
     startPageAction_ = menuAction(file, tr("Start page"), "showStartPage");
-    connect(startPageAction_, &QAction::triggered, this, &MainWindow::showStartPage);
+    connect(startPageAction_, &QAction::triggered, this, [this] {
+        if (host_) {
+            host_->showHome();
+        } else {
+            showStartPage();
+        }
+    });
     file->addSeparator();
-    newScene_ = menuAction(file, tr("&New scene"), "newScene");
+    newScene_ = menuAction(file, host_ ? tr("New part") : tr("&New scene"), "newScene");
     newScene_->setShortcut(QKeySequence::New);
     connect(newScene_, &QAction::triggered, this, [this] {
+        if (host_) {
+            host_->newProject();
+            return;
+        }
         if (pages_->currentWidget() == startPage_) {
             newProject();
             return;
@@ -257,7 +268,13 @@ void MainWindow::createMenus()
     fileActions_ = {save, saveAs, import, exportStep, exportStl};
 
     file->addSeparator();
-    auto* quit = file->addAction(tr("E&xit"), this, &QWidget::close);
+    auto* quit = file->addAction(tr("E&xit"), this, [this] {
+        if (host_) {
+            host_->close();
+        } else {
+            close();
+        }
+    });
     quit->setShortcut(QKeySequence::Quit);
 
     editMenu_ = menuBar()->addMenu(tr("&Edit"));
@@ -443,6 +460,9 @@ void MainWindow::createMenus()
         userSettings().setValue(QStringLiteral("appearance/darkTheme"), dark);
         applyTheme(dark);
         startPage_->setDarkTheme(dark);
+        if (host_) {
+            host_->setDarkTheme(dark);
+        }
     });
 
     auto* languageMenu = settings->addMenu(tr("Language"));
@@ -465,6 +485,9 @@ void MainWindow::createMenus()
     };
     languageChoice(QStringLiteral("English"), "languageEnglish", false);
     languageChoice(QStringLiteral("Русский"), "languageRussian", true);
+    connect(languageMenu, &QMenu::aboutToShow, this, [languages] {
+        languages->actions().at(russianLanguagePreferred() ? 1 : 0)->setChecked(true);
+    });
 
     auto* help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("Mouse controls"), this, &MainWindow::showMouseControls);
@@ -1023,6 +1046,9 @@ void MainWindow::updateFileState()
     setWindowTitle(projectPath_.isEmpty() ? tr("Graph3D[*]")
         : tr("Graph3D — %1[*]").arg(QFileInfo(projectPath_).fileName()));
     setWindowModified(document_.revision() != savedRevision_);
+    if (host_) {
+        host_->documentChanged(this);
+    }
 }
 
 bool MainWindow::saveProject(bool choosePath)
@@ -1042,11 +1068,17 @@ bool MainWindow::saveProject(bool choosePath)
         if (!path.endsWith(QStringLiteral(".graph3d"), Qt::CaseInsensitive)) {
             throw std::invalid_argument("Use the .graph3d extension for a project.");
         }
+        if (host_ && !host_->canSaveAs(this, path)) {
+            return false;
+        }
         io::saveProject(path, document_);
         projectPath_ = path;
         savedRevision_ = document_.revision();
         updateFileState();
         startPage_->rememberProject(path);
+        if (host_) {
+            host_->rememberProject(path);
+        }
         report(tr("Saved %1").arg(QFileInfo(path).fileName()));
         return true;
     } catch (const std::exception& error) {
@@ -1068,15 +1100,19 @@ bool MainWindow::confirmSave()
     return selection == QMessageBox::Discard || (selection == QMessageBox::Save && saveProject(false));
 }
 
-void MainWindow::closeEvent(QCloseEvent* event)
+bool MainWindow::canClose()
 {
     if (pages_->currentWidget() == sketchEditor_ && QMessageBox::question(this, tr("Unfinished sketch"),
             tr("Discard the unfinished sketch?"), QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes) {
-        event->ignore();
-        return;
+        return false;
     }
-    if (confirmSave() && (!draftWindow_ || draftWindow_->close())) {
+    return confirmSave();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (canClose() && (!draftWindow_ || draftWindow_->close())) {
         event->accept();
     } else {
         event->ignore();
@@ -1085,6 +1121,10 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 void MainWindow::openProject()
 {
+    if (host_) {
+        host_->browse();
+        return;
+    }
     const auto path = QFileDialog::getOpenFileName(this, tr("Open Graph3D project"), projectPath_,
                                                   tr("Graph3D files (*.graph3d *.g3draw);;3D projects (*.graph3d);;2D drawings (*.g3draw)"), nullptr,
                                                   (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
@@ -1095,6 +1135,14 @@ void MainWindow::openProject()
 
 void MainWindow::showDraft(const QString& path)
 {
+    if (host_) {
+        if (path.isEmpty()) {
+            host_->newDrawing();
+        } else {
+            host_->openDocument(path);
+        }
+        return;
+    }
     if (!draftWindow_) {
         draftWindow_ = new DraftWindow(this);
         connect(draftWindow_, &DraftWindow::fileUsed, startPage_, &StartPage::rememberProject);

@@ -446,6 +446,7 @@ void StartPage::refreshRecents()
 {
     while (auto* item = recentLayout_->takeAt(0)) {
         item->widget()->hide();
+        item->widget()->setObjectName({});
         item->widget()->deleteLater();
         delete item;
     }

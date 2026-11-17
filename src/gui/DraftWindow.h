@@ -16,13 +16,15 @@ class QComboBox;
 
 namespace graph3d {
 
+class DocumentWindow;
 class DraftCanvas;
 
 class DraftWindow final : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit DraftWindow(QWidget* parent);
+    explicit DraftWindow(QWidget* parent, DocumentWindow* host = nullptr);
+    ~DraftWindow() override;
     bool newDrawing();
     bool openDrawing(const QString& path);
 
@@ -33,7 +35,11 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    friend class DocumentWindow;
     void browseDrawing();
+    void browseDxf();
+    bool importDxf(const QString& path);
+    void exportDxf();
     bool saveDrawing(bool saveAs);
     void exportPdf();
     void editSheet();
@@ -65,6 +71,7 @@ private:
     void updateTitle();
     void editItem(int index, const std::optional<drawing::DraftItem>& after, const QString& description);
 
+    DocumentWindow* host_;
     drawing::Draft draft_;
     std::vector<drawing::Draft> sheets_{1};
     int activeSheet_ = 0;

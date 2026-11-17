@@ -3,6 +3,8 @@
 #include "io/LinkedComponents.h"
 #include "drawing/DraftCurves.h"
 #include "io/DraftIO.h"
+#include "io/DxfIO.h"
+#include "io/FileIO.h"
 #include "io/ModelViewsIO.h"
 #include "geometry/SketchModeling.h"
 #include "geometry/SketchConstraints.h"
@@ -16,6 +18,7 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
+#include <QLineF>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPainter>
@@ -501,6 +504,12 @@ void verifyAssemblyDrawing(const QDir& output)
 
     const auto pdfPath = output.filePath("fixture-assembly.pdf");
     draw::exportDraftPdf(pdfPath, saved);
+    const auto dxf = output.filePath("fixture-assembly.dxf");
+    check(io::exportDxf(dxf, saved) > 0, "DXF did not report omitted assembly callouts");
+    const auto exported = io::importDxf(dxf);
+    check(!exported.drawing.items.empty() && std::ranges::all_of(exported.drawing.items, [](const auto& item) {
+        return item.kind == draw::DraftKind::Polyline;
+    }), "Linked assembly lost projected linework in DXF");
     QFile pdf(pdfPath);
     check(pdf.open(QIODevice::ReadOnly) && pdf.readAll().count("/Type /Page\n") == 2,
           "Export did not contain the drawing and its specification");
@@ -788,6 +797,65 @@ void verifyDraftTools(const QDir& output)
     check(pdf.open(QIODevice::ReadOnly) && pdf.size() > 1000 && pdf.read(5) == "%PDF-", "PDF export failed");
 }
 
+void verifyDxf(const QDir& output)
+{
+    using enum draw::DraftKind;
+    draw::Draft plate;
+    plate.layers = {{QStringLiteral("Outline")}, {QStringLiteral("Hidden")},
+                    {QStringLiteral("Axes"), true, true}, {QStringLiteral("Construction"), false}};
+    plate.items = {{Rectangle, {40, 30}, {140, 90}}, {Circle, {90, 60}, {100, 60}},
+                   {Line, {50, 38}, {130, 38}}, {Line, {90, 34}, {90, 87}},
+                   {Arc, {118, 58}, {126, 50}, {134, 58}},
+                   {Text, {50, 105}, {}, {}, QStringLiteral("Plate Ø20")}};
+    plate.items[2].stroke = draw::DraftStroke::Hidden;
+    plate.items[2].layer = 1;
+    plate.items[3].stroke = draw::DraftStroke::Center;
+    plate.items[3].layer = 2;
+    draw::DraftItem hatch{Hatch};
+    hatch.loops = {{{150, 30}, {180, 30}, {180, 60}, {150, 60}, {150, 30}},
+                   {{156, 36}, {164, 36}, {164, 44}, {156, 44}, {156, 36}}};
+    plate.items.push_back(hatch);
+    plate.items.push_back({Horizontal, {40, 30}, {140, 30}, {90, 20}});
+
+    const auto path = output.filePath("plate-100x60.dxf");
+    check(io::exportDxf(path, plate) == 1, "DXF must report unsupported dimensions");
+    const auto imported = io::importDxf(path);
+    const auto& items = imported.drawing.items;
+    check(!imported.skipped && !imported.beyondSheet && items.size() == 7, "DXF lost supported items");
+    check(items[0].kind == Polyline && items[0].points.front() == items[0].points.back()
+        && QLineF(items[0].points[0], items[0].points[1]).length() == 100
+        && QLineF(items[0].points[1], items[0].points[2]).length() == 60, "DXF distorted the plate");
+    check(items[1].kind == Circle && QLineF(items[1].a, items[1].b).length() == 10, "DXF lost the bore diameter");
+    check(items[2].stroke == draw::DraftStroke::Hidden && items[3].stroke == draw::DraftStroke::Center
+        && imported.drawing.layers[items[2].layer].name == "Hidden"
+        && imported.drawing.layers[items[3].layer].locked, "DXF lost layers or line types");
+    check(!imported.drawing.layers.back().visible, "DXF lost hidden layer state");
+    check(items[4].kind == Arc && QLineF(items[4].b, plate.items[4].b).length() < 1.e-8
+        && items[5].text == plate.items[5].text && items[6].loops == plate.items[6].loops,
+        "DXF lost arc, text or hatch");
+    const auto native = output.filePath("plate-from-dxf.g3draw");
+    io::saveDraft(native, imported.drawing);
+    check(io::openDraft(native).items == items, "Imported geometry could not be saved natively");
+
+    const auto imperial = output.filePath("inch-input.dxf");
+    io::writeFile(imperial,
+        "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n1\n0\nENDSEC\n"
+        "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n"
+        "0\nLAYER\n2\nAxis\n70\n0\n62\n7\n6\nCENTER\n0\nENDTAB\n0\nENDSEC\n"
+        "0\nSECTION\n2\nENTITIES\n"
+        "0\nLINE\n8\nAxis\n10\n0\n20\n0\n11\n2\n21\n0\n"
+        "0\nLWPOLYLINE\n8\nAxis\n90\n2\n70\n0\n10\n0\n20\n0\n42\n1\n10\n2\n20\n0\n"
+        "0\nPOLYLINE\n8\nAxis\n70\n1\n0\nVERTEX\n10\n0\n20\n0\n0\nVERTEX\n10\n1\n20\n0\n"
+        "0\nVERTEX\n10\n1\n20\n1\n0\nSEQEND\n0\nINSERT\n8\n0\n0\nENDSEC\n0\nEOF\n");
+    const auto scaled = io::importDxf(imperial);
+    check(scaled.skipped == 1 && scaled.drawing.items.size() == 3, "DXF legacy polyline or skip count failed");
+    const auto& center = scaled.drawing.items.front();
+    const auto& arc = scaled.drawing.items[1];
+    check(center.stroke == draw::DraftStroke::Center && std::abs(QLineF(center.a, center.b).length() - 50.8) < 1.e-8
+        && arc.kind == Arc && std::abs(draw::draftArc(arc.a, arc.b, arc.label).radius - 25.4) < 1.e-8
+        && arc.b.y() > arc.a.y(), "Inch conversion, BYLAYER or bulge failed");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -795,6 +863,25 @@ int main(int argc, char** argv)
     QGuiApplication app(argc, argv);
     try {
         const auto args = app.arguments();
+        if (args.size() == 3 && args.at(1) == "--verify-external-dxf") {
+            const auto imported = io::importDxf(args.at(2));
+            const auto& items = imported.drawing.items;
+            check(!imported.skipped && items.size() == 7, "External DXF lost supported entities");
+            using enum draw::DraftKind;
+            const auto plate = std::ranges::find(items, Polyline, &draw::DraftItem::kind);
+            const auto bore = std::ranges::find(items, Circle, &draw::DraftItem::kind);
+            check(plate != items.end() && plate->points.size() == 5
+                && QLineF(plate->points[0], plate->points[1]).length() == 100
+                && QLineF(plate->points[1], plate->points[2]).length() == 60
+                && bore != items.end() && QLineF(bore->a, bore->b).length() == 10,
+                "External DXF changed the plate geometry");
+            for (const auto stroke : {draw::DraftStroke::Hidden, draw::DraftStroke::Center}) {
+                check(std::ranges::any_of(items, [stroke](const auto& item) {
+                    return item.kind == Line && item.stroke == stroke;
+                }), "External DXF changed a line type");
+            }
+            return 0;
+        }
         check(args.size() == 2 || args.size() == 3, "Expected examples directory and optional result directory");
         QTemporaryDir temporary;
         check(temporary.isValid(), "Could not create a folder for test drawings");
@@ -820,6 +907,7 @@ int main(int argc, char** argv)
         verifyAttachedDimensions(output);
         verifyModelViews(output);
         verifyDraftTools(output);
+        verifyDxf(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;
         try {

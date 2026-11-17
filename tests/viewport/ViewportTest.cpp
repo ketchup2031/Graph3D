@@ -1,4 +1,6 @@
 #include "gui/MainWindow.h"
+#include "gui/DocumentWindow.h"
+#include "gui/DraftWindow.h"
 #include "gui/InterfaceLanguage.h"
 #include "gui/SketchEditor.h"
 #include "io/ProjectIO.h"
@@ -24,6 +26,8 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDirIterator>
+#include <QProcess>
 #include <QInputDialog>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -69,6 +73,105 @@ class ViewportTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void documentTabsAndCrashRecovery()
+    {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const auto root = temporary.filePath("recovery");
+        const auto original = temporary.filePath("drawing.g3draw");
+        graph3d::drawing::Draft initial;
+        initial.items.push_back({graph3d::drawing::DraftKind::Line, {45, 65}, {105, 65}});
+        graph3d::io::saveDraft(original, initial);
+
+        graph3d::DocumentWindow window(nullptr, root);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* tabs = window.findChild<QTabWidget*>("documentTabs");
+        QVERIFY(tabs);
+        auto* home = tabs->currentWidget();
+        home->findChild<QPushButton*>("startNewDrawing")->click();
+        QCOMPARE(tabs->count(), 2);
+        auto* draft = qobject_cast<graph3d::DraftWindow*>(tabs->currentWidget());
+        QVERIFY(draft);
+        draft->findChild<QAction*>("addDraftSheet")->trigger();
+        QVERIFY(draft->isWindowModified());
+        QVERIFY(window.openDocument(original));
+        auto* savedDrawing = qobject_cast<graph3d::DraftWindow*>(tabs->currentWidget());
+        QVERIFY(savedDrawing && savedDrawing != draft);
+        QVERIFY(!savedDrawing->isWindowModified());
+        QVERIFY(window.openDocument(original));
+        QCOMPARE(tabs->count(), 3);
+        QCOMPARE(tabs->currentWidget(), savedDrawing);
+
+        tabs->setCurrentWidget(home);
+        home->findChild<QPushButton*>("startNewPart")->click();
+        QCOMPARE(tabs->count(), 4);
+        auto* model = qobject_cast<graph3d::MainWindow*>(tabs->currentWidget());
+        QVERIFY(model);
+        QVERIFY(model->findChild<graph3d::Viewport*>()->isVisible());
+        tabs->setCurrentWidget(draft);
+        QVERIFY(draft->isWindowModified());
+        draft->findChild<QAction*>("undoDraft")->trigger();
+        QVERIFY(!draft->isWindowModified());
+        QVERIFY(window.close());
+
+        const auto snapshots = [&root] {
+            QStringList paths;
+            QDirIterator iterator(root, {QStringLiteral("*.g3draw")}, QDir::Files, QDirIterator::Subdirectories);
+            while (iterator.hasNext()) {
+                paths.append(iterator.next());
+            }
+            return paths;
+        };
+        QVERIFY(snapshots().isEmpty());
+        QProcess writer;
+        writer.start(QCoreApplication::applicationFilePath(),
+                     {QStringLiteral("--recovery-test-child"), root, original});
+        QVERIFY(writer.waitForStarted());
+        QTRY_COMPARE_WITH_TIMEOUT(snapshots().size(), 1, 9000);
+        QCOMPARE(graph3d::io::openDraft(snapshots().front()).additionalSheets.size(), 1);
+
+        graph3d::DocumentWindow restarted(nullptr, root);
+        restarted.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&restarted));
+        auto* restored = restarted.findChild<QTabWidget*>("documentTabs");
+        bool prompted = false;
+        auto acceptRecovery = [&] {
+            for (auto* top : QApplication::topLevelWidgets()) {
+                if (auto* prompt = qobject_cast<QMessageBox*>(top); prompt && prompt->isVisible()) {
+                    prompted = true;
+                    prompt->defaultButton()->click();
+                }
+            }
+        };
+        QTimer reply;
+        connect(&reply, &QTimer::timeout, this, acceptRecovery);
+        reply.start(25);
+        restarted.offerRecovery();
+        QVERIFY(!prompted);
+        QCOMPARE(restored->count(), 1);
+
+        writer.kill();
+        QVERIFY(writer.waitForFinished());
+        restarted.offerRecovery();
+        reply.stop();
+        QVERIFY(prompted);
+        QCOMPARE(restored->count(), 2);
+        auto* recoveredDraft = qobject_cast<graph3d::DraftWindow*>(restored->currentWidget());
+        QVERIFY(recoveredDraft && recoveredDraft->isWindowModified());
+        QCOMPARE(recoveredDraft->findChild<QTabBar*>("draftSheetTabs")->count(), 2);
+        QCOMPARE(graph3d::io::openDraft(original).additionalSheets.size(), 0);
+        QCOMPARE(snapshots().size(), 1);
+
+        QTimer::singleShot(50, &restarted, [] {
+            if (auto* prompt = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                prompt->button(QMessageBox::Discard)->click();
+            }
+        });
+        QVERIFY(restarted.close());
+        QVERIFY(snapshots().isEmpty());
+    }
+
     void draftTabsPreserveEditsAcrossSheetUndo()
     {
         graph3d::MainWindow main;
@@ -1946,5 +2049,26 @@ private:
     QTemporaryDir settingsDir_;
 };
 
-QTEST_MAIN(ViewportTest)
+int main(int argc, char** argv)
+{
+    QApplication app(argc, argv);
+    QTemporaryDir settings;
+    if (!settings.isValid()) {
+        return 2;
+    }
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    const auto args = app.arguments();
+    if (args.size() == 4 && args.at(1) == QStringLiteral("--recovery-test-child")) {
+        graph3d::DocumentWindow window(nullptr, args.at(2));
+        window.show();
+        if (!window.openDocument(args.at(3))) {
+            return 2;
+        }
+        auto* tabs = window.findChild<QTabWidget*>("documentTabs");
+        tabs->currentWidget()->findChild<QAction*>("addDraftSheet")->trigger();
+        return app.exec();
+    }
+    ViewportTest tests;
+    return QTest::qExec(&tests, argc, argv);
+}
 #include "ViewportTest.moc"

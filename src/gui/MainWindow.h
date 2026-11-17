@@ -22,6 +22,7 @@ namespace graph3d {
 
 namespace io { enum class ExchangeFormat; }
 
+class DocumentWindow;
 class DraftWindow;
 class PropertyPanel;
 class SketchEditor;
@@ -32,13 +33,15 @@ class MainWindow final : public QMainWindow {
     Q_OBJECT
 
 public:
-    MainWindow();
+    explicit MainWindow(DocumentWindow* host = nullptr);
     bool initializeScene();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    friend class DocumentWindow;
+    bool canClose();
     void createMenus();
     void showStartPage();
     bool showWorkspace();
@@ -92,6 +95,7 @@ private:
     void writeLog(const QString& message);
     void showSceneError(const QString& message);
 
+    DocumentWindow* host_;
     document::Document document_;
     Viewport* viewport_;
     QStackedWidget* pages_;

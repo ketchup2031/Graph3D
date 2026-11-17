@@ -1,4 +1,6 @@
 #include "gui/DraftWindow.h"
+#include "gui/DocumentWindow.h"
+#include "io/DxfIO.h"
 
 #include "gui/DraftCanvas.h"
 #include "gui/InterfaceLanguage.h"
@@ -77,12 +79,12 @@ QString chooseSavePath(QWidget* parent, const QString& title, const QString& pat
 
 }  // namespace
 
-DraftWindow::DraftWindow(QWidget* parent)
-    : QMainWindow(parent, Qt::Window), sourceWatch_(new QFileSystemWatcher(this)),
+DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
+    : QMainWindow(parent, host ? Qt::Widget : Qt::Window), host_(host), sourceWatch_(new QFileSystemWatcher(this)),
       modelStatus_(new QLabel(this))
 {
     setObjectName(QStringLiteral("draftWindow"));
-    setAttribute(Qt::WA_DeleteOnClose);
+    setAttribute(Qt::WA_DeleteOnClose, !host_);
     resize(1100, 760);
     auto* workspace = new QWidget(this);
     auto* layout = new QVBoxLayout(workspace);
@@ -102,15 +104,30 @@ DraftWindow::DraftWindow(QWidget* parent)
         statusBar()->showMessage(tr("The line endpoint must be inside the drawing area."), 4000);
     });
     auto* file = menuBar()->addMenu(tr("&File"));
-    file->addAction(tr("New drawing"), QKeySequence::New, this, [this] { newDrawing(); });
+    if (host_) {
+        file->addAction(tr("Start page"), this, [this] { host_->showHome(); });
+    }
+    file->addAction(tr("New drawing"), QKeySequence::New, this, [this] {
+        if (host_) {
+            host_->newDrawing();
+        } else {
+            newDrawing();
+        }
+    });
     file->addAction(tr("Open drawing…"), QKeySequence::Open, this, &DraftWindow::browseDrawing);
     auto* save = file->addAction(tr("Save"), QKeySequence::Save, this, [this] { saveDrawing(false); });
     save->setObjectName(QStringLiteral("saveDraft"));
     file->addAction(tr("Save as…"), QKeySequence::SaveAs, this, [this] { saveDrawing(true); });
     auto* pdf = file->addAction(tr("Export PDF…"), this, &DraftWindow::exportPdf);
     pdf->setObjectName(QStringLiteral("exportDraftPdf"));
+    file->addAction(tr("Import DXF…"), this, &DraftWindow::browseDxf)->setObjectName(QStringLiteral("importDraftDxf"));
+    file->addAction(tr("Export current sheet to DXF…"), this, &DraftWindow::exportDxf)->setObjectName(QStringLiteral("exportDraftDxf"));
     file->addSeparator();
-    file->addAction(tr("Close drawing"), QKeySequence::Close, this, &QWidget::close);
+    if (host_) {
+        file->addAction(tr("Close drawing"), this, [this] { host_->closeCurrent(); });
+    } else {
+        file->addAction(tr("Close drawing"), QKeySequence::Close, this, &QWidget::close);
+    }
 
     auto* edit = menuBar()->addMenu(tr("&Edit"));
     auto* undo = history_.createUndoAction(this, tr("Undo"));
@@ -321,6 +338,7 @@ DraftWindow::DraftWindow(QWidget* parent)
     connect(&history_, &QUndoStack::indexChanged, this, [this] {
         canvas_->cancel();
         canvas_->update();
+        updateTitle();
     });
     connect(&history_, &QUndoStack::cleanChanged, this, [this] { updateTitle(); });
     select->trigger();
@@ -398,6 +416,11 @@ void DraftWindow::editItem(int index, const std::optional<DraftItem>& after, con
     };
     pushSheetEdit(description, [=] { apply(before.has_value(), after); },
                   [=] { apply(after.has_value(), before); });
+}
+
+DraftWindow::~DraftWindow()
+{
+    disconnect(&history_, nullptr, this, nullptr);
 }
 
 void DraftWindow::replaceDrawing(drawing::Draft draft, const QString& path)
@@ -627,6 +650,9 @@ void DraftWindow::updateTitle()
 {
     setWindowTitle(tr("%1[*] — Graph3D Drawing").arg(path_.isEmpty() ? tr("Untitled") : QFileInfo(path_).fileName()));
     setWindowModified(!history_.isClean());
+    if (host_) {
+        host_->documentChanged(this);
+    }
 }
 
 bool DraftWindow::newDrawing()
@@ -659,6 +685,10 @@ bool DraftWindow::openDrawing(const QString& path)
 
 void DraftWindow::browseDrawing()
 {
+    if (host_) {
+        host_->browse();
+        return;
+    }
     const auto path = QFileDialog::getOpenFileName(this, tr("Open drawing"), path_, tr("Graph3D drawings (*.g3draw)"),
         nullptr, (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
@@ -674,6 +704,9 @@ bool DraftWindow::saveDrawing(bool saveAs)
     if (path.isEmpty()) {
         return false;
     }
+    if (host_ && !host_->canSaveAs(this, path)) {
+        return false;
+    }
     try {
         io::saveDraft(path, wholeDrawing());
         path_ = path;
@@ -684,6 +717,62 @@ bool DraftWindow::saveDrawing(bool saveAs)
     } catch (const std::exception& error) {
         QMessageBox::warning(this, tr("Save drawing"), localizedDiagnostic(error.what()));
         return false;
+    }
+}
+
+void DraftWindow::browseDxf()
+{
+    const auto path = QFileDialog::getOpenFileName(this, tr("Import DXF"), path_, tr("DXF files (*.dxf)"),
+        nullptr, (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+    if (!path.isEmpty()) {
+        if (host_) {
+            host_->openDocument(path);
+        } else {
+            importDxf(path);
+        }
+    }
+}
+
+bool DraftWindow::importDxf(const QString& path)
+{
+    try {
+        auto loaded = io::importDxf(path);
+        if (!confirmSave()) {
+            return false;
+        }
+        replaceDrawing(std::move(loaded.drawing));
+        history_.resetClean();
+        QString message = tr("Imported %1").arg(QFileInfo(path).fileName());
+        if (loaded.skipped) {
+            message += tr(". Unsupported entities skipped: %1.").arg(loaded.skipped);
+        }
+        if (loaded.beyondSheet) {
+            message += tr(" Geometry exceeds the sheet at 1:1.");
+        }
+        statusBar()->showMessage(message);
+        return true;
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, tr("Import DXF"), localizedDiagnostic(error.what()));
+        return false;
+    }
+}
+
+void DraftWindow::exportDxf()
+{
+    const auto path = chooseSavePath(this, tr("Export current sheet to DXF"), {},
+                                     tr("DXF files (*.dxf)"), QStringLiteral("dxf"));
+    if (path.isEmpty()) {
+        return;
+    }
+    try {
+        const int skipped = io::exportDxf(path, draft_);
+        auto message = tr("Exported %1").arg(QFileInfo(path).fileName());
+        if (skipped) {
+            message += tr(". Unsupported entities skipped: %1.").arg(skipped);
+        }
+        statusBar()->showMessage(message);
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, tr("Export current sheet to DXF"), localizedDiagnostic(error.what()));
     }
 }
 
