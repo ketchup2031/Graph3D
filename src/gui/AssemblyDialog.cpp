@@ -35,7 +35,7 @@ AssemblyDialog::AssemblyDialog(const document::Document& document, Sources sourc
       table_(new QTableWidget(0, ColumnCount, this)),
       editing_(existing != nullptr)
 {
-    setWindowTitle(editing_ ? tr("Edit component placement") : tr("Create assembly"));
+    setWindowTitle(editing_ ? tr("Edit components and mates") : tr("Create assembly"));
     setObjectName(QStringLiteral("assemblyDialog"));
     resize(1050, 420);
     auto* window = new QVBoxLayout(this);
@@ -44,11 +44,12 @@ AssemblyDialog::AssemblyDialog(const document::Document& document, Sources sourc
     auto* placement = new QWidget(tabs);
     tabs->addTab(placement, tr("Components"));
     auto* layout = new QVBoxLayout(placement);
-    if (!editing_) {
+    {
         auto* form = new QFormLayout;
         auto* count = new QSpinBox(this);
         count->setObjectName(QStringLiteral("assemblyCount"));
         count->setRange(geometry::minAssemblyComponents, geometry::maxAssemblyComponents);
+        count->setValue(existing ? static_cast<int>(existing->components.size()) : geometry::minAssemblyComponents);
         form->addRow(tr("Components"), count);
         layout->addLayout(form);
         connect(count, &QSpinBox::valueChanged, this, [this](int size) {
@@ -134,7 +135,6 @@ void AssemblyDialog::appendComponent(const document::Component& component)
         body->addItem(name, id);
     }
     body->setCurrentIndex(body->findData(component.body));
-    body->setEnabled(!editing_);
     connect(body, &QComboBox::currentIndexChanged, this, [this, row] {
         std::erase_if(mates_, [row](const auto& mate) { return mate.component == row + 1 || mate.target == row + 1; });
     });

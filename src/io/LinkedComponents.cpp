@@ -55,6 +55,13 @@ public:
                 .arg(object).arg(QDir::toNativeSeparators(path)));
         }
         auto record = file.document.componentRecord(object);
+        record.identity.clear();
+        if (const auto* assembly = std::get_if<document::Assembly>(&entry->parameters)) {
+            for (std::size_t i = 0; i < assembly->components.size(); ++i) {
+                const auto* child = file.document.find(assembly->components[i].body);
+                record.children[i].identity = portableComponentIdentity(*child, path).toStdString();
+            }
+        }
         if (record.properties.name.empty()) {
             record.properties.name = QFileInfo(path).completeBaseName().toStdString();
         }
@@ -121,6 +128,24 @@ private:
 document::LinkedComponent readLinkedComponent(const QString& source, int object, const QString& owner)
 {
     return SourceLoader(owner).component(source, object);
+}
+
+QString portableComponentIdentity(const document::Object& object, const QString& owner)
+{
+    const auto* external = std::get_if<document::LinkedComponent>(&object.parameters);
+    if (!external) {
+        return QStringLiteral("object:%1").arg(object.id);
+    }
+    const auto base = QFileInfo(owner).absoluteDir();
+    auto relative = base.relativeFilePath(QString::fromStdString(external->sourcePath));
+#ifdef Q_OS_WIN
+    relative = relative.toCaseFolded();
+#endif
+    auto identity = QStringLiteral("link:%1#%2").arg(relative).arg(external->sourceObject);
+    if (object.properties != document::PartProperties{}) {
+        identity += QStringLiteral(":override:%1").arg(object.id);
+    }
+    return identity;
 }
 
 bool updateLinkedComponents(document::Document& document, const QString& owner, int selected)

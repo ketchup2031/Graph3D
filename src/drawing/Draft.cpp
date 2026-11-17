@@ -1,4 +1,5 @@
 #include "drawing/Draft.h"
+#include "drawing/Specification.h"
 #include "drawing/DraftCurves.h"
 
 #include <QCoreApplication>
@@ -687,6 +688,7 @@ static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int sele
     p.setClipRect(frame, Qt::IntersectClip);
     if (draft.modelViews) {
         paintModelViews(p, *draft.modelViews, draft.paper.eskd);
+        paintPositionCallouts(p, *draft.modelViews);
     }
     const DraftGeometry geometry(draft, preview);
     for (const bool hatches : {true, false}) {
@@ -733,13 +735,13 @@ void exportDraftPdf(const QString& path, const Draft& draft)
     }
     {
         QPdfWriter writer(&file);
-        const auto setPage = [&](const Draft& sheet) {
-            if (!writer.setPageLayout(QPageLayout(QPageSize(sheet.a3 ? QPageSize::A3 : QPageSize::A4),
-                sheet.paper.portrait ? QPageLayout::Portrait : QPageLayout::Landscape, {}))) {
+        const auto setPage = [&](bool a3, bool portrait) {
+            if (!writer.setPageLayout(QPageLayout(QPageSize(a3 ? QPageSize::A3 : QPageSize::A4),
+                portrait ? QPageLayout::Portrait : QPageLayout::Landscape, {}))) {
                 throw std::runtime_error("Could not set the drawing PDF page layout.");
             }
         };
-        setPage(draft);
+        setPage(draft.a3, draft.paper.portrait);
         writer.setResolution(300);
         writer.setCreator(QStringLiteral("Graph3D"));
         writer.setTitle(draft.title);
@@ -750,7 +752,7 @@ void exportDraftPdf(const QString& path, const Draft& draft)
         for (int i = 0; i < pages; ++i) {
             const Draft& sheet = i == 0 ? draft : draft.additionalSheets[i - 1];
             if (i != 0) {
-                setPage(sheet);
+                setPage(sheet.a3, sheet.paper.portrait);
                 if (!writer.newPage()) {
                     throw std::runtime_error("Could not add a drawing PDF page.");
                 }
@@ -760,6 +762,25 @@ void exportDraftPdf(const QString& path, const Draft& draft)
             painter.scale(writer.width() / size.width(), writer.height() / size.height());
             paintDraft(painter, sheet, false, -1, nullptr, i + 1, pages);
             painter.restore();
+        }
+        for (int i = 0; i < pages; ++i) {
+            const auto& sheet = i == 0 ? draft : draft.additionalSheets[i - 1];
+            if (!sheet.modelViews || !sheet.modelViews->assembly || !sheet.modelViews->assembly->includeSpecification) {
+                continue;
+            }
+            const auto& assembly = *sheet.modelViews->assembly;
+            const auto specification = paginateSpecification(assembly);
+            for (std::size_t page = 0; page < specification.size(); ++page) {
+                setPage(false, true);
+                if (!writer.newPage()) {
+                    throw std::runtime_error("Could not add a drawing PDF page.");
+                }
+                painter.save();
+                painter.scale(writer.width() / 210.0, writer.height() / 297.0);
+                paintSpecificationPage(painter, assembly, specification[page], i + 1,
+                    static_cast<int>(page) + 1, static_cast<int>(specification.size()));
+                painter.restore();
+            }
         }
         if (!painter.end()) {
             throw std::runtime_error("Could not finish the drawing PDF.");

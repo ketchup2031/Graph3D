@@ -152,7 +152,7 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
     drawing::Draft draft{readText(root.value("title")), readText(root.value("number")),
                          readText(root.value("author")), paper == "A3", {}};
     draft.items.reserve(items.size());
-    if (version == 5) {
+    if (version >= 5) {
         if (!root.value("portrait").isBool() || !root.value("eskd").isBool()
             || !root.value("requirements").isString() || root.value("requirements").toString().size() > 2400) {
             fileError(QStringLiteral("Invalid drawing sheet settings."));
@@ -197,7 +197,7 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
         } else if (item.kind > drawing::DraftKind::Vertical) {
             fileError(QStringLiteral("Invalid drawing geometry."));
         }
-        if (version == 5) {
+        if (version >= 5) {
             item.layer = entry.value("layer").toInt(-1);
         }
         if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())
@@ -215,7 +215,11 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
         validateLinks(draft);
     }
     if (version == 3 || (version >= 4 && root.contains("modelViews"))) {
-        draft.modelViews = readModelViews(root.value("modelViews").toObject(), path);
+        const auto model = root.value("modelViews").toObject();
+        if (version < 6 && model.contains("assembly")) {
+            fileError(QStringLiteral("This assembly drawing requires drawing format version 6."));
+        }
+        draft.modelViews = readModelViews(model, path);
     }
     return draft;
 }
@@ -240,7 +244,7 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
             {"stroke", strokes.at(static_cast<std::size_t>(item.stroke))},
             {"a", writePoint(item.a)}, {"b", writePoint(item.b)}, {"label", writePoint(item.label)},
             {"text", item.text}};
-        if (version == 5) {
+        if (version >= 5) {
             entry.insert("layer", item.layer);
         }
         if (version >= 2) {
@@ -275,7 +279,7 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
     if (draft.modelViews) {
         root.insert("modelViews", writeModelViews(*draft.modelViews, path));
     }
-    if (version == 5) {
+    if (version >= 5) {
         if (draft.layers.empty() || draft.layers.size() > drawing::maxLayers || draft.paper.material.size() > 200
             || draft.paper.organization.size() > 200 || draft.paper.requirements.size() > 2400) {
             fileError(QStringLiteral("Invalid drawing sheet settings."));
@@ -302,6 +306,10 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
 
 int draftVersion(const drawing::Draft& draft)
 {
+    const auto isAssembly = [](const auto& sheet) { return sheet.modelViews && sheet.modelViews->assembly; };
+    if (isAssembly(draft) || std::ranges::any_of(draft.additionalSheets, isAssembly)) {
+        return 6;
+    }
     if (!draft.additionalSheets.empty() || draft.paper != drawing::DraftPaper{}
         || draft.layers != std::vector<drawing::DraftLayer>{{}}
         || (draft.modelViews && (draft.modelViews->detail || draft.modelViews->local))
@@ -327,7 +335,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const int version = root.value("version").toInt();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 5
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 6
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }

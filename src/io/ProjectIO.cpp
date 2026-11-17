@@ -347,6 +347,9 @@ QJsonObject encodeRecord(const document::ComponentRecord& record, int depth, int
         children.append(encodeRecord(child, depth + 1, remaining));
     }
     QJsonObject value{{"properties", encodeProperties(record.properties)}, {"children", children}};
+    if (!record.identity.empty()) {
+        value.insert("identity", QString::fromStdString(record.identity));
+    }
     if (record.densityKgM3) {
         value.insert("densityKgM3", *record.densityKgM3);
     }
@@ -360,6 +363,13 @@ document::ComponentRecord decodeRecord(const QJsonValue& value, int depth, int& 
     }
     const auto object = value.toObject();
     document::ComponentRecord result{decodeProperties(object.value("properties").toObject())};
+    if (object.contains("identity")) {
+        const auto identity = object.value("identity");
+        if (!identity.isString() || identity.toString().size() > 32780 || identity.toString().contains(QChar::Null)) {
+            fileError(QStringLiteral("Invalid component properties."));
+        }
+        result.identity = identity.toString().toStdString();
+    }
     if (object.contains("densityKgM3")) {
         const auto density = number(object.value("densityKgM3"), "densityKgM3");
         if (density <= 0 || density > 1.e9) {

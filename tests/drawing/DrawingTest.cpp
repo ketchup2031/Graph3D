@@ -1,4 +1,6 @@
 #include "drawing/DrawingSheet.h"
+#include "drawing/Specification.h"
+#include "io/LinkedComponents.h"
 #include "drawing/DraftCurves.h"
 #include "io/DraftIO.h"
 #include "io/ModelViewsIO.h"
@@ -434,6 +436,105 @@ void verifySketchOnFace(const QDir& output)
         "Undo did not restore the lost projection");
 }
 
+void verifyAssemblyDrawing(const QDir& output)
+{
+    check(output.mkpath("assembly-parts"), "Could not create the assembly source directory");
+    const auto platePath = output.filePath("assembly-parts/base-plate.graph3d");
+    const auto studPath = output.filePath("assembly-parts/stud.graph3d");
+    const auto modelPath = output.filePath("fixture-assembly.graph3d");
+    const auto draftPath = output.filePath("fixture-assembly.g3draw");
+    doc::Document plate, stud, assembly;
+    const auto baseSketch = plate.addSketch({geom::Plane::XY, {geom::Rectangle{{-60, -35}, {60, 35}}}});
+    const auto base = plate.addExtrude(baseSketch, 10);
+    plate.setPartProperties(base, {"G3D.017.01", "Base plate", "Steel", "120 × 70 mm"});
+    const auto studSketch = stud.addSketch({geom::Plane::XY, {geom::Circle{{0, 0}, 8}}});
+    const auto stem = stud.addExtrude(studSketch, 18);
+    stud.setPartProperties(stem, {"G3D.017.02", "Locating stud", "Steel", "Ø16 mm"});
+    io::saveProject(platePath, plate);
+    io::saveProject(studPath, stud);
+    const auto fixed = assembly.addLinkedComponent(io::readLinkedComponent(platePath, base, modelPath));
+    const auto first = assembly.addLinkedComponent(io::readLinkedComponent(studPath, stem, modelPath));
+    const auto second = assembly.addLinkedComponent(io::readLinkedComponent(studPath, stem, modelPath));
+    doc::Assembly parts{{{fixed, {}, true}, {first, {0, {-33, 0, 10}, {}}}}};
+    const auto id = assembly.addAssembly(parts);
+    assembly.setVisible(second, false);
+    assembly.setPartProperties(id, {"G3D.017.00", "Locating fixture", {}, {}});
+    io::saveProject(modelPath, assembly);
+    auto source = io::openModelSource(modelPath);
+    draw::Draft draft;
+    draft.title = QStringLiteral("Locating fixture");
+    draft.number = QStringLiteral("G3D.017.00");
+    draft.modelViews = io::buildModelViews(source, id, {}, draw::draftSize(draft));
+    draft.modelViews->dimensions = false;
+    draft.modelViews->hiddenLines = false;
+    draft.modelViews->layout = {{{{167, 49}, 1}, {{64, 49}, 1}, {{167, 121}, 1}}};
+    auto specification = std::make_shared<draw::AssemblyDrawing>(*draft.modelViews->assembly);
+    check(specification->rows.size() == 2 && specification->rows[1].instances.size() == 1,
+          "Initial specification rows were not generated");
+    check(specification->rows[1].designation == "G3D.017.02" && specification->rows[1].material == "Steel",
+          "Specification did not use source metadata");
+    specification->callouts = {{1, 0, 2, {50, 20}, {238, 153}}, {2, 0, 2, {3, 4}, {111, 172}}};
+    draft.modelViews->assembly = specification;
+    io::saveDraft(draftPath, draft);
+    auto saved = io::openDraft(draftPath);
+    check(*saved.modelViews->assembly == *specification, "Specification or positions were not persisted");
+
+    parts.components.push_back({second, {0, {33, 0, 10}, {}}});
+    check(assembly.editAssembly(id, parts), "Editing an existing assembly rejected a new repeated component");
+    io::saveProject(modelPath, assembly);
+    source = io::openModelSource(modelPath);
+    check(saved.modelViews->sourceDigest != source.digest, "Assembly edit did not make the views stale");
+    auto updated = io::buildModelViews(source, id, {}, draw::draftSize(saved), &*saved.modelViews);
+    const auto& rows = updated.assembly->rows;
+    check(rows.size() == 2 && rows[1].position == 2 && rows[1].instances.size() == 2,
+          "A duplicate source did not increase quantity in the existing row");
+    check(updated.layout == saved.modelViews->layout && updated.assembly->callouts == specification->callouts
+        && std::abs(draw::positionOrigin(updated, rows[1], 1, 2).x() - 200) < 1.e-6, "Position associations or the updated pose were lost");
+    auto labels = std::make_shared<draw::AssemblyDrawing>(*updated.assembly);
+    labels->callouts.push_back({2, 1, 2, {-4, -2}, {222, 83}});
+    updated.assembly = std::move(labels);
+    saved.modelViews = updated;
+    io::saveDraft(draftPath, saved);
+    saved = io::openDraft(draftPath);
+    check(saved.modelViews->assembly->callouts.size() == 3 && saved.modelViews->assembly->rows[1].instances.size() == 2,
+          "Updated specification or a repeated position was lost in the saved file");
+
+    const auto pdfPath = output.filePath("fixture-assembly.pdf");
+    draw::exportDraftPdf(pdfPath, saved);
+    QFile pdf(pdfPath);
+    check(pdf.open(QIODevice::ReadOnly) && pdf.readAll().count("/Type /Page\n") == 2,
+          "Export did not contain the drawing and its specification");
+    auto longTable = *saved.modelViews->assembly;
+    longTable.rows.clear();
+    for (int i = 1; i <= 100; ++i) {
+        auto row = saved.modelViews->assembly->rows.front();
+        row.position = i;
+        row.note = QString(1000, u'Ш');
+        longTable.rows.push_back(std::move(row));
+    }
+    const auto pages = draw::paginateSpecification(longTable);
+    qsizetype printed = 0;
+    for (const auto& page : pages) {
+        for (const auto& band : page) {
+            for (const auto& line : band.cells.back()) {
+                printed += line.size();
+            }
+        }
+    }
+    check(pages.size() > 2 && printed == 100000, "Pagination lost long notes");
+
+    auto reduced = parts;
+    reduced.components = {{fixed, {}, true}, {fixed, {0, {0, 0, 10}, {}}}};
+    check(assembly.editAssembly(id, reduced), "Could not remove an existing part position");
+    io::saveProject(modelPath, assembly);
+    const auto afterRemoval = io::buildModelViews(io::openModelSource(modelPath), id, {}, draw::draftSize(saved), &updated);
+    check(afterRemoval.assembly->rows.size() == 1 && afterRemoval.assembly->callouts.size() == 1
+        && afterRemoval.assembly->callouts.front().position == 1,
+        "Removing a position left obsolete callouts");
+    check(assembly.undo(), "Assembly composition change was not undoable");
+    io::saveProject(modelPath, assembly);
+}
+
 void verifyDraft(const QDir& output)
 {
     using enum draw::DraftKind;
@@ -712,6 +813,7 @@ int main(int argc, char** argv)
         }
         verifySections(QDir(args.at(1)), output);
         verifyMultiSheetDrawing(QDir(args.at(1)), output);
+        verifyAssemblyDrawing(output);
         verifyParametricBracket(output);
         verifySketchOnFace(output);
         verifyDraft(output);

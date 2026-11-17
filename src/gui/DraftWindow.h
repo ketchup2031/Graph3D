@@ -52,6 +52,10 @@ private:
     void placeSectionLine();
     void placeLocalSection();
     void updateModelStatus(const QString& failure = {});
+    void showSpecification();
+    void placePosition();
+    void removePosition();
+    void setSpecificationExport(bool enabled);
     void setModelViews(std::optional<drawing::ModelViews> model, const QString& description);
     void removeItem(int index);
     void detachLostPoints(int index, const drawing::DraftItem* replacement);
@@ -77,6 +81,10 @@ private:
     QAction* modelDetail_;
     QAction* sectionLine_;
     QAction* localRegion_;
+    QAction* specification_;
+    QAction* placePosition_;
+    QAction* removePosition_;
+    QAction* specificationExport_;
 };
 
 }  // namespace graph3d

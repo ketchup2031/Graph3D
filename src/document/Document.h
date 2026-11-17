@@ -56,6 +56,7 @@ struct ComponentRecord {
     PartProperties properties;
     std::optional<double> densityKgM3;
     std::vector<ComponentRecord> children;
+    std::string identity;
     bool operator==(const ComponentRecord&) const = default;
 };
 

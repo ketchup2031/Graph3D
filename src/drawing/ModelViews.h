@@ -49,6 +49,33 @@ struct LocalSection {
     bool operator==(const LocalSection&) const = default;
 };
 
+struct SpecificationRow {
+    QString key;
+    int position = 0;
+    QString designation, name, material, note;
+    std::vector<std::array<QPointF, 3>> instances;
+    bool operator==(const SpecificationRow&) const = default;
+};
+
+struct PositionCallout {
+    int position = 0;
+    int instance = 0;
+    int view = 0;
+    QPointF offset;
+    QPointF label;
+    bool operator==(const PositionCallout&) const = default;
+};
+
+struct AssemblyDrawing {
+    QString name;
+    QString designation;
+    std::vector<SpecificationRow> rows;
+    std::vector<PositionCallout> callouts;
+    int nextPosition = 1;
+    bool includeSpecification = true;
+    bool operator==(const AssemblyDrawing&) const = default;
+};
+
 struct ModelViews {
     QString sourcePath;
     int bodyId = 0;
@@ -59,6 +86,7 @@ struct ModelViews {
     std::shared_ptr<const ModelProjection> geometry;
     std::optional<DetailView> detail;
     std::optional<LocalSection> local;
+    std::shared_ptr<const AssemblyDrawing> assembly;
 };
 
 ViewLayout defaultViewLayout(const Projections& views, QSizeF paper);

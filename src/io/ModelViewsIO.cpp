@@ -1,4 +1,5 @@
 #include "io/ModelViewsIO.h"
+#include "io/AssemblyDrawingIO.h"
 
 #include "io/FileIO.h"
 #include "io/ProjectIO.h"
@@ -264,6 +265,9 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
         model.layout = defaultViewLayout(snapshot->views, paper);
     }
     model.geometry = std::move(snapshot);
+    const auto prior = previous && previous->bodyId == bodyId && previous->sourcePath == source.path
+        ? previous->assembly.get() : nullptr;
+    model.assembly = buildAssemblyDrawing(source, *item, prior);
     return model;
 }
 
@@ -316,6 +320,9 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
         result.local = drawing::LocalSection{{focus.x, focus.y}, positive(entry.value("radius"), maxCoordinate)};
     }
     result.geometry = std::move(snapshot);
+    if (object.contains("assembly")) {
+        result.assembly = std::make_shared<AssemblyDrawing>(readAssemblyDrawing(object.value("assembly")));
+    }
     return result;
 }
 
@@ -367,6 +374,9 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath)
             invalid();
         }
         result.insert("local", QJsonObject{{"focus", writePoint({l.center.x(), l.center.y()})}, {"radius", l.radius}});
+    }
+    if (model.assembly) {
+        result.insert("assembly", writeAssemblyDrawing(*model.assembly));
     }
     return result;
 }

@@ -645,14 +645,28 @@ bool Document::editTransform(ObjectId id, geometry::BodyTransform parameters)
 bool Document::editAssembly(ObjectId id, Assembly assembly)
 {
     const auto* existing = std::get_if<Assembly>(&objectAt(objects_, id).parameters);
-    if (!existing || !std::ranges::equal(existing->components, assembly.components, {},
-                                         &Component::body, &Component::body)) {
-        throw std::invalid_argument("Edit the placement of the existing assembly components.");
+    if (!existing) {
+        throw std::invalid_argument("Select an assembly.");
+    }
+    if (assembly.components.size() < geometry::minAssemblyComponents
+        || assembly.components.size() > geometry::maxAssemblyComponents) {
+        throw std::invalid_argument("An assembly needs 2 to 100 components.");
+    }
+    for (const auto& component : assembly.components) {
+        if (component.body >= id) {
+            throw std::invalid_argument("An input must precede its operation.");
+        }
+        requireBody(objectAt(objects_, component.body));
     }
     if (existing->components == assembly.components && existing->mates == assembly.mates) {
         return false;
     }
     auto next = objects_;
+    for (const auto& component : assembly.components) {
+        if (std::ranges::none_of(existing->components, [&](const auto& prior) { return prior.body == component.body; })) {
+            next[component.body - 1].visible = false;
+        }
+    }
     next[id - 1].parameters = std::move(assembly);
     rebuild(next, id - 1);
     commit(std::move(next));

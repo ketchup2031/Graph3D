@@ -540,6 +540,92 @@ private slots:
         QCOMPARE(graph3d::drawing::draftDimensionText(geometry.resolve(restored.items.at(5))), QStringLiteral("⌀24"));
     }
 
+    void assemblyDrawingWorkflow()
+    {
+        using namespace graph3d;
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto modelPath = directory.filePath("assembly.graph3d");
+        const auto draftPath = directory.filePath("assembly.g3draw");
+        document::Document model;
+        const auto sketch = model.addSketch({geometry::Plane::XY, {geometry::Rectangle{{-20, -15}, {20, 15}}}});
+        const auto body = model.addExtrude(sketch, 8);
+        model.setPartProperties(body, {"A-01", "Block", "Steel", ""});
+        document::Assembly assembly{{{body, {}, true}, {body, {0, {65, 0, 0}, {}}}}};
+        const auto id = model.addAssembly(assembly);
+        io::saveProject(modelPath, model);
+        MainWindow main;
+        main.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&main));
+        main.findChild<QPushButton*>("startNewDrawing")->click();
+        auto* drawing = main.findChild<QMainWindow*>("draftWindow");
+        QVERIFY(drawing && QTest::qWaitForWindowExposed(drawing));
+        const auto action = [drawing](const char* name) { return drawing->findChild<QAction*>(name); };
+        const auto pathDialog = [](const QString& path, bool chooseBody) {
+            QTimer::singleShot(0, [=] {
+                if (auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    dialog->selectFile(path);
+                    static_cast<QDialog*>(dialog)->accept();
+                    if (chooseBody) {
+                        QTimer::singleShot(0, [] {
+                            if (auto* selector = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                                selector->accept();
+                            }
+                        });
+                    }
+                }
+            });
+        };
+        pathDialog(modelPath, true);
+        action("linkedViewsSource")->trigger();
+        QVERIFY(action("viewSpecification")->isEnabled());
+
+        const auto previewQuantity = [&](const QString& quantity) {
+            bool correct = false;
+            QTimer::singleShot(0, [&] {
+                if (auto* preview = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                    const auto* table = preview->findChild<QTableWidget*>("specificationRows");
+                    correct = table && table->rowCount() == 1
+                        && table->item(0, 0)->text() == "1" && table->item(0, 4)->text() == quantity;
+                    preview->accept();
+                }
+            });
+            action("viewSpecification")->trigger();
+            return correct;
+        };
+        QVERIFY(previewQuantity("2"));
+        QTimer::singleShot(0, [] {
+            if (auto* pick = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                pick->accept();
+            }
+        });
+        action("placeAssemblyPosition")->trigger();
+        auto* canvas = drawing->findChild<QWidget*>("draftCanvas");
+        const auto click = [canvas](QPointF point) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + point * scale).toPoint());
+        };
+        click({194, 51});
+        click({160, 38});
+        pathDialog(draftPath, false);
+        action("saveDraft")->trigger();
+        auto saved = io::openDraft(draftPath);
+        QCOMPARE(saved.modelViews->assembly->callouts.size(), std::size_t(1));
+        QCOMPARE(saved.modelViews->assembly->callouts.front().position, 1);
+        assembly.components.push_back({body, {0, {130, 0, 0}, {}}});
+        QVERIFY(model.editAssembly(id, assembly));
+        io::saveProject(modelPath, model);
+        action("linkedViewsRefresh")->trigger();
+        QVERIFY(previewQuantity("3"));
+        action("saveDraft")->trigger();
+        saved = io::openDraft(draftPath);
+        QCOMPARE(saved.modelViews->assembly->callouts.size(), std::size_t(1));
+        QCOMPARE(saved.modelViews->assembly->rows.front().instances.size(), std::size_t(3));
+        QVERIFY(drawing->close());
+    }
+
     void linkedModelDrawingWorkflow()
     {
         QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -1553,6 +1639,17 @@ private slots:
         action("updateLinkedComponents")->trigger();
         QVERIFY(assembly->text(2).isEmpty());
         QVERIFY(window.statusBar()->currentMessage().contains("Linked components updated"));
+        QTimer::singleShot(0, [] {
+            if (auto* edit = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                edit->findChild<QSpinBox*>("assemblyCount")->setValue(3);
+                auto* table = edit->findChild<QTableWidget*>("assemblyComponents");
+                qobject_cast<QComboBox*>(table->cellWidget(2, 0))->setCurrentIndex(2);
+                qobject_cast<QDoubleSpinBox*>(table->cellWidget(2, 2))->setValue(70);
+                edit->accept();
+            }
+        });
+        window.findChild<QPushButton*>("editAssemblyComponents")->click();
+        QVERIFY(assembly->text(1).contains("3") && assembly->text(2).isEmpty());
     }
 
     void advancedModelingThroughMenus()

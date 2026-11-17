@@ -2,6 +2,7 @@
 
 #include "geometry/Sketch.h"
 #include <vector>
+#include <array>
 
 class TopoDS_Shape;
 
@@ -33,6 +34,7 @@ struct Section {
 };
 
 Projections project(const TopoDS_Shape& solid);
+std::vector<std::array<Point, 3>> componentViewCenters(const TopoDS_Shape& assembly);
 Section section(const TopoDS_Shape& solid, geometry::Plane plane, double offset);
 
 }  // namespace graph3d::drawing

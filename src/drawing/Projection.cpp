@@ -16,6 +16,7 @@
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Wire.hxx>
@@ -251,6 +252,20 @@ Linework faceLoops(const TopoDS_Face& face, const Frame& frame)
 }
 
 }  // namespace
+
+std::vector<std::array<Point, 3>> componentViewCenters(const TopoDS_Shape& assembly)
+{
+    const auto origin = boundsOf(assembly).center;
+    std::vector<std::array<Point, 3>> result;
+    for (TopoDS_Iterator component(assembly); component.More(); component.Next()) {
+        const auto center = boundsOf(component.Value()).center;
+        const auto x = center.X() - origin.X();
+        const auto y = center.Y() - origin.Y();
+        const auto z = center.Z() - origin.Z();
+        result.push_back({Point{x, -z}, Point{y, -z}, Point{x, -y}});
+    }
+    return result;
+}
 
 Projections project(const TopoDS_Shape& solid)
 {

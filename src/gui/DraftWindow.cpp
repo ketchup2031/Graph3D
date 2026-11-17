@@ -175,6 +175,15 @@ DraftWindow::DraftWindow(QWidget* parent)
     modelRemove_ = views->addAction(tr("Remove model views"), this, [this] {
         setModelViews({}, tr("Remove model views"));
     });
+    auto* assembly = menuBar()->addMenu(tr("Assembly &drawing"));
+    specification_ = assembly->addAction(tr("View specification…"), this, &DraftWindow::showSpecification);
+    specification_->setObjectName(QStringLiteral("viewSpecification"));
+    placePosition_ = assembly->addAction(tr("Place position number…"), this, &DraftWindow::placePosition);
+    placePosition_->setObjectName(QStringLiteral("placeAssemblyPosition"));
+    removePosition_ = assembly->addAction(tr("Remove position number…"), this, &DraftWindow::removePosition);
+    specificationExport_ = assembly->addAction(tr("Include specification in PDF"));
+    specificationExport_->setCheckable(true);
+    connect(specificationExport_, &QAction::toggled, this, &DraftWindow::setSpecificationExport);
     modelStatus_->setObjectName(QStringLiteral("linkedViewsStatus"));
     modelStatus_->setTextFormat(Qt::PlainText);
     modelStatus_->setWordWrap(true);
@@ -711,7 +720,10 @@ void DraftWindow::chooseModel()
                 if (object.visible) {
                     selected = static_cast<int>(ids.size());
                 }
-                labels.append(tr("Body #%1").arg(object.id));
+                const auto* external = std::get_if<document::LinkedComponent>(&object.parameters);
+                const bool assembly = std::holds_alternative<document::Assembly>(object.parameters)
+                    || (external && !external->record.children.empty());
+                labels.append(assembly ? tr("Assembly #%1").arg(object.id) : tr("Body #%1").arg(object.id));
                 ids.push_back(object.id);
             }
         }
@@ -770,6 +782,15 @@ void DraftWindow::updateModelStatus(const QString& failure)
     localRegion_->setEnabled(linked && draft_.modelViews->local.has_value());
     for (auto* action : {modelRefresh_, modelSettings_, modelRemove_, modelDetail_, sectionLine_}) {
         action->setEnabled(linked);
+    }
+    const auto* assembly = linked ? draft_.modelViews->assembly.get() : nullptr;
+    specification_->setEnabled(assembly != nullptr);
+    placePosition_->setEnabled(assembly && assembly->callouts.size() < 1000);
+    removePosition_->setEnabled(assembly && !assembly->callouts.empty());
+    specificationExport_->setEnabled(assembly != nullptr);
+    {
+        const QSignalBlocker block(specificationExport_);
+        specificationExport_->setChecked(assembly && assembly->includeSpecification);
     }
     modelStatus_->setVisible(linked);
     const auto path = linked ? draft_.modelViews->sourcePath : QString{};
