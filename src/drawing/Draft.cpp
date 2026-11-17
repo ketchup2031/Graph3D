@@ -1,4 +1,5 @@
 #include "drawing/Draft.h"
+#include "drawing/ModelReference.h"
 #include "drawing/Specification.h"
 #include "drawing/DraftCurves.h"
 
@@ -19,6 +20,10 @@
 #include <stdexcept>
 
 namespace graph3d::drawing {
+
+static void paintDraftTable(QPainter& p, QPointF origin, const DraftTable& table, QColor color,
+                            double labelFraction = 0);
+
 namespace {
 
 constexpr double epsilon = 0.001;
@@ -50,12 +55,19 @@ QPainterPath itemPath(const DraftItem& item)
     case DraftKind::Datum:
     case DraftKind::Tolerance:
     case DraftKind::Roughness:
+    case DraftKind::Thread:
+    case DraftKind::Weld:
+    case DraftKind::Fragment:
+    case DraftKind::Table:
         break;
     case DraftKind::Line:
     case DraftKind::Rectangle:
     case DraftKind::Circle:
     case DraftKind::Arc:
     case DraftKind::Polyline:
+    case DraftKind::Ellipse:
+    case DraftKind::Spline:
+    case DraftKind::ConstructionLine:
         return draftCurvePath(item);
     case DraftKind::Text:
         path.addText(item.a, lettering(4), item.text);
@@ -186,16 +198,21 @@ AnnotationShape annotationShape(const DraftItem& item)
         const auto tip = datum ? item.a + axis * 2.5 : item.a;
         const auto base = datum ? item.a : item.a + axis * 3;
         const auto halfWidth = datum ? 1.3 : .7;
-        ink.moveTo(tip);
-        ink.lineTo(base + side * halfWidth);
-        ink.lineTo(base - side * halfWidth);
-        ink.closeSubpath();
+        if (item.kind == DraftKind::Weld) {
+            segment(tip, base + side * halfWidth);
+        } else {
+            ink.moveTo(tip);
+            ink.lineTo(base + side * halfWidth);
+            ink.lineTo(base - side * halfWidth);
+            ink.closeSubpath();
+        }
     }
-    if (item.kind == DraftKind::Leader) {
+    if (item.kind == DraftKind::Leader || item.kind == DraftKind::Thread || item.kind == DraftKind::Weld) {
         const auto width = std::max(7.0, metrics.horizontalAdvance(item.text) + 2);
         segment(at, at + QPointF(width, 0));
-        ink.addText(at + QPointF(1, -1), font, item.text);
-        shape.box = {at.x(), at.y() - 5, width, 5};
+        const bool reverse = item.kind == DraftKind::Weld && item.weldReverse;
+        ink.addText(at + QPointF(1, reverse ? 4 : -1), font, item.text);
+        shape.box = {at.x(), at.y() + (reverse ? 0 : -5), width, 5};
     } else if (item.kind == DraftKind::Roughness) {
         const auto shelf = at + QPointF(7, -6);
         segment(at, at + QPointF(2, 3));
@@ -232,8 +249,11 @@ QString numberedRequirements(const Draft& draft)
 
 QRectF requirementsArea(const Draft& draft, const QRectF& frame, int sheet)
 {
-    const double width = draft.paper.eskd ? 185 : 145;
-    const double bottom = frame.bottom() - (draft.paper.eskd ? (sheet == 1 ? 56 : 16) : 25);
+    const auto& custom = draft.paper.titleBlock;
+    const double width = custom ? custom->width : draft.paper.eskd ? 185 : 145;
+    const double height = custom ? custom->rows.size() * custom->rowHeight + 1
+                                 : draft.paper.eskd ? (sheet == 1 ? 56 : 16) : 25;
+    const double bottom = frame.bottom() - height;
     return QRectF(frame.right() - width, frame.top() + 2, width - 2, bottom - frame.top() - 2);
 }
 
@@ -324,11 +344,12 @@ void paintEskdBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sh
             cell(QRectF(0, 30 + i * 5, 17, 5), roles[i], 2);
         }
         cell({17, 30, 23, 5}, draft.author);
-        cell({75, 0, 110, 15}, draft.number, 5);
-        cell({75, 15, 70, 25}, draft.title, 5);
+        cell({75, 0, 110, 15}, draftTitleField(draft, TitleField::Designation, sheet, total), 5);
+        cell({75, 15, 70, 25}, draftTitleField(draft, TitleField::Title, sheet, total), 5);
         cell({75, 40, 70, 15}, draft.paper.material, 4);
         cell({145, 15, 15, 5}, QStringLiteral("Лит."), 2);
         cell({160, 15, 10, 5}, QStringLiteral("Масса"), 2);
+        cell({160, 20, 10, 10}, draftTitleField(draft, TitleField::Mass, sheet, total), 2);
         cell({170, 15, 15, 5}, QStringLiteral("Масштаб"), 2);
         const double scale = draft.modelViews ? draft.modelViews->layout[0].scale : 1;
         const auto ratio = scale >= 1 ? QStringLiteral("%1:1").arg(scale, 0, 'g', 6)
@@ -339,7 +360,7 @@ void paintEskdBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sh
         cell({145, 35, 40, 20}, draft.paper.organization);
     } else {
         table(nextColumns, 15, 15);
-        cell({65, 0, 100, 15}, draft.number, 5);
+        cell({65, 0, 100, 15}, draftTitleField(draft, TitleField::Designation, sheet, total), 5);
         cell({165, 0, 10, 5}, QStringLiteral("Вер."), 2);
         cell({175, 0, 10, 5}, QStringLiteral("Лист"), 2);
         cell({175, 5, 10, 10}, QString::number(sheet));
@@ -351,6 +372,18 @@ void paintEskdBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sh
 
 void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sheet, int total)
 {
+    if (const auto& custom = draft.paper.titleBlock) {
+        DraftTable table{2, custom->width, custom->rowHeight, {}};
+        for (const auto& row : custom->rows) {
+            table.cells << row.label
+                << (row.field == TitleField::Text ? row.text : draftTitleField(draft, row.field, sheet, total));
+        }
+        const auto height = custom->rows.size() * custom->rowHeight;
+        const QRectF bounds(frame.right() - custom->width, frame.bottom() - height, custom->width, height);
+        p.fillRect(bounds, Qt::white);
+        paintDraftTable(p, bounds.topLeft(), table, Qt::black, .34);
+        return;
+    }
     if (draft.paper.eskd) {
         paintEskdBlock(p, draft, frame, sheet, total);
         return;
@@ -369,15 +402,46 @@ void titleBlock(QPainter& p, const Draft& draft, const QRectF& frame, int sheet,
         const auto text = QFontMetricsF(p.font()).elidedText(value, Qt::ElideRight, area.width());
         p.drawText(area, Qt::AlignLeft | Qt::AlignVCenter, text);
     };
-    cell({x + 2, y, 141, 9}, draft.title);
-    cell({x + 2, y + 9, 102, 8}, draft.number);
-    cell({x + 108, y + 9, 35, 8}, QCoreApplication::translate("DraftSheet", draft.modelViews ? "mm" : "1:1   mm"));
+    cell({x + 2, y, 141, 9}, draftTitleField(draft, TitleField::Title, sheet, total));
+    cell({x + 2, y + 9, 102, 8}, draftTitleField(draft, TitleField::Designation, sheet, total));
+    const auto mass = draftTitleField(draft, TitleField::Mass, sheet, total);
+    cell({x + 108, y + 9, 35, 8}, mass.isEmpty()
+        ? QCoreApplication::translate("DraftSheet", draft.modelViews ? "mm" : "1:1   mm")
+        : mass + QCoreApplication::translate("DraftSheet", " kg"));
     cell({x + 2, y + 17, 102, 7}, draft.author);
     cell({x + 108, y + 17, 35, 7}, QStringLiteral("%1   %2/%3")
         .arg(draft.a3 ? QStringLiteral("A3") : QStringLiteral("A4")).arg(sheet).arg(total));
 }
 
 }  // namespace
+
+QString draftTitleField(const Draft& draft, TitleField field, int page, int pages)
+{
+    const auto* data = draft.paper.modelTitle && draft.modelViews ? &draft.modelViews->titleData : nullptr;
+    switch (field) {
+    case TitleField::Text: return {};
+    case TitleField::Title: return data && !data->name.isEmpty() ? data->name : draft.title;
+    case TitleField::Designation: return data && !data->designation.isEmpty() ? data->designation : draft.number;
+    case TitleField::Author: return draft.author;
+    case TitleField::Material: return draft.paper.material;
+    case TitleField::Organization: return draft.paper.organization;
+    case TitleField::Mass: return data && data->massKg ? QString::number(*data->massKg, 'g', 6) : QString{};
+    case TitleField::Page: return QString::number(page);
+    case TitleField::Pages: return QString::number(pages);
+    }
+    return {};
+}
+
+bool validTitleBlock(const TitleBlockLayout& layout)
+{
+    return std::isfinite(layout.width) && layout.width >= 40 && layout.width <= 185
+        && std::isfinite(layout.rowHeight) && layout.rowHeight >= 4 && layout.rowHeight <= 12
+        && !layout.rows.empty() && layout.rows.size() <= 12
+        && std::ranges::all_of(layout.rows, [](const auto& row) {
+            return row.field >= TitleField::Text && row.field <= TitleField::Pages
+                && row.label.size() <= 80 && row.text.size() <= 200;
+        });
+}
 
 bool isLinearDimension(DraftKind kind)
 {
@@ -390,19 +454,41 @@ bool isDimension(DraftKind kind)
         || kind == DraftKind::Diameter;
 }
 
-QString draftDimensionText(const DraftItem& item)
+static QString dimensionValue(const DraftItem& item)
 {
+    if (item.lostReference) {
+        return QCoreApplication::translate("DraftSheet", "Lost link");
+    }
     const auto number = [](double value) { return QString::number(std::abs(value), 'g', 8); };
     const double distance = QLineF(item.a, item.b).length();
     switch (item.kind) {
-    case DraftKind::Horizontal: return number(item.a.x() - item.b.x());
-    case DraftKind::Vertical: return number(item.a.y() - item.b.y());
-    case DraftKind::Aligned: return number(distance);
+    case DraftKind::Horizontal: return number((item.a.x() - item.b.x()) / item.measurementScale);
+    case DraftKind::Vertical: return number((item.a.y() - item.b.y()) / item.measurementScale);
+    case DraftKind::Aligned: return number(distance / item.measurementScale);
     case DraftKind::Angular: return number(sweepOf(item) * 180 / std::numbers::pi) + QStringLiteral("°");
-    case DraftKind::Radius: return QStringLiteral("R") + number(distance);
-    case DraftKind::Diameter: return QStringLiteral("⌀") + number(2 * distance);
+    case DraftKind::Radius: return QStringLiteral("R") + number(distance / item.measurementScale);
+    case DraftKind::Diameter: return QStringLiteral("⌀") + number(2 * distance / item.measurementScale);
     default: return {};
     }
+}
+
+QString draftDimensionText(const DraftItem& item)
+{
+    auto value = dimensionValue(item);
+    if (value.isEmpty() || item.lostReference) {
+        return value;
+    }
+    const auto& notation = item.dimensionNote;
+    if (!notation.fit.isEmpty()) {
+        value += QLatin1Char(' ') + notation.fit;
+    }
+    if (!notation.upper.isEmpty() || !notation.lower.isEmpty()) {
+        const auto upper = notation.upper.isEmpty() ? QStringLiteral("0") : notation.upper;
+        const auto lower = notation.lower.isEmpty() ? QStringLiteral("0") : notation.lower;
+        value += upper == lower ? QLatin1Char(' ') + upper
+            : QLatin1Char(' ') + upper + QStringLiteral(" / ") + lower;
+    }
+    return value;
 }
 
 std::span<const DraftAnchor> draftAnchors(DraftKind kind)
@@ -413,9 +499,12 @@ std::span<const DraftAnchor> draftAnchors(DraftKind kind)
     static constexpr std::array circle{Center, Right, Left, Top, Bottom};
     static constexpr std::array arc{Start, End, Center};
     switch (kind) {
-    case DraftKind::Line: return line;
+    case DraftKind::Line:
+    case DraftKind::ConstructionLine:
+    case DraftKind::Spline: return line;
     case DraftKind::Rectangle: return rectangle;
-    case DraftKind::Circle: return circle;
+    case DraftKind::Circle:
+    case DraftKind::Ellipse: return circle;
     case DraftKind::Polyline: return line;
     case DraftKind::Arc: return arc;
     default: return {};
@@ -428,18 +517,24 @@ std::optional<QPointF> draftAnchorPoint(const DraftItem& item, DraftAnchor ancho
     if (std::ranges::find(anchors, anchor) == anchors.end()) {
         return {};
     }
-    const auto radius = QLineF(item.a, item.b).length();
+    const auto ellipse = item.kind == DraftKind::Ellipse;
+    const auto center = ellipse ? (item.a + item.b) / 2 : item.a;
+    const auto radii = ellipse ? QPointF(std::abs(item.a.x() - item.b.x()), std::abs(item.a.y() - item.b.y())) / 2
+                               : QPointF(QLineF(item.a, item.b).length(), QLineF(item.a, item.b).length());
+    const bool pointChain = item.kind == DraftKind::Polyline || item.kind == DraftKind::Spline;
     switch (anchor) {
-    case DraftAnchor::Start: return item.kind == DraftKind::Polyline ? item.points.front() : item.a;
-    case DraftAnchor::Center: return item.kind == DraftKind::Arc ? draftArc(item.a, item.b, item.label).a : item.a;
+    case DraftAnchor::Start: return pointChain ? item.points.front() : item.a;
+    case DraftAnchor::Center: return item.kind == DraftKind::Arc ? draftArc(item.a, item.b, item.label).a : center;
     case DraftAnchor::End:
-        return item.kind == DraftKind::Polyline ? item.points.back() : item.kind == DraftKind::Arc ? item.label : item.b;
+        return pointChain ? item.points.back() : item.kind == DraftKind::Arc ? item.label : item.b;
     case DraftAnchor::CornerAB: return QPointF(item.a.x(), item.b.y());
     case DraftAnchor::CornerBA: return QPointF(item.b.x(), item.a.y());
-    case DraftAnchor::Right: return item.a + QPointF(radius, 0);
-    case DraftAnchor::Left: return item.a - QPointF(radius, 0);
-    case DraftAnchor::Top: return item.a - QPointF(0, radius);
-    case DraftAnchor::Bottom: return item.a + QPointF(0, radius);
+    case DraftAnchor::Right: return center + QPointF(radii.x(), 0);
+    case DraftAnchor::Left: return center - QPointF(radii.x(), 0);
+    case DraftAnchor::Top: return center - QPointF(0, radii.y());
+    case DraftAnchor::Bottom: return center + QPointF(0, radii.y());
+    case DraftAnchor::ModelCurve:
+    case DraftAnchor::ModelCenter:
     case DraftAnchor::Curve:
     case DraftAnchor::Intersection: return {};
     }
@@ -447,6 +542,7 @@ std::optional<QPointF> draftAnchorPoint(const DraftItem& item, DraftAnchor ancho
 }
 
 DraftGeometry::DraftGeometry(const Draft& draft, const DraftItem* preview)
+    : model_(draft.modelViews ? &*draft.modelViews : nullptr)
 {
     for (const auto& item : draft.items) {
         if (!item.id.isNull() && !draftAnchors(item.kind).empty()) {
@@ -457,6 +553,9 @@ DraftGeometry::DraftGeometry(const Draft& draft, const DraftItem* preview)
 
 std::optional<QPointF> DraftGeometry::point(const DraftReference& reference) const
 {
+    if (isModelReference(reference)) {
+        return model_ ? modelReferencePoint(*model_, reference) : std::nullopt;
+    }
     const auto* source = sources_.value(reference.item);
     if (!source) {
         return {};
@@ -496,6 +595,10 @@ std::optional<QPointF> DraftGeometry::point(const DraftReference& reference) con
 
 bool DraftGeometry::validReference(const DraftReference& reference) const
 {
+    if (isModelReference(reference)) {
+        return !reference.item.isNull() && !reference.view.isNull() && std::isfinite(reference.parameter)
+            && reference.parameter >= 0 && reference.parameter <= 1;
+    }
     if (reference.anchor != DraftAnchor::Intersection) {
         return point(reference).has_value();
     }
@@ -508,16 +611,62 @@ bool DraftGeometry::validReference(const DraftReference& reference) const
 DraftItem DraftGeometry::resolve(const DraftItem& item) const
 {
     auto copy = item;
+    if (item.kind == DraftKind::Hatch && !item.hatchBoundaries.empty()) {
+        copy.loops.clear();
+        QPainterPath outer;
+        for (const auto& ids : item.hatchBoundaries) {
+            std::vector<const DraftItem*> pieces;
+            for (const auto& id : ids) {
+                pieces.push_back(sources_.value(id));
+            }
+            const auto loop = draftBoundary(pieces);
+            if (!loop) {
+                copy.lostReference = true;
+                break;
+            }
+            QPainterPath boundary;
+            boundary.addPolygon(QPolygonF(loop->begin(), loop->end()));
+            boundary.closeSubpath();
+            if (copy.loops.empty()) {
+                outer = boundary;
+            } else if (!outer.contains(boundary)) {
+                copy.lostReference = true;
+                break;
+            }
+            copy.loops.push_back(*loop);
+        }
+        if (copy.lostReference) {
+            copy.loops.clear();
+        }
+        return copy;
+    }
     if (item.anchorA) {
-        copy.a = point(*item.anchorA).value_or(item.a);
-        // The dimension line keeps its offset from the first measured point.
-        copy.label += copy.a - item.a;
+        const auto resolved = point(*item.anchorA);
+        copy.a = resolved.value_or(item.a);
+        if (isModelReference(*item.anchorA)) {
+            copy.lostReference = !resolved;
+        } else {
+            // A dimension on hand-drawn geometry keeps its offset from the measured point.
+            copy.label += copy.a - item.a;
+        }
     }
     if (item.anchorB) {
-        copy.b = point(*item.anchorB).value_or(item.b);
+        const auto resolved = point(*item.anchorB);
+        copy.b = resolved.value_or(item.b);
+        copy.lostReference |= isModelReference(*item.anchorB) && !resolved;
     }
     if (item.anchorC && !item.points.empty()) {
-        copy.points.front() = point(*item.anchorC).value_or(item.points.front());
+        const auto resolved = point(*item.anchorC);
+        copy.points.front() = resolved.value_or(item.points.front());
+        copy.lostReference |= isModelReference(*item.anchorC) && !resolved;
+    }
+    const bool modelA = item.anchorA && isModelReference(*item.anchorA);
+    const bool modelB = item.anchorB && isModelReference(*item.anchorB);
+    if (modelA || modelB) {
+        const auto scale = model_ && modelA && modelB && item.anchorA->view == item.anchorB->view
+            ? modelReferenceScale(*model_, *item.anchorA) : std::nullopt;
+        copy.lostReference |= !scale;
+        copy.measurementScale = scale.value_or(1);
     }
     return copy;
 }
@@ -533,7 +682,8 @@ QSizeF draftSize(const Draft& draft)
 
 bool isAnnotation(DraftKind kind)
 {
-    return kind >= DraftKind::Leader && kind <= DraftKind::Roughness;
+    return (kind >= DraftKind::Leader && kind <= DraftKind::Roughness)
+        || kind == DraftKind::Thread || kind == DraftKind::Weld;
 }
 
 bool layerVisible(const Draft& draft, int layer)
@@ -556,12 +706,23 @@ bool validItem(const DraftItem& item)
         || item.points.size() > 20000 || !std::ranges::all_of(item.points, inRange)) {
         return false;
     }
+    const auto& note = item.dimensionNote;
+    if ((!isDimension(item.kind) && note != DimensionNote{})
+        || note.fit.size() > 24 || note.upper.size() > 16 || note.lower.size() > 16
+        || (item.kind != DraftKind::Hatch && !item.hatchBoundaries.empty())
+        || (item.kind != DraftKind::Fragment && !item.fragment.empty())
+        || (item.kind != DraftKind::Table && item.table)
+        || (item.kind != DraftKind::Weld && item.weldReverse)) {
+        return false;
+    }
     const auto dx = std::abs(item.a.x() - item.b.x());
     const auto dy = std::abs(item.a.y() - item.b.y());
     switch (item.kind) {
     case DraftKind::Line:
+    case DraftKind::ConstructionLine:
     case DraftKind::Circle: return std::hypot(dx, dy) >= epsilon;
-    case DraftKind::Rectangle: return dx >= epsilon && dy >= epsilon;
+    case DraftKind::Rectangle:
+    case DraftKind::Ellipse: return dx >= epsilon && dy >= epsilon;
     case DraftKind::Tolerance: {
         const auto fields = item.text.split(u'|');
         return item.text.size() <= 200 && fields.size() >= 2 && fields.size() <= 6
@@ -570,6 +731,8 @@ bool validItem(const DraftItem& item)
     case DraftKind::Leader:
     case DraftKind::Datum:
     case DraftKind::Roughness:
+    case DraftKind::Thread:
+    case DraftKind::Weld:
     case DraftKind::Text: return !item.text.trimmed().isEmpty() && item.text.size() <= 200;
     case DraftKind::Horizontal:
     case DraftKind::Vertical:
@@ -578,11 +741,38 @@ bool validItem(const DraftItem& item)
     case DraftKind::Diameter: return true;
     case DraftKind::Angular: return item.points.size() == 1;
     case DraftKind::Arc: return draftArc(item.a, item.b, item.label).radius >= epsilon;
+    case DraftKind::Spline:
+        if (item.points.size() > 512) {
+            return false;
+        }
+        [[fallthrough]];
     case DraftKind::Polyline:
         return item.points.size() >= 2 && std::adjacent_find(item.points.begin(), item.points.end(),
             [](auto a, auto b) { return QLineF(a, b).length() < epsilon; }) == item.points.end();
+    case DraftKind::Fragment:
+        return !item.fragment.empty() && item.fragment.size() <= 1024
+            && std::ranges::all_of(item.fragment, [](const DraftItem& child) {
+                return child.kind != DraftKind::Fragment && child.kind != DraftKind::ConstructionLine
+                    && !child.anchorA && !child.anchorB && !child.anchorC
+                    && child.hatchBoundaries.empty() && validItem(child);
+            });
+    case DraftKind::Table: {
+        if (!item.table) {
+            return false;
+        }
+        const auto& table = *item.table;
+        return table.columns >= 1 && table.columns <= 10 && !table.cells.isEmpty()
+            && table.cells.size() % table.columns == 0 && table.cells.size() <= 30 * table.columns
+            && std::isfinite(table.width) && table.width >= 10 && table.width <= 360
+            && std::isfinite(table.rowHeight) && table.rowHeight >= 3 && table.rowHeight <= 30
+            && std::ranges::all_of(table.cells, [](const auto& cell) { return cell.size() <= 200; });
+    }
     case DraftKind::Hatch:
-        return !item.loops.empty() && std::ranges::all_of(item.loops, [&](const auto& loop) {
+        return (item.hatchBoundaries.empty() || item.hatchBoundaries.size() == item.loops.size())
+            && std::ranges::all_of(item.hatchBoundaries, [](const auto& loop) {
+                return !loop.empty() && loop.size() <= 1024 && std::ranges::none_of(loop, [](const QUuid& id) { return id.isNull(); });
+            })
+            && !item.loops.empty() && std::ranges::all_of(item.loops, [&](const auto& loop) {
             return loop.size() >= 4 && loop.size() <= 50000 && QLineF(loop.front(), loop.back()).length() < epsilon
                 && std::ranges::all_of(loop, inRange);
         });
@@ -590,12 +780,101 @@ bool validItem(const DraftItem& item)
     return false;
 }
 
+QRectF draftItemBounds(const DraftItem& item)
+{
+    if (item.kind == DraftKind::Fragment) {
+        QRectF bounds;
+        for (const auto& child : item.fragment) {
+            bounds |= draftItemBounds(child);
+        }
+        return bounds.translated(item.a);
+    }
+    if (item.kind == DraftKind::Table && item.table) {
+        const auto& table = *item.table;
+        return {item.a, QSizeF(table.width, table.rowHeight * (table.cells.size() / table.columns))};
+    }
+    if (isAnnotation(item.kind)) {
+        const auto shape = annotationShape(item);
+        return shape.box | shape.lines.boundingRect();
+    }
+    return itemPath(item).boundingRect();
+}
+
+DraftItem translateDraftItem(DraftItem item, QPointF delta)
+{
+    if (item.anchorA || item.anchorB || item.anchorC) {
+        item.label += delta;
+        return item;
+    }
+    if (item.kind == DraftKind::Hatch && !item.hatchBoundaries.empty()) {
+        return item;
+    }
+    item.a += delta;
+    if (item.kind != DraftKind::Text && item.kind != DraftKind::Fragment && item.kind != DraftKind::Table) {
+        item.b += delta;
+    }
+    if (isDimension(item.kind) || item.kind == DraftKind::Arc || isAnnotation(item.kind)) {
+        item.label += delta;
+    }
+    for (auto& point : item.points) {
+        point += delta;
+    }
+    for (auto& loop : item.loops) {
+        for (auto& point : loop) {
+            point += delta;
+        }
+    }
+    return item;
+}
+
+static void paintDraftTable(QPainter& p, QPointF origin, const DraftTable& table, QColor color,
+                            double labelFraction)
+{
+    p.save();
+    p.setPen(QPen(color, .25));
+    p.setFont(lettering(3));
+    const auto rows = table.cells.size() / table.columns;
+    const auto columnWidth = [&](int column) {
+        if (labelFraction > 0) {
+            return table.width * (column == 0 ? labelFraction : 1 - labelFraction);
+        }
+        return table.width / table.columns;
+    };
+    for (qsizetype row = 0; row < rows; ++row) {
+        double x = origin.x();
+        for (int column = 0; column < table.columns; ++column) {
+            const auto width = columnWidth(column);
+            const QRectF cell(x, origin.y() + row * table.rowHeight, width, table.rowHeight);
+            p.drawRect(cell);
+            const auto value = QFontMetricsF(p.font()).elidedText(table.cells[row * table.columns + column].simplified(),
+                                                                  Qt::ElideRight, width - 2);
+            p.drawText(cell.adjusted(1, 0, -1, 0), Qt::AlignVCenter | Qt::AlignLeft, value);
+            x += width;
+        }
+    }
+    p.restore();
+}
+
 void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
 {
-    const QColor color = selected ? QColor("#1a72b8") : QColor("#151b22");
+    const QColor color = item.lostReference ? QColor("#a62020") : selected ? QColor("#1a72b8")
+        : item.kind == DraftKind::ConstructionLine ? QColor("#788fa5") : QColor("#151b22");
+    if (item.kind == DraftKind::Fragment) {
+        p.save();
+        p.translate(item.a);
+        for (const auto& child : item.fragment) {
+            paintDraftItem(p, child, selected);
+        }
+        p.restore();
+        return;
+    }
+    if (item.kind == DraftKind::Table && item.table) {
+        paintDraftTable(p, item.a, *item.table, color);
+        return;
+    }
     const bool dimension = isDimension(item.kind);
     QPen pen(color, selected ? 0.48 : dimension ? 0.18 : 0.35, Qt::SolidLine, Qt::FlatCap);
-    if (item.stroke == DraftStroke::Hidden) {
+    if (item.stroke == DraftStroke::Hidden || item.kind == DraftKind::ConstructionLine) {
         pen.setDashPattern({7, 4});
     } else if (item.stroke == DraftStroke::Center) {
         pen.setDashPattern({15, 4, 3, 4});
@@ -616,6 +895,11 @@ void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
     p.setBrush(Qt::NoBrush);
     const auto path = itemPath(item);
     if (item.kind == DraftKind::Hatch) {
+        if (item.lostReference) {
+            p.setFont(lettering(3));
+            p.drawText(item.a, QCoreApplication::translate("DraftSheet", "Lost hatch boundary"));
+            return;
+        }
         p.save();
         p.setClipPath(path, Qt::IntersectClip);
         const auto box = p.clipBoundingRect();
@@ -634,8 +918,29 @@ void paintDraftItem(QPainter& p, const DraftItem& item, bool selected)
     if (dimension) {
         p.setFont(lettering(3));
         const auto anchor = dimensionText(item);
-        const auto text = draftDimensionText(item);
+        const auto& note = item.dimensionNote;
+        const bool deviations = !item.lostReference && (!note.upper.isEmpty() || !note.lower.isEmpty())
+            && note.upper != note.lower;
+        auto text = deviations ? dimensionValue(item) : draftDimensionText(item);
+        if (deviations && !note.fit.isEmpty()) {
+            text += QLatin1Char(' ') + note.fit;
+        }
         const QFontMetricsF metrics(p.font());
+        if (deviations) {
+            auto upper = note.upper.isEmpty() ? QStringLiteral("0") : note.upper;
+            auto lower = note.lower.isEmpty() ? QStringLiteral("0") : note.lower;
+            const QFontMetricsF small(lettering(2));
+            const auto baseWidth = metrics.horizontalAdvance(text);
+            const auto offset = baseWidth + .6;
+            const auto total = offset + std::max(small.horizontalAdvance(upper), small.horizontalAdvance(lower));
+            const auto baseline = anchor - QPointF(item.kind == DraftKind::Vertical ? 0 : total / 2, 0);
+            p.fillRect(QRectF(baseline.x() - .4, baseline.y() - 3, total + .8, 4), Qt::white);
+            p.drawText(baseline, text);
+            p.setFont(lettering(2));
+            p.drawText(baseline + QPointF(offset, -1.25), upper);
+            p.drawText(baseline + QPointF(offset, .85), lower);
+            return;
+        }
         const auto baseline = anchor - QPointF(item.kind == DraftKind::Vertical ? 0 : metrics.horizontalAdvance(text) / 2, 0);
         p.fillRect(metrics.tightBoundingRect(text).translated(baseline).adjusted(-.45, -.35, .45, .35), Qt::white);
         p.drawText(baseline, text);
@@ -654,8 +959,11 @@ bool draftHit(const DraftItem& item, QPointF point, double tolerance)
     if (item.kind == DraftKind::Text) {
         return path.boundingRect().adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(point);
     }
+    if (item.kind == DraftKind::Fragment || item.kind == DraftKind::Table) {
+        return draftItemBounds(item).adjusted(-tolerance, -tolerance, tolerance, tolerance).contains(point);
+    }
     if (item.kind == DraftKind::Hatch) {
-        return path.contains(point);
+        return item.lostReference ? QLineF(item.a, point).length() < tolerance * 2 : path.contains(point);
     }
     QPainterPathStroker stroke;
     stroke.setWidth(tolerance * 2);
@@ -663,7 +971,7 @@ bool draftHit(const DraftItem& item, QPointF point, double tolerance)
 }
 
 static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int selected,
-                            const DraftItem* preview, int sheet, int total)
+                            const DraftItem* preview, int sheet, int total, bool construction)
 {
     const auto size = draftSize(draft);
     const QRectF paper(QPointF{}, size);
@@ -695,8 +1003,9 @@ static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int sele
         for (std::size_t i = 0; i < draft.items.size(); ++i) {
             const bool active = static_cast<int>(i) == selected;
             const auto& item = active && preview ? *preview : draft.items[i];
-            if (layerVisible(draft, item.layer) && (item.kind == DraftKind::Hatch) == hatches) {
-                if (isDimension(item.kind)) {
+            if (layerVisible(draft, item.layer) && (item.kind == DraftKind::Hatch) == hatches
+                && (construction || item.kind != DraftKind::ConstructionLine)) {
+                if (isDimension(item.kind) || item.kind == DraftKind::Hatch) {
                     paintDraftItem(p, geometry.resolve(item), active);
                 } else {
                     paintDraftItem(p, item, active);
@@ -713,7 +1022,7 @@ static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int sele
 void paintDraft(QPainter& p, const Draft& draft, bool grid, int selected, const DraftItem* preview,
                 int sheet, int total)
 {
-    paintSheetDraft(p, draft, grid, selected, preview, sheet, total);
+    paintSheetDraft(p, draft, grid, selected, preview, sheet, total, true);
 }
 
 void exportDraftPdf(const QString& path, const Draft& draft)
@@ -760,7 +1069,7 @@ void exportDraftPdf(const QString& path, const Draft& draft)
             const auto size = draftSize(sheet);
             painter.save();
             painter.scale(writer.width() / size.width(), writer.height() / size.height());
-            paintDraft(painter, sheet, false, -1, nullptr, i + 1, pages);
+            paintSheetDraft(painter, sheet, false, -1, nullptr, i + 1, pages, false);
             painter.restore();
         }
         for (int i = 0; i < pages; ++i) {

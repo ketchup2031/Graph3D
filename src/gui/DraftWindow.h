@@ -43,6 +43,12 @@ private:
     bool saveDrawing(bool saveAs);
     void exportPdf();
     void editSheet();
+    void editTitleBlock();
+    void saveDrawingTemplate();
+    void newFromDrawingTemplate();
+    void saveFragment();
+    void insertFragment();
+    void editTable(int index = -1);
     void editLayers();
     void updateLayers();
     void changeSheetCount(bool add);
@@ -51,9 +57,12 @@ private:
     drawing::Draft wholeDrawing() const;
     void pushSheetEdit(const QString& name, std::function<void()> redo, std::function<void()> undo);
     void editSelected();
+    void reattachDimension();
+    void prepareModelDimensions();
     void chooseModel();
     void refreshModel();
     void editModelViews();
+    void manageDrawingViews();
     void editDetail();
     void placeSectionLine();
     void placeLocalSection();

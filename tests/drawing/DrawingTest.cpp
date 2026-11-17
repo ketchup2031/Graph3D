@@ -797,6 +797,215 @@ void verifyDraftTools(const QDir& output)
     check(pdf.open(QIODevice::ReadOnly) && pdf.size() > 1000 && pdf.read(5) == "%PDF-", "PDF export failed");
 }
 
+void verifyLinkedDimensions(const QDir& output)
+{
+    using enum draw::DraftKind;
+    doc::Document model;
+    geom::Sketch profile{geom::Plane::XY, {geom::Rectangle{{0, 0}, {100, 60}}, geom::Circle{{30, 20}, 5}}};
+    const auto sketch = model.addSketch(profile);
+    const auto body = model.addExtrude(sketch, 15);
+    model.setPartProperties(body, {"G3D-019", "Test plate", "Steel", ""});
+    model.setDensity(body, 7850);
+    const auto source = output.filePath("stage19-plate.graph3d");
+    const auto file = output.filePath("stage19-plate.g3draw");
+    io::saveProject(source, model);
+
+    draw::Draft sheet;
+    sheet.paper.modelTitle = true;
+    sheet.modelViews = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(sheet));
+    const auto center = QPointF(180, 120);
+    sheet.modelViews->layout[2] = {center, .5};
+    const auto bore = draw::pickModelGeometry(*sheet.modelViews, center + QPointF(-7.5, 5), .1, true);
+    const auto left = draw::pickModelGeometry(*sheet.modelViews, center + QPointF(-25, -4), .1);
+    const auto right = draw::pickModelGeometry(*sheet.modelViews, center + QPointF(25, -4), .1);
+    check(bore && left && right, "Could not pick a hole or outer edge on the linked view");
+    auto axis = bore->reference;
+    axis.anchor = draw::DraftAnchor::ModelCenter;
+    axis.parameter = 0;
+    const auto radialCenter = draw::DraftGeometry(sheet).point(axis);
+    check(radialCenter.has_value(), "Could not resolve the centre of the hole");
+    draw::DraftItem diameter{Diameter, *radialCenter, bore->position, {225, 135}};
+    diameter.id = QUuid::createUuid();
+    diameter.anchorA = axis;
+    diameter.anchorB = bore->reference;
+    draw::DraftItem width{Horizontal, left->position, right->position, {180, 153}};
+    width.id = QUuid::createUuid();
+    width.anchorA = left->reference;
+    width.anchorB = right->reference;
+    sheet.items = {diameter, width};
+    auto incomplete = width;
+    incomplete.anchorB.reset();
+    check(draw::DraftGeometry(sheet).resolve(incomplete).lostReference, "Half a model attachment has no model scale");
+    const auto verify = [](const draw::Draft& drawing, const QString& d, const QString& w) {
+        const draw::DraftGeometry resolver(drawing);
+        const auto measured = resolver.resolve(drawing.items[0]);
+        const auto measuredWidth = resolver.resolve(drawing.items[1]);
+        check(draw::draftDimensionText(measured) == d && draw::draftDimensionText(measuredWidth) == w,
+              "Linked dimensions lost size, reference or model scale");
+        check(measured.label == drawing.items[0].label && measuredWidth.label == drawing.items[1].label,
+              "Rebuilding changed the manually placed label");
+    };
+    verify(sheet, QStringLiteral("⌀10"), QStringLiteral("100"));
+    io::saveDraft(file, sheet);
+    sheet = io::openDraft(file);
+    verify(sheet, QStringLiteral("⌀10"), QStringLiteral("100"));
+
+    std::get<geom::Circle>(profile.entities[1]).radius = 6;
+    std::get<geom::Rectangle>(profile.entities[0]).opposite.u = 120;
+    check(model.editSketch(sketch, profile), "Could not change the size of the plate and hole");
+    io::saveProject(source, model);
+    sheet.modelViews = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(sheet), &*sheet.modelViews);
+    verify(sheet, QStringLiteral("⌀12"), QStringLiteral("120"));
+    io::saveDraft(file, sheet);
+    sheet = io::openDraft(file);
+    verify(sheet, QStringLiteral("⌀12"), QStringLiteral("120"));
+    check(draw::draftTitleField(sheet, draw::TitleField::Title, 1, 1) == QStringLiteral("Test plate")
+        && draw::draftTitleField(sheet, draw::TitleField::Designation, 1, 1) == QStringLiteral("G3D-019")
+        && draw::draftTitleField(sheet, draw::TitleField::Mass, 1, 1).toDouble() > 0,
+        "The linked title block did not preserve part properties and mass");
+    draw::exportDraftPdf(output.filePath("stage19-dimensions.pdf"), sheet);
+
+    profile.entities.pop_back();
+    check(model.editSketch(sketch, profile), "Could not remove the circular profile");
+    io::saveProject(source, model);
+    sheet.modelViews = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(sheet), &*sheet.modelViews);
+    check(draw::DraftGeometry(sheet).resolve(sheet.items[0]).lostReference, "Deleted geometry must break the diameter link");
+    io::saveDraft(file, sheet);
+    const auto orphaned = io::openDraft(file);
+    check(draw::DraftGeometry(orphaned).resolve(orphaned.items[0]).lostReference,
+        "A lost association must survive save and open");
+    draw::exportDraftPdf(output.filePath("stage19-broken-link.pdf"), orphaned);
+}
+
+void verifyDrawingViews(const QDir& output)
+{
+    using enum draw::DrawingViewKind;
+    doc::Document model;
+    const auto sketch = model.addSketch({geom::Plane::XY, {
+        geom::Rectangle{{-50, -30}, {50, 30}}, geom::Circle{{-25, -10}, 5}, geom::Circle{{24, 10}, 5}}});
+    const auto body = model.addExtrude(sketch, 20);
+    const auto source = output.filePath("stage20-case.graph3d");
+    const auto file = output.filePath("stage20-views.g3draw");
+    io::saveProject(source, model);
+
+    draw::Draft drawing;
+    drawing.a3 = true;
+    auto settings = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(drawing));
+    const auto top = settings.geometry->views.top.id;
+    const auto add = [&](draw::DrawingViewKind kind, const char* name, QPointF center, std::vector<QPointF> path = {}) {
+        draw::DrawingView view;
+        view.id = QUuid::createUuid();
+        view.name = QString::fromLatin1(name);
+        view.kind = kind;
+        view.source = draw::derivedView(kind) ? top : QUuid{};
+        view.placement = {center, kind == Detail ? 1.5 : .5};
+        view.path = std::move(path);
+        settings.additional.push_back(std::move(view));
+    };
+    add(Isometric, "ISO", {235, 60});
+    add(Arrow, "K", {345, 60}, {{30, 20}, {44, 12}});
+    add(SteppedSection, "A-A", {105, 145}, {{-62, -10}, {0, -10}, {0, 10}, {62, 10}});
+    add(AlignedSection, "B-B", {222, 145}, {{-83, -16}, {0, -10}, {65, 14}});
+    add(Detail, "C", {315, 139});
+    settings.additional.back().focus = {-25, -10};
+    add(Detail, "D", {365, 139});
+    settings.additional.back().focus = {24, 10};
+    add(Local, "E", {});
+    settings.additional.back().focus = {-25, -10};
+    add(Local, "F", {});
+    settings.additional.back().focus = {24, 10};
+    settings.showBase = {false, false, true};
+    settings.dimensions = false;
+    settings.layout[2] = {{106, 63}, .75};
+    drawing.modelViews = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(drawing), &settings);
+    const auto& ready = drawing.modelViews->additional;
+    check(ready.size() == 8 && ready[2].geometry->material.size() >= 3 && !ready[3].geometry->material.empty(),
+          "Complex sections did not cut through the model");
+    check(ready[4].geometry->view.id == ready[4].id && ready[5].geometry->view.id != ready[4].id,
+          "Details must have independent IDs");
+    io::saveDraft(file, drawing);
+    drawing = io::openDraft(file);
+    check(!drawing.modelViews->showBase[0] && drawing.modelViews->additional[2].placement == settings.additional[2].placement,
+          "Drawing view placement or visibility did not survive save");
+    check(model.editExtrude(body, 25), "Could not change the case height");
+    io::saveProject(source, model);
+    drawing.modelViews = io::buildModelViews(io::openModelSource(source), body, {}, draw::draftSize(drawing), &*drawing.modelViews);
+    const auto& refreshed = drawing.modelViews->additional;
+    check(refreshed[2].geometry->view.height == 25 && refreshed[2].source == top
+        && refreshed[3].id == settings.additional[3].id && refreshed[3].path == settings.additional[3].path,
+        "Model update did not preserve derived view dependencies");
+    draw::exportDraftPdf(output.filePath("stage20-views.pdf"), drawing);
+}
+
+void verifyExtendedDraft(const QDir& output)
+{
+    using enum draw::DraftKind;
+    draw::Draft drawing;
+    drawing.title = QStringLiteral("Template drawing");
+    drawing.paper.titleBlock = draw::TitleBlockLayout{155, 6, {
+        {QStringLiteral("Name"), draw::TitleField::Title, {}},
+        {QStringLiteral("Scale"), draw::TitleField::Text, QStringLiteral("1:1")}}};
+    drawing.additionalSheets.emplace_back();
+    auto& second = drawing.additionalSheets.back();
+    second.title = QStringLiteral("Detail and notes");
+    second.paper.titleBlock = drawing.paper.titleBlock;
+    second.items.push_back({Ellipse, {80, 55}, {145, 100}});
+    second.items.push_back({Text, {70, 119}, {}, {}, QStringLiteral("Detail of the open contour")});
+    const auto add = [&](draw::DraftItem item) {
+        item.id = QUuid::createUuid();
+        drawing.items.push_back(std::move(item));
+    };
+    add({Rectangle, {35, 35}, {135, 105}});
+    add({Ellipse, {69, 57}, {101, 79}});
+    draw::DraftItem spline{Spline};
+    spline.points = {{160, 45}, {175, 67}, {215, 55}, {237, 73}};
+    add(spline);
+    add({ConstructionLine, {45, 130}, {125, 138}});
+
+    const auto hatch = draw::hatchDraft(drawing, {50, 55});
+    check(hatch && hatch->hatchBoundaries.size() == 2, "Hatch did not attach the ellipse hole and outline");
+    add(*hatch);
+    const auto oldHatch = drawing.items.back();
+    drawing.items[0].b = {145, 115};
+    const auto newFill = draw::DraftGeometry(drawing).resolve(oldHatch);
+    check(!newFill.lostReference && newFill.loops != oldHatch.loops && newFill.loops.size() == 2,
+          "Hatch did not follow its changed boundary");
+    const auto outer = drawing.items[0];
+    drawing.items.erase(drawing.items.begin());
+    check(draw::DraftGeometry(drawing).resolve(oldHatch).lostReference,
+          "Deleting the boundary did not invalidate the hatch");
+    drawing.items.insert(drawing.items.begin(), outer);
+
+    draw::DraftItem piece{Ellipse, {1, 1}, {12, 7}};
+    piece.id = QUuid::createUuid();
+    draw::DraftItem first{Fragment, {155, 90}};
+    first.fragment.push_back(piece);
+    add(first);
+    first.a = {180, 90};
+    add(first);
+    draw::DraftItem table{Table, {155, 110}};
+    table.table = draw::DraftTable{2, 68, 6, {QStringLiteral("Item"), QStringLiteral("Value"), QStringLiteral("Wall"), QStringLiteral("4")}};
+    add(table);
+    draw::DraftItem dimension{Horizontal, {35, 35}, {145, 35}, {80, 24}};
+    dimension.dimensionNote = {QStringLiteral("H7"), QStringLiteral("+0.035"), QStringLiteral("0")};
+    add(dimension);
+    add({Weld, {138, 93}, {}, {149, 81}, QStringLiteral("△4")});
+    drawing.items.back().weldReverse = true;
+    add({Thread, {100, 68}, {}, {151, 34}, QStringLiteral("M10 × 1.5")});
+
+    const auto file = output.filePath("stage21-drawing.g3draw");
+    io::saveDraft(file, drawing);
+    const auto reopened = io::openDraft(file);
+    check(reopened.items == drawing.items && reopened.paper == drawing.paper
+        && reopened.additionalSheets.size() == 1 && reopened.additionalSheets.front().paper.titleBlock == drawing.paper.titleBlock,
+          "Draft tools, notation, or custom title blocks did not survive saving");
+    check(draw::draftDimensionText(reopened.items[8]) == QStringLiteral("110 H7 +0.035 / 0"),
+          "Fit or deviations were lost from the dimension");
+    check(draw::DraftGeometry(reopened).resolve(reopened.items[4]).loops == newFill.loops,
+          "Hatch associations did not survive saving");
+    draw::exportDraftPdf(output.filePath("stage21-drawing.pdf"), reopened);
+}
+
 void verifyDxf(const QDir& output)
 {
     using enum draw::DraftKind;
@@ -907,6 +1116,9 @@ int main(int argc, char** argv)
         verifyAttachedDimensions(output);
         verifyModelViews(output);
         verifyDraftTools(output);
+        verifyLinkedDimensions(output);
+        verifyDrawingViews(output);
+        verifyExtendedDraft(output);
         verifyDxf(output);
         const auto face = geom::makeProfile({geom::Plane::XY, {geom::Rectangle{{0, 0}, {10, 20}}}});
         bool rejected = false;

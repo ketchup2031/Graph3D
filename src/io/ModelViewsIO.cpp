@@ -1,4 +1,5 @@
 #include "io/ModelViewsIO.h"
+#include "geometry/AdvancedModeling.h"
 #include "io/AssemblyDrawingIO.h"
 
 #include "io/FileIO.h"
@@ -9,6 +10,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QSet>
+#include <numbers>
 
 #include <algorithm>
 #include <cmath>
@@ -122,18 +125,50 @@ View readView(const QJsonValue& value, int& remaining)
         const auto circle = value.toObject();
         view.circles.push_back({readPoint(circle.value("center")), positive(circle.value("radius"))});
     }
+    if (object.contains("id")) {
+        view.id = QUuid(object.value("id").toString());
+        if (view.id.isNull()) {
+            invalid();
+        }
+        view.origin = readPoint(object.value("origin"));
+        const auto edges = array(object.value("edges"));
+        consume(remaining, 2 * edges.size());
+        QSet<QUuid> ids;
+        for (const auto value : edges) {
+            const auto edge = value.toObject();
+            const QUuid id(edge.value("id").toString());
+            const auto radius = number(edge.value("radius"));
+            const auto angle = number(edge.value("angle"), std::numbers::pi + 1.e-6);
+            const auto sweep = number(edge.value("sweep"), 2 * std::numbers::pi + 1.e-6);
+            if (id.isNull() || ids.contains(id) || radius < 0 || sweep < 0 || (radius > 0) != (sweep > 0)) {
+                invalid();
+            }
+            ids.insert(id);
+            view.edges.push_back({id, readPoint(edge.value("a")), readPoint(edge.value("b")), radius, angle, sweep});
+        }
+    }
     return view;
 }
 
-QJsonObject writeView(const View& view)
+QJsonObject writeView(const View& view, bool references)
 {
     QJsonArray circles;
     for (const auto& circle : view.circles) {
         circles.append(QJsonObject{{"center", writePoint(circle.center)}, {"radius", circle.radius}});
     }
-    return {{"width", view.width}, {"height", view.height},
-            {"visible", writeEdges(view.visible)}, {"hidden", writeEdges(view.hidden)},
-            {"circles", circles}};
+    QJsonObject result{{"width", view.width}, {"height", view.height},
+                       {"visible", writeEdges(view.visible)}, {"hidden", writeEdges(view.hidden)}, {"circles", circles}};
+    if (references && !view.id.isNull()) {
+        QJsonArray edges;
+        for (const auto& edge : view.edges) {
+            edges.append(QJsonObject{{"id", edge.id.toString(QUuid::WithoutBraces)}, {"a", writePoint(edge.a)},
+                {"b", writePoint(edge.b)}, {"radius", edge.radius}, {"angle", edge.angle}, {"sweep", edge.sweep}});
+        }
+        result.insert("id", view.id.toString(QUuid::WithoutBraces));
+        result.insert("origin", writePoint(view.origin));
+        result.insert("edges", edges);
+    }
+    return result;
 }
 
 Section readSection(const QJsonObject& object, int& remaining)
@@ -158,17 +193,17 @@ Section readSection(const QJsonObject& object, int& remaining)
     return section;
 }
 
-QJsonObject writeSection(const Section& cut)
+QJsonObject writeSection(const Section& cut, bool references)
 {
     QJsonArray material;
     for (const auto& face : cut.material) {
         material.append(writeEdges(face));
     }
     return {{"plane", planes.at(static_cast<std::size_t>(cut.plane))}, {"offset", cut.offset},
-            {"view", writeView(cut.view)}, {"material", material}};
+            {"view", writeView(cut.view, references)}, {"material", material}};
 }
 
-void validateSnapshot(const ModelProjection& snapshot)
+int validateSnapshot(const ModelProjection& snapshot, const std::vector<DrawingView>& additional = {})
 {
     int remaining = maxVertices;
     const auto check = [](double value) {
@@ -199,7 +234,7 @@ void validateSnapshot(const ModelProjection& snapshot)
         }
         edges(value.visible);
         edges(value.hidden);
-        consume(remaining, value.circles.size());
+        consume(remaining, value.circles.size() + 2 * value.edges.size());
         for (const auto& circle : value.circles) {
             point(circle.center);
             check(circle.radius);
@@ -217,6 +252,109 @@ void validateSnapshot(const ModelProjection& snapshot)
         for (const auto& face : cut->material) {
             edges(face);
         }
+    }
+    for (const auto& extra : additional) {
+        if (!extra.geometry) {
+            invalid();
+        }
+        view(extra.geometry->view);
+        for (const auto& face : extra.geometry->material) {
+            edges(face);
+        }
+    }
+    return remaining;
+}
+
+QJsonArray writeAdditionalViews(const ModelViews& model)
+{
+    QSet<QUuid> seen;
+    for (int i = 0; i < 3; ++i) {
+        seen.insert(baseModelView(model, i).id);
+    }
+    QJsonArray output;
+    if (model.additional.size() > drawingViewLimit) {
+        invalid();
+    }
+    for (const auto& entry : model.additional) {
+        if (entry.id.isNull() || seen.contains(entry.id) || entry.name.size() > 80
+            || (derivedView(entry.kind) && (entry.source.isNull() || !seen.contains(entry.source)))
+            || entry.path.size() > 16 || !entry.geometry || entry.geometry->view.id != entry.id) {
+            invalid();
+        }
+        seen.insert(entry.id);
+        QJsonArray path, material;
+        for (const auto p : entry.path) {
+            path.append(writePoint({p.x(), p.y()}));
+        }
+        for (const auto& face : entry.geometry->material) {
+            material.append(writeEdges(face));
+        }
+        output.append(QJsonObject{{"id", entry.id.toString(QUuid::WithoutBraces)}, {"kind", static_cast<int>(entry.kind)},
+            {"source", entry.source.toString(QUuid::WithoutBraces)}, {"name", entry.name},
+            {"center", writePoint({entry.placement.center.x(), entry.placement.center.y()})},
+            {"scale", entry.placement.scale}, {"yaw", entry.angles[0]}, {"pitch", entry.angles[1]},
+            {"roll", entry.angles[2]}, {"path", path}, {"focus", writePoint({entry.focus.x(), entry.focus.y()})},
+            {"radius", entry.radius}, {"depth", entry.depth}, {"view", writeView(entry.geometry->view, true)},
+            {"material", material}});
+    }
+    return output;
+}
+
+void readAdditionalViews(ModelViews& model, const QJsonValue& value, int& remaining)
+{
+    const auto entries = array(value);
+    if (entries.size() > drawingViewLimit) {
+        invalid();
+    }
+    QSet<QUuid> seen;
+    for (int i = 0; i < 3; ++i) {
+        const auto id = baseModelView(model, i).id;
+        if (id.isNull() || seen.contains(id)) {
+            invalid();
+        }
+        seen.insert(id);
+    }
+    for (const auto value : entries) {
+        const auto entry = value.toObject();
+        DrawingView extra;
+        extra.id = QUuid(entry.value("id").toString());
+        const int kind = entry.value("kind").toInt(-1);
+        if (extra.id.isNull() || seen.contains(extra.id) || kind < 0 || kind > static_cast<int>(DrawingViewKind::Local)
+            || !entry.value("name").isString() || entry.value("name").toString().size() > 80) {
+            invalid();
+        }
+        extra.kind = static_cast<DrawingViewKind>(kind);
+        extra.name = entry.value("name").toString();
+        extra.source = QUuid(entry.value("source").toString());
+        if (derivedView(extra.kind) && !seen.contains(extra.source)) {
+            invalid();
+        }
+        seen.insert(extra.id);
+        const auto center = readPoint(entry.value("center"));
+        extra.placement = {{center.x, center.y}, positive(entry.value("scale"), maxScale)};
+        extra.angles = {number(entry.value("yaw"), 360), number(entry.value("pitch"), 90), number(entry.value("roll"), 360)};
+        const auto focus = readPoint(entry.value("focus"));
+        extra.focus = {focus.x, focus.y};
+        extra.radius = positive(entry.value("radius"));
+        extra.depth = number(entry.value("depth"));
+        const auto path = array(entry.value("path"));
+        if (path.size() > 16) {
+            invalid();
+        }
+        for (const auto value : path) {
+            const auto point = readPoint(value);
+            extra.path.emplace_back(point.x, point.y);
+        }
+        auto geometry = std::make_shared<CutProjection>();
+        geometry->view = readView(entry.value("view"), remaining);
+        if (geometry->view.id != extra.id) {
+            invalid();
+        }
+        for (const auto face : array(entry.value("material"))) {
+            geometry->material.push_back(readEdges(face, remaining));
+        }
+        extra.geometry = std::move(geometry);
+        model.additional.push_back(std::move(extra));
     }
 }
 
@@ -256,15 +394,44 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
     if (cut) {
         snapshot->section = section(item->shape, cut->plane, cut->offset);
     }
-    validateSnapshot(*snapshot);
+    if (previous && previous->geometry && previous->bodyId == bodyId
+        && (previous->sourcePath == source.path || previous->sourceDigest == source.digest)) {
+        const auto& old = *previous->geometry;
+        retainProjectionReferences(snapshot->views.front, old.views.front);
+        retainProjectionReferences(snapshot->views.right, old.views.right);
+        retainProjectionReferences(snapshot->views.top, old.views.top);
+        if (snapshot->section && old.section && snapshot->section->plane == old.section->plane) {
+            retainProjectionReferences(snapshot->section->view, old.section->view);
+        }
+    }
+    if (previous && previous->geometry) {
+        // Layout links identify their view even when the source body is replaced.
+        const auto preserveId = [](View& slot, const View& old) {
+            if (!old.id.isNull()) {
+                slot.id = old.id;
+            }
+        };
+        const auto& old = previous->geometry->views;
+        preserveId(snapshot->views.front, old.front);
+        preserveId(snapshot->views.right, old.right);
+        preserveId(snapshot->views.top, old.top);
+    }
     auto model = previous ? *previous : ModelViews{};
     model.sourcePath = source.path;
     model.bodyId = bodyId;
     model.sourceDigest = source.digest;
+    model.titleData = {QString::fromStdString(item->properties.name), QString::fromStdString(item->properties.designation), {}};
+    if (item->densityKgM3) {
+        model.titleData.massKg = geometry::massProperties(item->shape, *item->densityKgM3).massKg;
+    }
     if (!previous) {
         model.layout = defaultViewLayout(snapshot->views, paper);
     }
-    model.geometry = std::move(snapshot);
+    model.geometry = snapshot;
+    const bool sameSource = previous && previous->bodyId == bodyId
+        && (previous->sourcePath == source.path || previous->sourceDigest == source.digest);
+    rebuildDrawingViews(model, item->shape, sameSource ? previous : nullptr);
+    validateSnapshot(*snapshot, model.additional);
     const auto prior = previous && previous->bodyId == bodyId && previous->sourcePath == source.path
         ? previous->assembly.get() : nullptr;
     model.assembly = buildAssemblyDrawing(source, *item, prior);
@@ -320,19 +487,45 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
         result.local = drawing::LocalSection{{focus.x, focus.y}, positive(entry.value("radius"), maxCoordinate)};
     }
     result.geometry = std::move(snapshot);
+    if (object.contains("baseVisible")) {
+        const auto visibility = array(object.value("baseVisible"));
+        if (visibility.size() != 3) {
+            invalid();
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (!visibility[i].isBool()) {
+                invalid();
+            }
+            result.showBase[i] = visibility[i].toBool();
+        }
+    }
+    if (object.contains("additional")) {
+        readAdditionalViews(result, object.value("additional"), remaining);
+    }
+    if (object.contains("titleData")) {
+        const auto title = object.value("titleData").toObject();
+        result.titleData.name = title.value("name").toString();
+        result.titleData.designation = title.value("designation").toString();
+        if (result.titleData.name.size() > 200 || result.titleData.designation.size() > 200) {
+            invalid();
+        }
+        if (title.contains("mass")) {
+            result.titleData.massKg = positive(title.value("mass"), 1.e20);
+        }
+    }
     if (object.contains("assembly")) {
         result.assembly = std::make_shared<AssemblyDrawing>(readAssemblyDrawing(object.value("assembly")));
     }
     return result;
 }
 
-QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath)
+QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath, bool references)
 {
     if (!model.geometry || model.sourcePath.isEmpty() || model.bodyId < 1 || model.bodyId > 10000
         || model.sourceDigest.size() != 32) {
         invalid();
     }
-    validateSnapshot(*model.geometry);
+    validateSnapshot(*model.geometry, model.additional);
     const auto& views = model.geometry->views;
     const auto path = QFileInfo(draftPath).absoluteDir().relativeFilePath(model.sourcePath);
     QJsonArray layout;
@@ -346,10 +539,10 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath)
     }
     QJsonObject result{{"source", path}, {"body", model.bodyId}, {"digest", QString::fromLatin1(model.sourceDigest.toHex())},
                        {"dimensions", model.dimensions}, {"hiddenLines", model.hiddenLines}, {"layout", layout},
-                       {"front", writeView(views.front)}, {"top", writeView(views.top)},
-                       {"right", writeView(views.right)}};
+                       {"front", writeView(views.front, references)}, {"top", writeView(views.top, references)},
+                       {"right", writeView(views.right, references)}};
     if (model.geometry->section) {
-        result.insert("section", writeSection(*model.geometry->section));
+        result.insert("section", writeSection(*model.geometry->section, references));
     }
     const auto validPoint = [](QPointF point) {
         return std::isfinite(point.x()) && std::isfinite(point.y())
@@ -374,6 +567,23 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath)
             invalid();
         }
         result.insert("local", QJsonObject{{"focus", writePoint({l.center.x(), l.center.y()})}, {"radius", l.radius}});
+    }
+    if (references && (!model.titleData.name.isEmpty() || !model.titleData.designation.isEmpty() || model.titleData.massKg)) {
+        QJsonObject title{{"name", model.titleData.name}, {"designation", model.titleData.designation}};
+        if (model.titleData.massKg) {
+            title.insert("mass", *model.titleData.massKg);
+        }
+        result.insert("titleData", title);
+    }
+    if (!model.additional.empty()) {
+        result.insert("additional", writeAdditionalViews(model));
+    }
+    if (std::ranges::find(model.showBase, false) != model.showBase.end()) {
+        QJsonArray visibility;
+        for (const bool visible : model.showBase) {
+            visibility.append(visible);
+        }
+        result.insert("baseVisible", visibility);
     }
     if (model.assembly) {
         result.insert("assembly", writeAssemblyDrawing(*model.assembly));

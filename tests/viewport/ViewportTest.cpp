@@ -1,6 +1,8 @@
 #include "gui/MainWindow.h"
 #include "gui/DocumentWindow.h"
 #include "gui/DraftWindow.h"
+#include "gui/DraftCanvas.h"
+#include "io/ModelViewsIO.h"
 #include "gui/InterfaceLanguage.h"
 #include "gui/SketchEditor.h"
 #include "io/ProjectIO.h"
@@ -73,6 +75,176 @@ class ViewportTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void linkedDimensionsAndViewArrangement()
+    {
+        using namespace graph3d;
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const auto modelPath = temporary.filePath("plate.graph3d");
+        const auto draftPath = temporary.filePath("plate.g3draw");
+        document::Document model;
+        const auto sketch = model.addSketch({geometry::Plane::XY, {
+            geometry::Rectangle{{0, 0}, {100, 60}}, geometry::Circle{{30, 20}, 5}}});
+        const auto body = model.addExtrude(sketch, 15);
+        io::saveProject(modelPath, model);
+        drawing::Draft sheet;
+        sheet.modelViews = io::buildModelViews(io::openModelSource(modelPath), body, {}, drawing::draftSize(sheet));
+        sheet.modelViews->layout[2] = {{180, 120}, .5};
+        io::saveDraft(draftPath, sheet);
+
+        DocumentWindow window(nullptr, temporary.filePath("recovery"));
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.openDocument(draftPath));
+        auto* tabs = window.findChild<QTabWidget*>("documentTabs");
+        auto* editor = qobject_cast<DraftWindow*>(tabs->currentWidget());
+        QVERIFY(editor);
+        auto* canvas = editor->findChild<DraftCanvas*>("draftCanvas");
+        QVERIFY(canvas);
+        const auto click = [canvas](QPointF page) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + page * scale).toPoint());
+        };
+        const auto action = [editor](const char* name) { return editor->findChild<QAction*>(name); };
+        action("draftDiameter")->trigger();
+        click({172.5, 125});
+        click({202, 139});
+        action("saveDraft")->trigger();
+        const auto measured = [&] {
+            const auto saved = io::openDraft(draftPath);
+            return drawing::draftDimensionText(drawing::DraftGeometry(saved).resolve(saved.items.front()));
+        };
+        const auto saved = io::openDraft(draftPath);
+        QCOMPARE(saved.items.size(), 1);
+        QVERIFY(saved.items.front().anchorB && drawing::isModelReference(*saved.items.front().anchorB));
+        QCOMPARE(measured(), QStringLiteral("⌀10"));
+        QVERIFY(model.editSketch(sketch, {geometry::Plane::XY, {
+            geometry::Rectangle{{0, 0}, {100, 60}}, geometry::Circle{{30, 20}, 6}}}));
+        io::saveProject(modelPath, model);
+        action("linkedViewsRefresh")->trigger();
+        action("saveDraft")->trigger();
+        QCOMPARE(measured(), QStringLiteral("⌀12"));
+        action("undoDraft")->trigger();
+        action("saveDraft")->trigger();
+        QCOMPARE(measured(), QStringLiteral("⌀10"));
+        action("redoDraft")->trigger();
+        action("saveDraft")->trigger();
+        QCOMPARE(measured(), QStringLiteral("⌀12"));
+
+        QTimer::singleShot(0, editor, [editor] {
+            auto* manager = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            QVERIFY(manager);
+            QCOMPARE(manager->objectName(), QStringLiteral("draftManageViews"));
+            QTimer::singleShot(0, manager, [] {
+                auto* form = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                QVERIFY(form);
+                form->findChild<QComboBox*>("drawingViewKind")->setCurrentIndex(static_cast<int>(drawing::DrawingViewKind::Isometric));
+                form->findChild<QLineEdit*>("drawingViewLabel")->setText(QStringLiteral("ISO"));
+                form->findChild<QDoubleSpinBox*>("drawingViewX")->setValue(95);
+                form->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+            manager->findChild<QPushButton*>("addDrawingView")->click();
+            manager->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        action("manageDrawingViews")->trigger();
+        action("saveDraft")->trigger();
+        const auto updated = io::openDraft(draftPath);
+        QCOMPARE(updated.modelViews->additional.size(), 1);
+        QCOMPARE(updated.modelViews->additional.front().name, QStringLiteral("ISO"));
+        QCOMPARE(updated.modelViews->additional.front().placement.center.x(), 95.0);
+        QCOMPARE(measured(), QStringLiteral("⌀12"));
+        QVERIFY(window.close());
+    }
+
+    void draftTemplatesAndFragments()
+    {
+        using namespace graph3d;
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const auto templatePath = temporary.filePath("sheets.g3template");
+        const auto fragmentPath = temporary.filePath("outline.g3frag");
+        const auto drawingPath = temporary.filePath("completed.g3draw");
+        DocumentWindow window(nullptr, temporary.filePath("recovery"));
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* tabs = window.findChild<QTabWidget*>("documentTabs");
+        window.findChild<QPushButton*>("startNewDrawing")->click();
+        auto* active = qobject_cast<DraftWindow*>(tabs->currentWidget());
+        QVERIFY(active);
+        auto action = [&](const char* id) { return active->findChild<QAction*>(id); };
+        const auto choose = [&](const QString& path) {
+            QTimer::singleShot(0, active, [path] {
+                auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                dialog->selectFile(path);
+                static_cast<QDialog*>(dialog)->accept();
+            });
+        };
+        const auto finish = [&](const char* name) {
+            QTimer::singleShot(0, active, [name] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                QCOMPARE(dialog->objectName(), QString::fromLatin1(name));
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+        };
+        finish("draftTitleBlockEditor");
+        action("draftCustomTitleBlock")->trigger();
+        action("addDraftSheet")->trigger();
+        finish("draftTitleBlockEditor");
+        action("draftCustomTitleBlock")->trigger();
+        choose(templatePath);
+        action("saveDraftTemplate")->trigger();
+        QVERIFY(QFileInfo::exists(templatePath));
+        choose(templatePath);
+        action("openDraftTemplate")->trigger();
+        QCOMPARE(tabs->count(), 3);
+        active = qobject_cast<DraftWindow*>(tabs->currentWidget());
+        QCOMPARE(active->findChild<QTabBar*>("draftSheetTabs")->count(), 2);
+
+        auto* canvas = active->findChild<DraftCanvas*>("draftCanvas");
+        QVERIFY(canvas);
+        const auto click = [canvas](QPointF page) {
+            const double scale = std::min((canvas->width() - 32) / 297.0, (canvas->height() - 32) / 210.0);
+            const QPointF origin((canvas->width() - 297 * scale) / 2, (canvas->height() - 210 * scale) / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, (origin + page * scale).toPoint());
+        };
+        action("draftEllipse")->trigger();
+        click({50, 50});
+        click({80, 70});
+        choose(fragmentPath);
+        action("saveDraftFragment")->trigger();
+        QVERIFY(QFileInfo::exists(fragmentPath));
+        choose(fragmentPath);
+        action("insertDraftFragment")->trigger();
+        click({95, 55});
+        choose(fragmentPath);
+        action("insertDraftFragment")->trigger();
+        click({135, 55});
+        finish("draftTableEditor");
+        action("insertDraftTable")->trigger();
+        click({175, 55});
+        choose(drawingPath);
+        action("saveDraft")->trigger();
+
+        const auto drawing = io::openDraft(drawingPath);
+        QCOMPARE(drawing.items.size(), 4);
+        QVERIFY(drawing.paper.titleBlock && drawing.additionalSheets.front().paper.titleBlock);
+        QCOMPARE(drawing.items[0].kind, drawing::DraftKind::Ellipse);
+        QCOMPARE(drawing.items[1].kind, drawing::DraftKind::Fragment);
+        QCOMPARE(drawing.items[1].fragment, drawing.items[2].fragment);
+        QVERIFY(drawing.items[3].table.has_value());
+        QTimer::singleShot(0, &window, [] {
+            auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            dialog->button(QMessageBox::Discard)->click();
+        });
+        QVERIFY(window.close());
+    }
+
     void documentTabsAndCrashRecovery()
     {
         QTemporaryDir temporary;
@@ -627,8 +799,9 @@ private slots:
         QVERIFY(file.open(QIODevice::ReadOnly));
         const auto root = QJsonDocument::fromJson(file.readAll()).object();
         file.close();
-        QCOMPARE(root.value("version").toInt(), 4);
-        const auto items = root.value("items").toArray();
+        QCOMPARE(root.value("version").toInt(), 7);
+        const auto sheet = root.value("sheets").toArray().at(0).toObject();
+        const auto items = sheet.value("items").toArray();
         QCOMPARE(items.size(), 13);
         QCOMPARE(items.at(0).toObject().value("type").toString(), QStringLiteral("arc"));
         QCOMPARE(items.at(1).toObject().value("points").toArray().size(), 3);
@@ -636,6 +809,7 @@ private slots:
         QCOMPARE(items.at(5).toObject().value("anchorB").toObject().value("point").toString(), QStringLiteral("curve"));
         QCOMPARE(items.at(7).toObject().value("anchorA").toObject().value("parameter").toDouble(), .5);
         QCOMPARE(items.at(9).toObject().value("loops").toArray().size(), 3);
+        QCOMPARE(items.at(9).toObject().value("hatchBoundaries").toArray().size(), 3);
         QCOMPARE(items.at(10).toObject().value("b").toArray().at(0).toDouble(), 246.0);
         QCOMPARE(items.at(12).toObject().value("a").toArray().at(1).toDouble(), 135.0);
         const auto restored = graph3d::io::openDraft(path);

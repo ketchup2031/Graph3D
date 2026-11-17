@@ -145,13 +145,18 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
     });
     auto* properties = edit->addAction(tr("Item properties…"), this, &DraftWindow::editSelected);
     properties->setObjectName(QStringLiteral("draftItemProperties"));
+    auto* reattach = edit->addAction(tr("Reattach dimension to view…"), this, &DraftWindow::reattachDimension);
+    reattach->setObjectName(QStringLiteral("reattachDraftDimension"));
+    reattach->setEnabled(false);
     remove->setObjectName(QStringLiteral("removeDraftItem"));
     remove->setEnabled(false);
     properties->setEnabled(false);
-    connect(canvas_, &DraftCanvas::selectionChanged, this, [this, remove, properties](int selected) {
+    connect(canvas_, &DraftCanvas::selectionChanged, this, [this, remove, properties, reattach](int selected) {
         remove->setEnabled(selected >= 0);
+        reattach->setEnabled(selected >= 0 && drawing::isDimension(draft_.items[selected].kind));
         properties->setEnabled(selected >= 0 && draft_.items[selected].kind != DraftKind::Polyline
-                               && draft_.items[selected].kind != DraftKind::Hatch);
+                               && draft_.items[selected].kind != DraftKind::Hatch
+                               && draft_.items[selected].kind != DraftKind::Spline);
     });
     edit->addAction(tr("Cancel tool"), Qt::Key_Escape, canvas_, &DraftCanvas::cancel);
     auto* sheet = menuBar()->addMenu(tr("&Sheet"));
@@ -172,6 +177,12 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
         }
     });
     auto* fit = sheet->addAction(tr("Fit sheet"), Qt::Key_F, canvas_, &DraftCanvas::fit);
+    sheet->addAction(tr("Edit custom title block…"), this, &DraftWindow::editTitleBlock)
+        ->setObjectName(QStringLiteral("draftCustomTitleBlock"));
+    sheet->addAction(tr("Save drawing template…"), this, &DraftWindow::saveDrawingTemplate)
+        ->setObjectName(QStringLiteral("saveDraftTemplate"));
+    sheet->addAction(tr("New from drawing template…"), this, &DraftWindow::newFromDrawingTemplate)
+        ->setObjectName(QStringLiteral("openDraftTemplate"));
     auto* grid = sheet->addAction(tr("Show grid"));
     grid->setCheckable(true);
     grid->setChecked(true);
@@ -184,6 +195,8 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
     modelRefresh_->setObjectName(QStringLiteral("linkedViewsRefresh"));
     modelSettings_ = views->addAction(tr("View layout and section…"), this, &DraftWindow::editModelViews);
     modelSettings_->setObjectName(QStringLiteral("linkedViewsSettings"));
+    views->addAction(tr("Arrange and add views…"), this, &DraftWindow::manageDrawingViews)
+        ->setObjectName(QStringLiteral("manageDrawingViews"));
     sectionLine_ = views->addAction(tr("Place section line on view"), this, &DraftWindow::placeSectionLine);
     localRegion_ = views->addAction(tr("Place local section area"), this, &DraftWindow::placeLocalSection);
     modelDetail_ = views->addAction(tr("Detail view…"), this, &DraftWindow::editDetail);
@@ -219,6 +232,9 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
         action->setToolTip(hint);
         group->addAction(action);
         connect(action, &QAction::triggered, this, [this, kind, hint] {
+            if (kind && (drawing::isLinearDimension(*kind) || *kind == DraftKind::Radius || *kind == DraftKind::Diameter)) {
+                prepareModelDimensions();
+            }
             canvas_->setTool(kind);
             statusBar()->showMessage(hint);
         });
@@ -239,6 +255,15 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
          tr("Pick vertices. Click the start to close, or press Enter to finish."), geometryTools);
     tool(tr("Hatch"), "draftHatch", DraftKind::Hatch,
          tr("Click inside a closed contour to hatch it."), geometryTools);
+    tool(tr("Ellipse"), "draftEllipse", DraftKind::Ellipse, tr("Pick opposite corners of the ellipse box."), geometryTools);
+    tool(tr("Spline"), "draftSpline", DraftKind::Spline,
+         tr("Pick points on the spline. Click the start to close, or press Enter to finish."), geometryTools);
+    tool(tr("Construction line"), "draftConstruction", DraftKind::ConstructionLine,
+         tr("Pick two points to define an auxiliary line."), geometryTools);
+    geometryTools->addAction(tr("Save visible objects as fragment…"), this, &DraftWindow::saveFragment)
+        ->setObjectName(QStringLiteral("saveDraftFragment"));
+    geometryTools->addAction(tr("Insert fragment…"), this, &DraftWindow::insertFragment)
+        ->setObjectName(QStringLiteral("insertDraftFragment"));
     auto* modify = menuBar()->addMenu(tr("&Modify"));
     const auto modification = [&](const QString& name, const char* id, DraftModify mode, const QString& hint) {
         auto* action = modify->addAction(name);
@@ -270,6 +295,10 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
     tool(tr("Datum"), "draftDatum", DraftKind::Datum, hint, annotations);
     tool(tr("Geometric tolerance"), "draftTolerance", DraftKind::Tolerance, hint, annotations);
     tool(tr("Surface roughness"), "draftRoughness", DraftKind::Roughness, hint, annotations);
+    tool(tr("Thread designation"), "draftThread", DraftKind::Thread, hint, annotations);
+    tool(tr("Weld designation"), "draftWeld", DraftKind::Weld, hint, annotations);
+    annotations->addAction(tr("Insert table…"), this, [this] { editTable(); })
+        ->setObjectName(QStringLiteral("insertDraftTable"));
     auto* layerMenu = menuBar()->addMenu(tr("&Layers"));
     layerMenu->addAction(tr("Manage layers…"), this, &DraftWindow::editLayers);
     layerMenu->addAction(tr("Move selection to active layer"), this, [this] {
@@ -1183,6 +1212,80 @@ void DraftWindow::editDetail()
     });
 }
 
+void DraftWindow::prepareModelDimensions()
+{
+    auto& model = draft_.modelViews;
+    if (!model || !model->geometry || !model->geometry->views.top.id.isNull()) {
+        return;
+    }
+    try {
+        const auto source = io::openModelSource(model->sourcePath);
+        if (source.digest == model->sourceDigest) {
+            model = io::buildModelViews(source, model->bodyId, drawing::sectionSettings(*model),
+                                         drawing::draftSize(draft_), &*model);
+        }
+    } catch (const std::exception&) {
+        // Keep the saved views available for drawing and use the normal refresh command to diagnose the source.
+    }
+}
+
+void DraftWindow::reattachDimension()
+{
+    prepareModelDimensions();
+    const int index = canvas_->selected();
+    if (index < 0 || !draft_.modelViews) {
+        return;
+    }
+    auto item = draft_.items[index];
+    const auto kind = item.kind;
+    const bool round = kind == DraftKind::Radius || kind == DraftKind::Diameter;
+    if (!round && !drawing::isLinearDimension(kind)) {
+        statusBar()->showMessage(tr("Select a linear, radial or diameter dimension."), 4000);
+        return;
+    }
+    bool first = true;
+    if (!round) {
+        const QStringList points{tr("First measured point"), tr("Second measured point")};
+        bool accepted = false;
+        const auto choice = QInputDialog::getItem(this, tr("Reattach dimension to view"), tr("Measured point"),
+                                                 points, 0, false, &accepted);
+        if (!accepted) {
+            return;
+        }
+        first = choice == points.front();
+    }
+    statusBar()->showMessage(round ? tr("Select a circular edge on a model view.")
+                                   : tr("Select an edge or vertex on the same model view."));
+    canvas_->pickPoint([this, index, item = std::move(item), first, round](QPointF position) mutable {
+        const auto picked = canvas_->modelPick(position, round);
+        if (!picked) {
+            statusBar()->showMessage(tr("No model geometry at the selected point."), 4000);
+            return;
+        }
+        if (round) {
+            auto center = picked->reference;
+            center.anchor = drawing::DraftAnchor::ModelCenter;
+            center.parameter = 0;
+            if (const auto origin = drawing::DraftGeometry(draft_).point(center)) {
+                item.anchorA = center;
+                item.anchorB = picked->reference;
+                item.a = *origin;
+                item.b = picked->position;
+            }
+        } else {
+            const auto& other = first ? item.anchorB : item.anchorA;
+            if (other && drawing::isModelReference(*other) && other->view != picked->reference.view) {
+                statusBar()->showMessage(tr("Both measured points must belong to the same view."), 4000);
+                return;
+            }
+            (first ? item.anchorA : item.anchorB) = picked->reference;
+            (first ? item.a : item.b) = picked->position;
+        }
+        editItem(index, item, tr("Reattach dimension"));
+        statusBar()->clearMessage();
+    });
+}
+
 void DraftWindow::editSelected()
 {
     const int index = canvas_->selected();
@@ -1190,7 +1293,11 @@ void DraftWindow::editSelected()
         return;
     }
     auto item = draft_.items[index];
-    if (item.kind == DraftKind::Polyline || item.kind == DraftKind::Hatch) {
+    if (item.kind == DraftKind::Table) {
+        editTable(index);
+        return;
+    }
+    if (item.kind == DraftKind::Polyline || item.kind == DraftKind::Hatch || item.kind == DraftKind::Spline) {
         return;
     }
     const auto measured = drawing::DraftGeometry(draft_).resolve(item);
@@ -1232,11 +1339,18 @@ void DraftWindow::editSelected()
     const auto a = pair(tr("First point X"), tr("First point Y"), measured.a, item.anchorA.has_value());
     std::optional<CoordinateFields> b, label, third;
     QLineEdit* text = nullptr;
+    QCheckBox* weldReverse = nullptr;
+    if (item.kind == DraftKind::Weld) {
+        weldReverse = new QCheckBox(tr("Weld notation below the shelf"), &dialog);
+        weldReverse->setObjectName(QStringLiteral("weldReverse"));
+        weldReverse->setChecked(item.weldReverse);
+        form->addRow(weldReverse);
+    }
     if (item.kind == DraftKind::Text || drawing::isAnnotation(item.kind)) {
         text = new QLineEdit(item.text, &dialog);
         text->setMaxLength(200);
         form->addRow(tr("Text"), text);
-    } else {
+    } else if (item.kind != DraftKind::Fragment) {
         b = pair(tr("Second point X"), tr("Second point Y"), measured.b, item.anchorB.has_value());
     }
     if (drawing::isAnnotation(item.kind)) {
@@ -1245,6 +1359,24 @@ void DraftWindow::editSelected()
         label = pair(tr("Dimension line X"), tr("Dimension line Y"), measured.label);
     } else if (item.kind == DraftKind::Arc) {
         label = pair(tr("End point X"), tr("End point Y"), measured.label);
+    }
+    auto* fitNote = new QLineEdit(item.dimensionNote.fit, &dialog);
+    auto* upper = new QLineEdit(item.dimensionNote.upper, &dialog);
+    auto* lower = new QLineEdit(item.dimensionNote.lower, &dialog);
+    if (drawing::isDimension(item.kind)) {
+        fitNote->setObjectName(QStringLiteral("dimensionFit"));
+        upper->setObjectName(QStringLiteral("dimensionUpper"));
+        lower->setObjectName(QStringLiteral("dimensionLower"));
+        fitNote->setMaxLength(24);
+        upper->setMaxLength(16);
+        lower->setMaxLength(16);
+        form->addRow(tr("Fit code"), fitNote);
+        form->addRow(tr("Upper deviation"), upper);
+        form->addRow(tr("Lower deviation"), lower);
+    } else {
+        fitNote->hide();
+        upper->hide();
+        lower->hide();
     }
     if (item.kind == DraftKind::Angular) {
         third = pair(tr("Third point X"), tr("Third point Y"), measured.points.front(), item.anchorC.has_value());
@@ -1267,6 +1399,12 @@ void DraftWindow::editSelected()
         }
         if (text) {
             item.text = text->text();
+        }
+        if (weldReverse) {
+            item.weldReverse = weldReverse->isChecked();
+        }
+        if (drawing::isDimension(item.kind)) {
+            item.dimensionNote = {fitNote->text().trimmed(), upper->text().trimmed(), lower->text().trimmed()};
         }
         if (drawing::validItem(item)) {
             dialog.accept();

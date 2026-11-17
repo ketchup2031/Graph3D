@@ -159,7 +159,8 @@ void paintPositionCallouts(QPainter& p, const ModelViews& model)
     p.setPen(QPen(Qt::black, .22));
     for (const auto& marker : model.assembly->callouts) {
         const auto row = std::ranges::find(model.assembly->rows, marker.position, &SpecificationRow::position);
-        if (row == model.assembly->rows.end() || marker.view < 0 || marker.view > 2 || marker.instance < 0
+        if (row == model.assembly->rows.end() || marker.view < 0 || marker.view > 2 || !model.showBase[marker.view]
+            || marker.instance < 0
             || static_cast<std::size_t>(marker.instance) >= row->instances.size()) {
             continue;
         }

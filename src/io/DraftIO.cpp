@@ -15,9 +15,10 @@ namespace graph3d::io {
 namespace {
 
 constexpr std::array kinds{"line", "rectangle", "circle", "text", "horizontal", "vertical", "arc", "polyline",
-                           "aligned", "angular", "radius", "diameter", "hatch", "leader", "datum", "tolerance", "roughness"};
+                           "aligned", "angular", "radius", "diameter", "hatch", "leader", "datum", "tolerance", "roughness", "ellipse", "spline",
+                           "construction-line", "fragment", "table", "thread", "weld"};
 constexpr std::array strokes{"solid", "hidden", "center"};
-constexpr std::array anchors{"start", "end", "corner-ab", "corner-ba", "center", "right", "left", "top", "bottom", "curve", "intersection"};
+constexpr std::array anchors{"start", "end", "corner-ab", "corner-ba", "center", "right", "left", "top", "bottom", "curve", "intersection", "model-curve", "model-center"};
 constexpr int maxItems = 20000;
 constexpr int maxDraftPoints = 750000;
 
@@ -105,6 +106,10 @@ std::optional<drawing::DraftReference> readAnchor(const QJsonValue& value)
     if (reference.anchor == drawing::DraftAnchor::Intersection) {
         reference.crossing = readId(anchor.value("crossing"));
     }
+    if (drawing::isModelReference(reference)) {
+        reference.view = readId(anchor.value("view"));
+        reference.parameter = anchor.value("parameter").toDouble(-1);
+    }
     return reference;
 }
 
@@ -117,6 +122,10 @@ QJsonObject writeAnchor(const drawing::DraftReference& anchor)
     }
     if (anchor.anchor == drawing::DraftAnchor::Intersection) {
         out.insert("crossing", anchor.crossing.toString(QUuid::WithoutBraces));
+    }
+    if (drawing::isModelReference(anchor)) {
+        out.insert("view", anchor.view.toString(QUuid::WithoutBraces));
+        out.insert("parameter", anchor.parameter);
     }
     return out;
 }
@@ -140,6 +149,109 @@ void validateLinks(const drawing::Draft& draft)
             }
         }
     }
+}
+
+drawing::DraftItem decodeItem(const QJsonObject& entry, int version, int& remaining, bool child = false)
+{
+    using namespace drawing;
+    DraftItem item{readName<DraftKind>(entry.value("type"), kinds), readPoint(entry.value("a")),
+        readPoint(entry.value("b")), readPoint(entry.value("label")), readText(entry.value("text")),
+        readName<DraftStroke>(entry.value("stroke"), strokes)};
+    if (version >= 4) {
+        if (entry.contains("points")) {
+            item.points = readPoints(entry.value("points"), remaining);
+        }
+        if (entry.contains("loops")) {
+            if (!entry.value("loops").isArray()) {
+                fileError(QStringLiteral("Invalid drawing coordinates."));
+            }
+            for (const auto loop : entry.value("loops").toArray()) {
+                item.loops.push_back(readPoints(loop, remaining));
+            }
+        }
+        item.anchorC = readAnchor(entry.value("anchorC"));
+    } else if (item.kind > DraftKind::Vertical) {
+        fileError(QStringLiteral("Invalid drawing geometry."));
+    }
+    item.id = version >= 2 ? readId(entry.value("id")) : QUuid::createUuid();
+    if (version >= 2) {
+        item.anchorA = readAnchor(entry.value("anchorA"));
+        item.anchorB = readAnchor(entry.value("anchorB"));
+    }
+    if (version >= 5) {
+        item.layer = entry.value("layer").toInt(-1);
+    }
+    if ((version < 5 && isAnnotation(item.kind)) || (version < 7 && item.kind > DraftKind::Roughness)) {
+        fileError(QStringLiteral("Invalid drawing geometry."));
+    }
+    if (version >= 7) {
+        if (entry.contains("weldReverse") && !entry.value("weldReverse").isBool()) {
+            fileError(QStringLiteral("Invalid drawing item."));
+        }
+        item.weldReverse = entry.value("weldReverse").toBool();
+        if (entry.contains("hatchBoundaries")) {
+            const auto loops = entry.value("hatchBoundaries").toArray();
+            if (loops.size() != static_cast<qsizetype>(item.loops.size())) {
+                fileError(QStringLiteral("Invalid hatch boundary attachment."));
+            }
+            for (const auto loop : loops) {
+                auto& ids = item.hatchBoundaries.emplace_back();
+                for (const auto id : loop.toArray()) {
+                    ids.push_back(readId(id));
+                }
+            }
+        }
+        if (entry.contains("fragment")) {
+            const auto fragment = entry.value("fragment").toArray();
+            if (child || fragment.isEmpty() || fragment.size() > 1024) {
+                fileError(QStringLiteral("Invalid drawing fragment."));
+            }
+            for (const auto piece : fragment) {
+                item.fragment.push_back(decodeItem(piece.toObject(), version, remaining, true));
+            }
+        }
+        if (entry.contains("table")) {
+            const auto data = entry.value("table").toObject();
+            const auto cells = data.value("cells").toArray();
+            if (cells.size() > 300) {
+                fileError(QStringLiteral("Invalid drawing table."));
+            }
+            DraftTable table{data.value("columns").toInt(), data.value("width").toDouble(),
+                             data.value("rowHeight").toDouble(), {}};
+            for (const auto cell : cells) {
+                table.cells << readText(cell);
+            }
+            item.table = std::move(table);
+        }
+        if (entry.contains("dimensionNote")) {
+            const auto note = entry.value("dimensionNote").toObject();
+            item.dimensionNote = {readText(note.value("fit")), readText(note.value("upper")), readText(note.value("lower"))};
+        }
+    }
+    if (!validItem(item) || (child && item.layer != 0)) {
+        fileError(QStringLiteral("Invalid drawing geometry."));
+    }
+    return item;
+}
+
+drawing::TitleBlockLayout readTitleBlock(const QJsonObject& object)
+{
+    drawing::TitleBlockLayout layout;
+    layout.width = object.value("width").toDouble();
+    layout.rowHeight = object.value("rowHeight").toDouble();
+    for (const auto value : object.value("rows").toArray()) {
+        const auto row = value.toObject();
+        const int field = row.value("field").toInt(-1);
+        if (field < 0 || field > static_cast<int>(drawing::TitleField::Pages)) {
+            fileError(QStringLiteral("Invalid drawing title block."));
+        }
+        layout.rows.push_back({readText(row.value("label")), static_cast<drawing::TitleField>(field),
+                               readText(row.value("text"))});
+    }
+    if (!drawing::validTitleBlock(layout)) {
+        fileError(QStringLiteral("Invalid drawing title block."));
+    }
+    return layout;
 }
 
 drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& path, int& remaining)
@@ -176,38 +288,19 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
                                     layer.value("locked").toBool()});
         }
     }
+    if (version >= 7) {
+        if (root.contains("modelTitle") && !root.value("modelTitle").isBool()) {
+            fileError(QStringLiteral("Invalid drawing title block."));
+        }
+        draft.paper.modelTitle = root.value("modelTitle").toBool();
+        if (root.contains("titleBlock")) {
+            draft.paper.titleBlock = readTitleBlock(root.value("titleBlock").toObject());
+        }
+    }
     for (const auto value : items) {
-        const auto entry = value.toObject();
-        drawing::DraftItem item{readName<drawing::DraftKind>(entry.value("type"), kinds),
-            readPoint(entry.value("a")), readPoint(entry.value("b")), readPoint(entry.value("label")),
-            readText(entry.value("text")), readName<drawing::DraftStroke>(entry.value("stroke"), strokes)};
-        if (version >= 4) {
-            if (entry.contains("points")) {
-                item.points = readPoints(entry.value("points"), remaining);
-            }
-            if (entry.contains("loops")) {
-                if (!entry.value("loops").isArray()) {
-                    fileError(QStringLiteral("Invalid drawing coordinates."));
-                }
-                for (const auto loop : entry.value("loops").toArray()) {
-                    item.loops.push_back(readPoints(loop, remaining));
-                }
-            }
-            item.anchorC = readAnchor(entry.value("anchorC"));
-        } else if (item.kind > drawing::DraftKind::Vertical) {
+        auto item = decodeItem(value.toObject(), version, remaining);
+        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())) {
             fileError(QStringLiteral("Invalid drawing geometry."));
-        }
-        if (version >= 5) {
-            item.layer = entry.value("layer").toInt(-1);
-        }
-        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())
-            || (version < 5 && drawing::isAnnotation(item.kind)) || !drawing::validItem(item)) {
-            fileError(QStringLiteral("Invalid drawing geometry."));
-        }
-        item.id = version >= 2 ? readId(entry.value("id")) : QUuid::createUuid();
-        if (version >= 2) {
-            item.anchorA = readAnchor(entry.value("anchorA"));
-            item.anchorB = readAnchor(entry.value("anchorB"));
         }
         draft.items.push_back(std::move(item));
     }
@@ -224,6 +317,93 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
     return draft;
 }
 
+QJsonObject encodeItem(const drawing::DraftItem& item, int version, int& remaining)
+{
+    if (!drawing::validItem(item) || item.text.size() > 200) {
+        fileError(QStringLiteral("Invalid drawing item."));
+    }
+    QJsonObject entry{{"type", kinds.at(static_cast<std::size_t>(item.kind))},
+        {"stroke", strokes.at(static_cast<std::size_t>(item.stroke))},
+        {"a", writePoint(item.a)}, {"b", writePoint(item.b)}, {"label", writePoint(item.label)}, {"text", item.text}};
+    if (version >= 5) {
+        entry.insert("layer", item.layer);
+    }
+    if (version >= 2) {
+        const auto id = item.id.isNull() ? QUuid::createUuid() : item.id;
+        entry.insert("id", id.toString(QUuid::WithoutBraces));
+        if (item.anchorA) {
+            entry.insert("anchorA", writeAnchor(*item.anchorA));
+        }
+        if (item.anchorB) {
+            entry.insert("anchorB", writeAnchor(*item.anchorB));
+        }
+    }
+    if (version >= 4) {
+        if (item.anchorC) {
+            entry.insert("anchorC", writeAnchor(*item.anchorC));
+        }
+        if (!item.points.empty()) {
+            entry.insert("points", writePoints(item.points, remaining));
+        }
+        if (!item.loops.empty()) {
+            QJsonArray loops;
+            for (const auto& loop : item.loops) {
+                loops.append(writePoints(loop, remaining));
+            }
+            entry.insert("loops", loops);
+        }
+    }
+    if (!item.hatchBoundaries.empty()) {
+        QJsonArray loops;
+        for (const auto& loop : item.hatchBoundaries) {
+            QJsonArray ids;
+            for (const auto& id : loop) {
+                ids.append(id.toString(QUuid::WithoutBraces));
+            }
+            loops.append(ids);
+        }
+        entry.insert("hatchBoundaries", loops);
+    }
+    if (!item.fragment.empty()) {
+        QJsonArray pieces;
+        for (const auto& child : item.fragment) {
+            if (child.layer != 0) {
+                fileError(QStringLiteral("Invalid drawing fragment."));
+            }
+            pieces.append(encodeItem(child, version, remaining));
+        }
+        entry.insert("fragment", pieces);
+    }
+    if (item.table) {
+        QJsonArray cells;
+        for (const auto& cell : item.table->cells) {
+            cells.append(cell);
+        }
+        entry.insert("table", QJsonObject{{"columns", item.table->columns}, {"width", item.table->width},
+                                         {"rowHeight", item.table->rowHeight}, {"cells", cells}});
+    }
+    if (item.weldReverse) {
+        entry.insert("weldReverse", true);
+    }
+    if (item.dimensionNote != drawing::DimensionNote{}) {
+        const auto& note = item.dimensionNote;
+        entry.insert("dimensionNote", QJsonObject{{"fit", note.fit}, {"upper", note.upper}, {"lower", note.lower}});
+    }
+    return entry;
+}
+
+QJsonObject writeTitleBlock(const drawing::TitleBlockLayout& layout)
+{
+    if (!drawing::validTitleBlock(layout)) {
+        fileError(QStringLiteral("Invalid drawing title block."));
+    }
+    QJsonArray rows;
+    for (const auto& row : layout.rows) {
+        rows.append(QJsonObject{{"label", row.label}, {"field", static_cast<int>(row.field)}, {"text", row.text}});
+    }
+    return {{"width", layout.width}, {"rowHeight", layout.rowHeight}, {"rows", rows}};
+}
+
 QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int version, int& remaining)
 {
     if (draft.items.size() > maxItems || draft.title.size() > 200 || draft.number.size() > 200
@@ -236,48 +416,15 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
     }
     QJsonArray items;
     for (const auto& item : draft.items) {
-        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())
-            || !drawing::validItem(item) || item.text.size() > 200) {
+        if (item.layer < 0 || item.layer >= static_cast<int>(draft.layers.size())) {
             fileError(QStringLiteral("Invalid drawing item."));
         }
-        QJsonObject entry{{"type", kinds.at(static_cast<std::size_t>(item.kind))},
-            {"stroke", strokes.at(static_cast<std::size_t>(item.stroke))},
-            {"a", writePoint(item.a)}, {"b", writePoint(item.b)}, {"label", writePoint(item.label)},
-            {"text", item.text}};
-        if (version >= 5) {
-            entry.insert("layer", item.layer);
-        }
-        if (version >= 2) {
-            const auto id = item.id.isNull() ? QUuid::createUuid() : item.id;
-            entry.insert("id", id.toString(QUuid::WithoutBraces));
-            if (item.anchorA) {
-                entry.insert("anchorA", writeAnchor(*item.anchorA));
-            }
-            if (item.anchorB) {
-                entry.insert("anchorB", writeAnchor(*item.anchorB));
-            }
-        }
-        if (version >= 4) {
-            if (item.anchorC) {
-                entry.insert("anchorC", writeAnchor(*item.anchorC));
-            }
-            if (!item.points.empty()) {
-                entry.insert("points", writePoints(item.points, remaining));
-            }
-            if (!item.loops.empty()) {
-                QJsonArray loops;
-                for (const auto& loop : item.loops) {
-                    loops.append(writePoints(loop, remaining));
-                }
-                entry.insert("loops", loops);
-            }
-        }
-        items.append(entry);
+        items.append(encodeItem(item, version, remaining));
     }
     QJsonObject root{{"paper", draft.a3 ? "A3" : "A4"}, {"title", draft.title}, {"number", draft.number},
         {"author", draft.author}, {"items", items}};
     if (draft.modelViews) {
-        root.insert("modelViews", writeModelViews(*draft.modelViews, path));
+        root.insert("modelViews", writeModelViews(*draft.modelViews, path, version >= 7));
     }
     if (version >= 5) {
         if (draft.layers.empty() || draft.layers.size() > drawing::maxLayers || draft.paper.material.size() > 200
@@ -301,11 +448,33 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
         root.insert("requirements", draft.paper.requirements);
         root.insert("layers", layers);
     }
+    if (draft.paper.modelTitle) {
+        root.insert("modelTitle", true);
+    }
+    if (draft.paper.titleBlock) {
+        root.insert("titleBlock", writeTitleBlock(*draft.paper.titleBlock));
+    }
     return root;
 }
 
 int draftVersion(const drawing::Draft& draft)
 {
+    const auto needsCurrentVersion = [](const auto& sheet) {
+        const auto model = [](const auto& anchor) { return anchor && drawing::isModelReference(*anchor); };
+        if (sheet.paper.modelTitle || sheet.paper.titleBlock
+            || (sheet.modelViews && (!sheet.modelViews->additional.empty()
+                || std::ranges::find(sheet.modelViews->showBase, false) != sheet.modelViews->showBase.end()))) {
+            return true;
+        }
+        return std::ranges::any_of(sheet.items, [&](const auto& item) {
+            return model(item.anchorA) || model(item.anchorB) || model(item.anchorC)
+                || item.kind > drawing::DraftKind::Roughness || !item.hatchBoundaries.empty()
+                || item.dimensionNote != drawing::DimensionNote{};
+        });
+    };
+    if (needsCurrentVersion(draft) || std::ranges::any_of(draft.additionalSheets, needsCurrentVersion)) {
+        return 7;
+    }
     const auto isAssembly = [](const auto& sheet) { return sheet.modelViews && sheet.modelViews->assembly; };
     if (isAssembly(draft) || std::ranges::any_of(draft.additionalSheets, isAssembly)) {
         return 6;
@@ -335,7 +504,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const int version = root.value("version").toInt();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 6
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 7
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }

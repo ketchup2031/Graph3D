@@ -49,6 +49,30 @@ struct LocalSection {
     bool operator==(const LocalSection&) const = default;
 };
 
+enum class DrawingViewKind {
+    Front, Right, Top, Back, Left, Bottom, Isometric, Oblique,
+    Projected, Arrow, SteppedSection, AlignedSection, Detail, Local
+};
+
+struct DrawingView {
+    QUuid id;
+    DrawingViewKind kind = DrawingViewKind::Front;
+    QString name;
+    QUuid source;
+    ViewPlacement placement{{140, 90}, 1};
+    std::array<double, 3> angles{};
+    std::vector<QPointF> path; // Source model coordinates, positive Y upwards.
+    QPointF focus;
+    double radius = 12;
+    double depth = 0;
+    std::shared_ptr<const CutProjection> geometry;
+};
+
+constexpr int drawingViewLimit = 32;
+bool derivedView(DrawingViewKind kind);
+bool pathView(DrawingViewKind kind);
+QString drawingViewName(DrawingViewKind kind);
+
 struct SpecificationRow {
     QString key;
     int position = 0;
@@ -76,6 +100,12 @@ struct AssemblyDrawing {
     bool operator==(const AssemblyDrawing&) const = default;
 };
 
+struct ModelTitleData {
+    QString name;
+    QString designation;
+    std::optional<double> massKg;
+};
+
 struct ModelViews {
     QString sourcePath;
     int bodyId = 0;
@@ -87,8 +117,19 @@ struct ModelViews {
     std::optional<DetailView> detail;
     std::optional<LocalSection> local;
     std::shared_ptr<const AssemblyDrawing> assembly;
+    std::array<bool, 3> showBase{true, true, true};
+    std::vector<DrawingView> additional;
+    ModelTitleData titleData;
 };
 
+struct LocatedView {
+    const View* view;
+    ViewPlacement placement;
+};
+
+const View& baseModelView(const ModelViews& model, int index);
+std::optional<LocatedView> locateModelView(const ModelViews& model, QUuid id);
+void rebuildDrawingViews(ModelViews& model, const TopoDS_Shape& solid, const ModelViews* previous);
 ViewLayout defaultViewLayout(const Projections& views, QSizeF paper);
 std::optional<SectionSettings> sectionSettings(const ModelViews& model);
 void paintModelViews(QPainter& painter, const ModelViews& model, bool eskd = false);

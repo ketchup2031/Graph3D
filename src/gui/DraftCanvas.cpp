@@ -20,28 +20,9 @@ namespace {
 using drawing::DraftItem;
 using drawing::DraftKind;
 
-DraftItem moved(DraftItem item, QPointF delta)
+bool chainTool(std::optional<DraftKind> kind)
 {
-    if (item.anchorA || item.anchorB || item.anchorC) {
-        item.label += delta;
-        return item;
-    }
-    item.a += delta;
-    if (item.kind != DraftKind::Text) {
-        item.b += delta;
-    }
-    if (drawing::isDimension(item.kind) || item.kind == DraftKind::Arc || drawing::isAnnotation(item.kind)) {
-        item.label += delta;
-    }
-    for (auto& point : item.points) {
-        point += delta;
-    }
-    for (auto& loop : item.loops) {
-        for (auto& point : loop) {
-            point += delta;
-        }
-    }
-    return item;
+    return kind == DraftKind::Polyline || kind == DraftKind::Spline;
 }
 
 }  // namespace
@@ -165,7 +146,7 @@ DraftCanvas::Pick DraftCanvas::snapped(QPointF page) const
             result = {point, reference.item.isNull() ? std::nullopt : std::optional(reference)};
         }
     };
-    if (tool_ == DraftKind::Polyline && points_.size() > 2) {
+    if (chainTool(tool_) && points_.size() > 2) {
         consider(points_.front().position, {});
     }
     for (const auto& item : draft_.items) {
@@ -210,6 +191,14 @@ DraftCanvas::Pick DraftCanvas::snapped(QPointF page) const
             }
         }
     }
+    if (tool_ && drawing::isLinearDimension(*tool_)) {
+        if (const auto attached = modelPick(page)) {
+            const double distance = QLineF(page, attached->position).length();
+            if (distance < std::min(best, bestCurve)) {
+                return {attached->position, attached->reference};
+            }
+        }
+    }
     return best < tolerance ? result : onCurve;
 }
 
@@ -230,7 +219,7 @@ std::optional<DraftItem> DraftCanvas::pendingItem(QPointF end) const
         return DraftItem{DraftKind::Line, points_.front().position, end};
     }
     DraftItem item{kind, points_.front().position, end, {}, {}, dimension ? drawing::DraftStroke::Solid : stroke_};
-    if (kind == DraftKind::Polyline) {
+    if (chainTool(kind)) {
         for (const auto& point : points_) {
             item.points.push_back(point.position);
         }
@@ -322,10 +311,13 @@ int DraftCanvas::hitItem(QPointF point, bool curvesOnly) const
         if (!drawing::layerEditable(draft_, item.layer)) {
             continue;
         }
-        if (curvesOnly && drawing::draftAnchors(item.kind).empty()) {
+        if (curvesOnly && (drawing::draftAnchors(item.kind).empty()
+            || item.kind == DraftKind::ConstructionLine || item.kind == DraftKind::Ellipse
+            || item.kind == DraftKind::Spline)) {
             continue;
         }
-        if (drawing::draftHit(drawing::isDimension(item.kind) ? geometry.resolve(item) : item, point, 6 / scale())) {
+        if (drawing::draftHit(drawing::isDimension(item.kind) || item.kind == DraftKind::Hatch
+            ? geometry.resolve(item) : item, point, 6 / scale())) {
             if (item.kind != DraftKind::Hatch) {
                 return i;
             }
@@ -376,6 +368,12 @@ void DraftCanvas::handleModify(QPointF point)
     emit toolMessage(tr("No valid result. Check the intersections or offset."));
 }
 
+std::optional<drawing::ModelPick> DraftCanvas::modelPick(QPointF point, bool circularOnly) const
+{
+    return draft_.modelViews ? drawing::pickModelGeometry(*draft_.modelViews, point, 8 / scale(), circularOnly)
+                             : std::nullopt;
+}
+
 std::optional<DraftCanvas::Pick> DraftCanvas::circularPick(QPointF point) const
 {
     std::optional<Pick> result;
@@ -400,6 +398,10 @@ std::optional<DraftCanvas::Pick> DraftCanvas::circularPick(QPointF point) const
             result = Pick{edge, drawing::DraftReference{item.id, drawing::DraftAnchor::Curve, t}};
         }
     }
+    if (const auto attached = modelPick(point, true);
+        attached && QLineF(point, attached->position).length() < best) {
+        return Pick{attached->position, attached->reference};
+    }
     return result;
 }
 
@@ -411,7 +413,7 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
         setCursor(Qt::ClosedHandCursor);
         return;
     }
-    if (event->button() == Qt::RightButton && tool_ == DraftKind::Polyline) {
+    if (event->button() == Qt::RightButton && chainTool(tool_)) {
         finishPolyline();
         return;
     }
@@ -454,8 +456,13 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
     }
     if ((*tool_ == DraftKind::Radius || *tool_ == DraftKind::Diameter) && points_.empty()) {
         if (const auto point = circularPick(raw)) {
-            const drawing::DraftReference center{point->reference->item, drawing::DraftAnchor::Center};
-            points_ = {{*drawing::DraftGeometry(draft_).point(center), center}, *point};
+            auto center = *point->reference;
+            center.anchor = drawing::isModelReference(center) ? drawing::DraftAnchor::ModelCenter
+                                                             : drawing::DraftAnchor::Center;
+            center.parameter = 0;
+            if (const auto origin = drawing::DraftGeometry(draft_).point(center)) {
+                points_ = {{*origin, center}, *point};
+            }
             cursor_ = raw;
             emit toolMessage(tr("Place the dimension label."));
             update();
@@ -486,7 +493,9 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
         bool accepted = false;
         const auto defaultText = *tool_ == DraftKind::Datum ? QStringLiteral("A")
             : tolerance ? QStringLiteral("⊥ | 0.05 | A")
-            : *tool_ == DraftKind::Roughness ? QStringLiteral("Ra 3.2") : QString{};
+            : *tool_ == DraftKind::Roughness ? QStringLiteral("Ra 3.2")
+            : *tool_ == DraftKind::Thread ? QStringLiteral("M10 × 1.5")
+            : *tool_ == DraftKind::Weld ? QStringLiteral("△4") : QString{};
         const auto text = QInputDialog::getText(this, tr("Annotation"), label, QLineEdit::Normal, defaultText, &accepted).trimmed();
         if (accepted) {
             const DraftItem item{*tool_, anchor, {}, point.position, text};
@@ -500,11 +509,12 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
         return;
     }
     const bool dimension = drawing::isLinearDimension(*tool_);
-    if (*tool_ == DraftKind::Polyline) {
+    if (chainTool(tool_)) {
         if (points_.size() > 2 && point.position == points_.front().position) {
             points_.push_back(point);
             finishPolyline();
-        } else if (points_.empty() || QLineF(points_.back().position, point.position).length() >= .001) {
+        } else if (points_.size() < (*tool_ == DraftKind::Spline ? 511u : 19999u)
+                   && (points_.empty() || QLineF(points_.back().position, point.position).length() >= .001)) {
             points_.push_back(point);
         }
         update();
@@ -519,6 +529,12 @@ void DraftCanvas::mousePressEvent(QMouseEvent* event)
     } else if (*tool_ == DraftKind::Line) {
         addLine(pendingItem(point.position)->b);
     } else if (dimension && points_.size() == 1) {
+        const auto onView = [](const auto& p) { return p.reference && drawing::isModelReference(*p.reference); };
+        if (onView(points_.front()) != onView(point)
+            || (onView(point) && points_.front().reference->view != point.reference->view)) {
+            emit toolMessage(tr("Both measured points must belong to the same view."));
+            return;
+        }
         const auto delta = point.position - points_[0].position;
         const bool valid = *tool_ == DraftKind::Horizontal ? std::abs(delta.x()) >= .001
                          : *tool_ == DraftKind::Vertical ? std::abs(delta.y()) >= .001
@@ -554,7 +570,7 @@ void DraftCanvas::mouseMoveEvent(QMouseEvent* event)
         }
         if (dragging_) {
             const QPointF delta(std::round(point.x() - dragStart_.x()), std::round(point.y() - dragStart_.y()));
-            preview_ = moved(draft_.items[selected_], delta);
+            preview_ = drawing::translateDraftItem(draft_.items[selected_], delta);
         }
     }
     update();
@@ -578,7 +594,7 @@ void DraftCanvas::mouseReleaseEvent(QMouseEvent* event)
 
 void DraftCanvas::keyPressEvent(QKeyEvent* event)
 {
-    if (tool_ == DraftKind::Polyline && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+    if (chainTool(tool_) && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
         finishPolyline();
         return;
     }

@@ -34,7 +34,7 @@ add_library(graph3d_document STATIC src/document/Document.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
-add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp src/drawing/DraftCurves.cpp src/drawing/Specification.cpp)
+add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/ProjectedEdges.cpp src/drawing/ModelReference.cpp src/drawing/ModelViews.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp src/drawing/DraftCurves.cpp src/drawing/Specification.cpp)
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
 
@@ -61,7 +61,7 @@ add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
     src/gui/LineInput.cpp src/gui/LineInput.h
-    src/gui/DraftCanvas.cpp src/gui/DraftCanvas.h src/gui/DraftWindow.cpp src/gui/DraftWindow.h src/gui/DraftAssembly.cpp
+    src/gui/DraftCanvas.cpp src/gui/DraftCanvas.h src/gui/DraftWindow.cpp src/gui/DraftWindow.h src/gui/DraftAssembly.cpp src/gui/DraftViews.cpp src/gui/DraftTools.cpp
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
 qt_add_resources(graph3d_ui start_examples PREFIX "/" FILES

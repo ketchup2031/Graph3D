@@ -29,6 +29,28 @@ double positive(double angle)
     return std::fmod(std::fmod(angle, turn) + turn, turn);
 }
 
+QPainterPath splinePath(const DraftItem& item)
+{
+    QPainterPath path;
+    const auto& points = item.points;
+    if (points.size() < 2) {
+        return path;
+    }
+    const bool closed = points.size() > 3 && points.front() == points.back();
+    path.moveTo(points.front());
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        const auto a = points[i - 1];
+        const auto b = points[i];
+        const auto before = i > 1 ? points[i - 2] : closed ? points[points.size() - 2] : 2 * a - b;
+        const auto after = i + 1 < points.size() ? points[i + 1] : closed ? points[1] : 2 * b - a;
+        path.cubicTo(a + (b - before) / 6, b - (after - a) / 6, b);
+    }
+    if (closed) {
+        path.closeSubpath();
+    }
+    return path;
+}
+
 bool close(QPointF a, QPointF b)
 {
     return length(a - b) < draftTolerance;
@@ -199,6 +221,29 @@ std::vector<DraftCurve> draftCurves(const DraftItem& item)
 {
     switch (item.kind) {
     case DraftKind::Line: return {{item.a, item.b}};
+    case DraftKind::ConstructionLine: {
+        const auto delta = item.b - item.a;
+        const auto span = length(delta);
+        if (span < draftTolerance) {
+            return {};
+        }
+        const auto direction = delta / span;
+        return {{item.a - 30000 * direction, item.a + 30000 * direction}};
+    }
+    case DraftKind::Ellipse:
+    case DraftKind::Spline: {
+        const auto polygon = draftCurvePath(item).toSubpathPolygons(QTransform::fromScale(16, 16));
+        std::vector<DraftCurve> segments;
+        if (!polygon.isEmpty()) {
+            const auto& points = polygon.front();
+            for (qsizetype i = 1; i < points.size(); ++i) {
+                if (points[i - 1] != points[i]) {
+                    segments.push_back({points[i - 1] / 16, points[i] / 16});
+                }
+            }
+        }
+        return segments;
+    }
     case DraftKind::Circle: return {{item.a, {}, QLineF(item.a, item.b).length(), 0, turn}};
     case DraftKind::Arc: {
         const auto arc = draftArc(item.a, item.b, item.label);
@@ -221,8 +266,15 @@ std::vector<DraftCurve> draftCurves(const DraftItem& item)
 
 QPainterPath draftCurvePath(const DraftItem& item)
 {
-    const auto curves = draftCurves(item);
+    if (item.kind == DraftKind::Spline) {
+        return splinePath(item);
+    }
     QPainterPath path;
+    if (item.kind == DraftKind::Ellipse) {
+        path.addEllipse(QRectF(item.a, item.b).normalized());
+        return path;
+    }
+    const auto curves = draftCurves(item);
     if (!curves.empty()) {
         path.moveTo(curves.front().at(0));
         for (const auto& edge : curves) {
@@ -439,20 +491,28 @@ std::optional<DraftItem> offsetDraft(const DraftItem& item, double distance)
 
 std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
 {
-    std::vector<std::vector<QPointF>> closed, open;
+    struct Boundary {
+        std::vector<QPointF> points;
+        std::vector<QUuid> ids;
+    };
+    std::vector<Boundary> closed, open;
     for (const auto& item : draft.items) {
         if (!layerVisible(draft, item.layer)) {
+            continue;
+        }
+        if (item.kind == DraftKind::ConstructionLine) {
             continue;
         }
         const auto curves = draftCurves(item);
         if (!curves.empty()) {
             auto points = sampled(curves);
             auto& pool = close(points.front(), points.back()) ? closed : open;
-            pool.push_back(std::move(points));
+            pool.push_back({std::move(points), {item.id}});
         }
     }
     for (std::size_t i = 0; i < open.size(); ++i) {
-        auto loop = std::move(open[i]);
+        auto boundary = std::move(open[i]);
+        auto& loop = boundary.points;
         if (loop.empty()) {
             continue;
         }
@@ -461,11 +521,11 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
             bool reverse = false;
             bool ambiguous = false;
             for (std::size_t j = i + 1; j < open.size(); ++j) {
-                if (open[j].empty()) {
+                if (open[j].points.empty()) {
                     continue;
                 }
-                const bool atStart = close(loop.back(), open[j].front());
-                const bool atEnd = close(loop.back(), open[j].back());
+                const bool atStart = close(loop.back(), open[j].points.front());
+                const bool atEnd = close(loop.back(), open[j].points.back());
                 if (atStart || atEnd) {
                     if (next) {
                         ambiguous = true;
@@ -478,7 +538,8 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
             if (ambiguous || !next) {
                 break;
             }
-            auto& edge = open[*next];
+            auto& edge = open[*next].points;
+            boundary.ids.push_back(open[*next].ids.front());
             if (reverse) {
                 std::ranges::reverse(edge);
             }
@@ -486,7 +547,7 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
             edge.clear();
         }
         if (loop.size() >= 4 && close(loop.front(), loop.back())) {
-            closed.push_back(std::move(loop));
+            closed.push_back(std::move(boundary));
         }
     }
 
@@ -499,7 +560,7 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
     std::optional<std::size_t> region;
     QPainterPath outer;
     for (std::size_t i = 0; i < closed.size(); ++i) {
-        auto candidate = path(closed[i]);
+        auto candidate = path(closed[i].points);
         if (candidate.contains(point) && (!region || outer.contains(candidate))) {
             region = i;
             outer = std::move(candidate);
@@ -510,12 +571,62 @@ std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point)
     }
     DraftItem result;
     result.kind = DraftKind::Hatch;
+    result.a = point;
+    const auto append = [&](Boundary& boundary) {
+        result.loops.push_back(std::move(boundary.points));
+        result.hatchBoundaries.push_back(std::move(boundary.ids));
+    };
     for (std::size_t i = 0; i < closed.size(); ++i) {
-        if (i == *region || outer.contains(path(closed[i]))) {
-            result.loops.push_back(std::move(closed[i]));
+        if (i != *region && outer.contains(path(closed[i].points))) {
+            append(closed[i]);
         }
     }
+    append(closed[*region]);
+    std::ranges::rotate(result.loops, result.loops.end() - 1);
+    std::ranges::rotate(result.hatchBoundaries, result.hatchBoundaries.end() - 1);
+    if (std::ranges::any_of(result.hatchBoundaries, [](const auto& ids) {
+            return std::ranges::any_of(ids, [](const QUuid& id) { return id.isNull(); });
+        })) {
+        result.hatchBoundaries.clear();
+    }
     return validItem(result) ? std::optional(std::move(result)) : std::nullopt;
+}
+
+std::optional<std::vector<QPointF>> draftBoundary(std::span<const DraftItem* const> pieces)
+{
+    std::vector<std::vector<QPointF>> paths;
+    for (const auto* piece : pieces) {
+        const auto curves = piece ? draftCurves(*piece) : std::vector<DraftCurve>{};
+        if (curves.empty() || piece->kind == DraftKind::ConstructionLine) {
+            return {};
+        }
+        paths.push_back(sampled(curves));
+    }
+    if (paths.empty()) {
+        return {};
+    }
+    for (const bool reverseFirst : {false, true}) {
+        auto loop = paths.front();
+        if (reverseFirst) {
+            std::ranges::reverse(loop);
+        }
+        bool connected = true;
+        for (std::size_t i = 1; i < paths.size(); ++i) {
+            const auto& path = paths[i];
+            if (close(loop.back(), path.front())) {
+                loop.insert(loop.end(), std::next(path.begin()), path.end());
+            } else if (close(loop.back(), path.back())) {
+                loop.insert(loop.end(), std::next(path.rbegin()), path.rend());
+            } else {
+                connected = false;
+                break;
+            }
+        }
+        if (connected && loop.size() >= 4 && loop.size() <= 50000 && close(loop.front(), loop.back())) {
+            return loop;
+        }
+    }
+    return {};
 }
 
 }  // namespace graph3d::drawing

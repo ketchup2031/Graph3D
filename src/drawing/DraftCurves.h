@@ -35,5 +35,6 @@ std::vector<DraftItem> trimDraft(const DraftItem& item, const Draft& draft, QPoi
 std::optional<DraftItem> extendDraft(const DraftItem& item, const Draft& draft, QPointF click);
 std::optional<DraftItem> offsetDraft(const DraftItem& item, double distance);
 std::optional<DraftItem> hatchDraft(const Draft& draft, QPointF point);
+std::optional<std::vector<QPointF>> draftBoundary(std::span<const DraftItem* const> pieces);
 
 }  // namespace graph3d::drawing

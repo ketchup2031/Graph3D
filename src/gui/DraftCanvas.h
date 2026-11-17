@@ -27,6 +27,7 @@ public:
     void cancel();
     void select(int index);
     int selected() const { return selected_; }
+    std::optional<drawing::ModelPick> modelPick(QPointF point, bool circularOnly = false) const;
 
 signals:
     void itemCreated(const drawing::DraftItem& item);

@@ -21,6 +21,6 @@ drawing::ModelViews buildModelViews(const ModelSource& source, int bodyId,
                                     const drawing::ModelViews* previous = nullptr);
 
 drawing::ModelViews readModelViews(const QJsonObject& object, const QString& draftPath);
-QJsonObject writeModelViews(const drawing::ModelViews& model, const QString& draftPath);
+QJsonObject writeModelViews(const drawing::ModelViews& model, const QString& draftPath, bool references = false);
 
 }  // namespace graph3d::io

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <stdexcept>
 
 namespace graph3d::drawing {
@@ -220,9 +221,9 @@ void roundDimensions(QPainter& p, const View& view, QPointF origin, double scale
     }
 }
 
-void paintHatch(QPainter& p, const Section& section, QPointF center, double scale)
+void paintHatch(QPainter& p, const std::vector<Linework>& material, QPointF center, double scale)
 {
-    for (const auto& face : section.material) {
+    for (const auto& face : material) {
         QPainterPath mask;
         mask.setFillRule(Qt::OddEvenFill);
         for (const auto& loop : face) {
@@ -303,7 +304,7 @@ namespace {
 
 void paintViews(QPainter& painter, const Projections& views, const ViewLayout& layout,
                 bool dimensions, bool hiddenLines, const Section* section, bool showScales,
-                const LocalSection* local = nullptr)
+                const LocalSection* local = nullptr, const std::array<bool, 3>& show = {true, true, true})
 {
     const auto& [front, right, top] = layout;
     using geometry::Plane;
@@ -329,7 +330,7 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
                 boundary.closeSubpath();
                 painter.save();
                 painter.setClipPath(boundary, Qt::IntersectClip);
-                paintHatch(painter, *section, place.center, place.scale);
+                paintHatch(painter, section->material, place.center, place.scale);
                 paintView(painter, section->view, place.center, place.scale, false);
                 painter.restore();
                 QPainterPath outside;
@@ -344,15 +345,15 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
                 painter.drawPath(boundary);
                 return;
             }
-            paintHatch(painter, *section, place.center, place.scale);
+            paintHatch(painter, section->material, place.center, place.scale);
             paintView(painter, section->view, place.center, place.scale, false);
         } else {
             paintView(painter, view, place.center, place.scale, hiddenLines);
         }
     };
-    paint(views.front, front, cutFront);
-    paint(views.right, right, cutRight);
-    paint(views.top, top, cutTop);
+    if (show[0]) { paint(views.front, front, cutFront); }
+    if (show[1]) { paint(views.right, right, cutRight); }
+    if (show[2]) { paint(views.top, top, cutTop); }
     if (section) {
         paintCutLine(painter, *section, views, layout);
     }
@@ -363,10 +364,10 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
             dimension(painter, place.center.x() - halfWidth, place.center.x() + halfWidth,
                       lower, lower + 8, view.width);
         };
-        if (!cutRight) {
+        if (show[1] && !cutRight) {
             width(views.right, right);
         }
-        if (!cutFront) {
+        if (show[0] && !cutFront) {
             width(views.front, front);
             const double halfX = views.front.width * front.scale / 2;
             const double halfZ = views.front.height * front.scale / 2;
@@ -376,7 +377,7 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
             dimension(painter, -halfZ, halfZ, 0, 8, views.front.height);
             painter.restore();
         }
-        if (showScales || (!cutTop && !cutFront)) {
+        if (show[2] && (showScales || (!cutTop && !cutFront))) {
             roundDimensions(painter, cutTop ? section->view : views.top, top.center, top.scale);
         }
     }
@@ -392,9 +393,117 @@ void paintViews(QPainter& painter, const Projections& views, const ViewLayout& l
         }
         text(painter, {place.center.x() - 29, y, 58, 6}, caption, 4, Qt::AlignCenter, cut);
     };
-    label(views.right, right, QCoreApplication::translate("DrawingSheet", "Right"), cutRight, true);
-    label(views.front, front, QCoreApplication::translate("DrawingSheet", "Front"), cutFront, true);
-    label(views.top, top, QCoreApplication::translate("DrawingSheet", "Top"), cutTop, false);
+    if (show[1]) { label(views.right, right, QCoreApplication::translate("DrawingSheet", "Right"), cutRight, true); }
+    if (show[0]) { label(views.front, front, QCoreApplication::translate("DrawingSheet", "Front"), cutFront, true); }
+    if (show[2]) { label(views.top, top, QCoreApplication::translate("DrawingSheet", "Top"), cutTop, false); }
+}
+
+}  // namespace
+
+namespace {
+
+QPointF paperPoint(QPointF modelPoint, const ViewPlacement& place)
+{
+    return place.center + QPointF(modelPoint.x(), -modelPoint.y()) * place.scale;
+}
+
+void pathArrow(QPainter& p, QPointF at, QPointF direction)
+{
+    const auto length = std::hypot(direction.x(), direction.y());
+    if (length < 1.e-6) {
+        return;
+    }
+    direction /= length;
+    const auto across = QPointF(-direction.y(), direction.x()) * .9;
+    const auto base = at - direction * 3;
+    p.setBrush(Qt::black);
+    p.drawPolygon(QPolygonF{at, base + across, base - across});
+    p.setBrush(Qt::NoBrush);
+}
+
+void paintAdditionalViews(QPainter& p, const ModelViews& model)
+{
+    using enum DrawingViewKind;
+    for (const auto& spec : model.additional) {
+        if (!spec.geometry) {
+            continue;
+        }
+        const auto parent = locateModelView(model, spec.source);
+        const auto& geometry = *spec.geometry;
+        const auto label = spec.name.isEmpty() ? drawingViewName(spec.kind) : spec.name;
+        const auto& place = spec.placement;
+        const bool section = spec.kind == SteppedSection || spec.kind == AlignedSection;
+        if (spec.kind == Local && parent) {
+            const auto center = paperPoint(spec.focus, parent->placement);
+            const double radius = spec.radius * parent->placement.scale;
+            QPainterPath boundary;
+            for (int i = 0; i < 144; ++i) {
+                const double angle = i * std::numbers::pi / 72;
+                const auto point = center + QPointF(std::cos(angle), std::sin(angle))
+                    * (radius * (1 + .045 * std::sin(angle * 12)));
+                if (i == 0) {
+                    boundary.moveTo(point);
+                } else {
+                    boundary.lineTo(point);
+                }
+            }
+            boundary.closeSubpath();
+            p.save();
+            p.setClipPath(boundary, Qt::IntersectClip);
+            p.fillPath(boundary, Qt::white);
+            paintHatch(p, geometry.material, parent->placement.center, parent->placement.scale);
+            paintView(p, geometry.view, parent->placement.center, parent->placement.scale, false);
+            p.restore();
+            pen(p, .18);
+            p.drawPath(boundary);
+            continue;
+        }
+
+        auto center = place.center;
+        double halfHeight = geometry.view.height * place.scale / 2;
+        p.save();
+        if (spec.kind == Detail && parent) {
+            const auto position = paperPoint(spec.focus, parent->placement);
+            const auto radius = spec.radius * parent->placement.scale;
+            pen(p, .18);
+            p.drawEllipse(position, radius, radius);
+            text(p, {position.x() + radius, position.y() - 5, 32, 5}, label, 3, Qt::AlignLeft, true);
+            halfHeight = spec.radius * place.scale;
+            QPainterPath mask;
+            mask.addEllipse(place.center, halfHeight, halfHeight);
+            p.setClipPath(mask, Qt::IntersectClip);
+            center = place.center - QPointF(spec.focus.x(), -spec.focus.y()) * place.scale;
+        }
+        paintHatch(p, geometry.material, center, place.scale);
+        paintView(p, geometry.view, center, place.scale, model.hiddenLines && !section);
+        p.restore();
+
+        if (spec.kind == Detail) {
+            pen(p, .18);
+            p.drawEllipse(place.center, halfHeight, halfHeight);
+        }
+        if (parent && spec.path.size() >= 2 && (section || spec.kind == Arrow)) {
+            QPolygonF path;
+            for (const auto point : spec.path) {
+                path.append(paperPoint(point, parent->placement));
+            }
+            pen(p, .32, section ? Qt::DashLine : Qt::SolidLine);
+            p.drawPolyline(path);
+            if (section) {
+                const auto tangent = path[1] - path[0];
+                const QPointF direction(tangent.y(), -tangent.x());
+                pathArrow(p, path.front(), direction);
+                pathArrow(p, path.back(), direction);
+            } else {
+                pathArrow(p, path.back(), path.back() - path.front());
+            }
+            text(p, {path.front().x() - 18, path.front().y() - 6, 36, 5}, label, 3, Qt::AlignCenter, true);
+        }
+        const auto ratio = place.scale >= 1 ? QStringLiteral("%1:1").arg(digits(place.scale))
+                                           : QStringLiteral("1:%1").arg(digits(1 / place.scale));
+        text(p, {place.center.x() - 38, place.center.y() + halfHeight + 3, 76, 6},
+             label + QStringLiteral("  ·  ") + ratio, 4, Qt::AlignCenter, section);
+    }
 }
 
 }  // namespace
@@ -424,7 +533,8 @@ void paintModelViews(QPainter& painter, const ModelViews& model, bool eskd)
     }
     const auto& cut = model.geometry->section;
     paintViews(painter, model.geometry->views, model.layout, model.dimensions, model.hiddenLines,
-               cut ? &*cut : nullptr, true, model.local ? &*model.local : nullptr);
+               cut ? &*cut : nullptr, true, model.local ? &*model.local : nullptr, model.showBase);
+    paintAdditionalViews(painter, model);
     if (model.detail) {
         const auto& detail = *model.detail;
         const auto& views = model.geometry->views;

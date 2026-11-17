@@ -599,17 +599,43 @@ public:
         }
     }
 
+    void projectedHatches(const std::vector<Linework>& material, const ViewPlacement& place, const QString& layer)
+    {
+        for (const auto& region : material) {
+            DraftItem hatch{DraftKind::Hatch};
+            for (const auto& contour : region) {
+                if (contour.size() < 3) {
+                    continue;
+                }
+                auto& loop = hatch.loops.emplace_back();
+                for (const auto p : contour) {
+                    loop.push_back(place.center + QPointF(p.x, -p.y) * place.scale);
+                }
+                if (loop.front() != loop.back()) {
+                    loop.push_back(loop.front());
+                }
+            }
+            if (validItem(hatch)) {
+                write(hatch, layer);
+            }
+        }
+    }
+
     bool projectedViews(const ModelViews& model, const QString& layer)
     {
         if (!model.geometry) {
             return false;
         }
+        const auto firstHandle = nextHandle;
         const auto& [front, top, right] = model.geometry->views;
         const std::array views{&front, &right, &top};
         using geometry::Plane;
         constexpr std::array planes{Plane::XZ, Plane::YZ, Plane::XY};
 
         for (std::size_t i = 0; i < views.size(); ++i) {
+            if (!model.showBase[i]) {
+                continue;
+            }
             const auto& place = model.layout[i];
             const auto& section = model.geometry->section;
             const bool fullSection = section && section->plane == planes[i] && !model.local;
@@ -617,29 +643,22 @@ public:
                 projectedEdges(views[i]->hidden, place, layer, DraftStroke::Hidden);
             }
             projectedEdges(fullSection ? section->view.visible : views[i]->visible, place, layer, DraftStroke::Solid);
-            if (!fullSection) {
-                continue;
-            }
-            for (const auto& region : section->material) {
-                DraftItem hatch{DraftKind::Hatch};
-                for (const auto& contour : region) {
-                    if (contour.size() < 3) {
-                        continue;
-                    }
-                    auto& loop = hatch.loops.emplace_back();
-                    for (const auto p : contour) {
-                        loop.push_back(place.center + QPointF(p.x, -p.y) * place.scale);
-                    }
-                    if (loop.front() != loop.back()) {
-                        loop.push_back(loop.front());
-                    }
-                }
-                if (validItem(hatch)) {
-                    write(hatch, layer);
-                }
+            if (fullSection) {
+                projectedHatches(section->material, place, layer);
             }
         }
-        return true;
+        for (const auto& extra : model.additional) {
+            if (!extra.geometry || extra.kind == DrawingViewKind::Detail || extra.kind == DrawingViewKind::Local) {
+                continue;
+            }
+            const auto& view = extra.geometry->view;
+            if (model.hiddenLines) {
+                projectedEdges(view.hidden, extra.placement, layer, DraftStroke::Hidden);
+            }
+            projectedEdges(view.visible, extra.placement, layer, DraftStroke::Solid);
+            projectedHatches(extra.geometry->material, extra.placement, layer);
+        }
+        return nextHandle > firstHandle;
     }
 
     QByteArray data;
@@ -786,11 +805,13 @@ int exportDxf(const QString& path, const Draft& sheet)
     writer.section("ENTITIES");
     int skipped = 0;
     const bool projected = sheet.modelViews && !names.isEmpty() && writer.projectedViews(*sheet.modelViews, names.front());
+    const DraftGeometry geometry(sheet);
     for (const auto& item : sheet.items) {
         if (!validItem(item) || item.layer < 0 || item.layer >= names.size()) {
             invalid();
         }
-        if (!writer.write(item, names[item.layer])) {
+        const auto exported = item.kind == DraftKind::Hatch ? geometry.resolve(item) : item;
+        if (exported.lostReference || !writer.write(exported, names[item.layer])) {
             ++skipped;
         }
     }
@@ -803,7 +824,7 @@ int exportDxf(const QString& path, const Draft& sheet)
     }
     writeFile(path, writer.data);
     const auto& model = sheet.modelViews;
-    return skipped + (model && (!projected || model->dimensions || model->detail || model->local
+    return skipped + (model && (!projected || model->dimensions || model->detail || model->local || !model->additional.empty()
                                 || (model->assembly && !model->assembly->callouts.empty())) ? 1 : 0);
 }
 
