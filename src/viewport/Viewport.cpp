@@ -5,6 +5,8 @@
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_ColoredShape.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <BRep_Tool.hxx>
 #include <QKeyEvent>
 #include <Aspect_DisplayConnection.hxx>
@@ -166,14 +168,32 @@ void Viewport::syncDocument(const document::Document& document)
                 }
                 continue;
             }
-            const bool wire = !document::isBody(record.parameters);
+            const bool wire = !document::isBody(record.parameters) && !std::holds_alternative<document::ImportedMesh>(record.parameters);
             const auto& displayShape = record.preview.IsNull() ? record.shape : record.preview;
-            const auto color = std::holds_alternative<geometry::Sketch>(record.parameters)
+            document::ComponentRecord metadata;
+            if (record.preview.IsNull() && (std::holds_alternative<document::Assembly>(record.parameters)
+                || std::holds_alternative<document::LinkedComponent>(record.parameters))) {
+                metadata = document.componentRecord(record.id);
+            }
+            const auto hasColor = [](auto&& self, const document::ComponentRecord& component) -> bool {
+                return component.properties.color.has_value()
+                    || std::ranges::any_of(component.children, [&](const auto& child) { return self(self, child); });
+            };
+            const bool coloredAssembly = std::ranges::any_of(metadata.children,
+                [&](const auto& child) { return hasColor(hasColor, child); });
+            if (!object.IsNull() && (coloredAssembly != object->IsKind(STANDARD_TYPE(AIS_ColoredShape)))) {
+                scene_->context->Remove(object, false);
+                object.Nullify();
+            }
+            const auto color = record.properties.color
+                ? Quantity_Color((*record.properties.color)[0],(*record.properties.color)[1],(*record.properties.color)[2],Quantity_TOC_RGB)
+                : std::holds_alternative<geometry::Sketch>(record.parameters)
                 ? Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB)
                 : wire ? Quantity_Color(0.87, 0.65, 0.23, Quantity_TOC_sRGB)
                        : Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB);
             if (object.IsNull()) {
-                object = new AIS_Shape(displayShape);
+                if (coloredAssembly) { object = new AIS_ColoredShape(displayShape); }
+                else { object = new AIS_Shape(displayShape); }
                 object->SetColor(color);
                 object->SetWidth(wire ? 2.0 : 1.0);
             } else if (!object->Shape().IsSame(displayShape)) {
@@ -181,6 +201,32 @@ void Viewport::syncDocument(const document::Document& document)
                 object->SetColor(color);
                 object->SetWidth(wire ? 2.0 : 1.0);
                 scene_->context->Redisplay(object, false);
+            } else {
+                Quantity_Color previous;
+                object->Color(previous);
+                if(previous!=color) scene_->context->SetColor(object,color,false);
+            }
+            if (coloredAssembly) {
+                const auto colored = Handle(AIS_ColoredShape)::DownCast(object);
+                if (!colored.IsNull()) {
+                    colored->ClearCustomAspects();
+                    const auto shade = [&](auto&& self, const TopoDS_Shape& shape,
+                                           const document::ComponentRecord& component) -> void {
+                        if (component.properties.color) {
+                            const auto& rgb = *component.properties.color;
+                            colored->SetCustomColor(shape, Quantity_Color(rgb[0], rgb[1], rgb[2], Quantity_TOC_RGB));
+                        }
+                        std::size_t index = 0;
+                        for (TopoDS_Iterator child(shape); child.More() && index < component.children.size(); child.Next()) {
+                            self(self, child.Value(), component.children[index++]);
+                        }
+                    };
+                    std::size_t index = 0;
+                    for (TopoDS_Iterator child(displayShape); child.More() && index < metadata.children.size(); child.Next()) {
+                        shade(shade, child.Value(), metadata.children[index++]);
+                    }
+                    scene_->context->Redisplay(object, false);
+                }
             }
             const bool displayed = scene_->context->IsDisplayed(object);
             if (record.visible && !displayed) {

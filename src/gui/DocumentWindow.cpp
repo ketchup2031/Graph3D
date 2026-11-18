@@ -209,7 +209,7 @@ void DocumentWindow::rememberProject(const QString& path)
 void DocumentWindow::browse()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open document"), pathOf(tabs_->currentWidget()),
-        tr("Supported files (*.graph3d *.g3draw *.g3spec *.dxf);;3D projects (*.graph3d);;2D drawings (*.g3draw);;Specifications (*.g3spec);;DXF files (*.dxf)"),
+        tr("Supported files (*.graph3d *.g3draw *.g3spec *.dxf *.dwg);;3D projects (*.graph3d);;2D drawings (*.g3draw);;Specifications (*.g3spec);;CAD drawings (*.dxf *.dwg)"),
         nullptr, (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openDocument(path);
@@ -246,6 +246,15 @@ void DocumentWindow::newDrawing()
     addDocument(new DraftWindow(this, this));
 }
 
+void DocumentWindow::createDrawing(drawing::Draft draft)
+{
+    auto* window = new DraftWindow(this,this);
+    addDocument(window);
+    window->replaceDrawing(std::move(draft));
+    window->history_.resetClean();
+    window->updateTitle();
+}
+
 void DocumentWindow::newSpecification() { createSpecification({}); }
 
 void DocumentWindow::createSpecification(drawing::SpecificationDocument spec)
@@ -264,7 +273,7 @@ bool DocumentWindow::openDocument(const QString& path, bool example)
         }
     }
     const auto previous = tabs_->currentWidget();
-    const bool dxf = hasExtension(path, QStringLiteral(".dxf"));
+    const bool dxf = hasExtension(path, QStringLiteral(".dxf")) || hasExtension(path, QStringLiteral(".dwg"));
     QWidget* opened = nullptr;
     bool success = false;
     if (hasExtension(path, QStringLiteral(".g3spec"))) {

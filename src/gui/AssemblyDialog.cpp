@@ -48,7 +48,7 @@ AssemblyDialog::AssemblyDialog(const document::Document& document, Sources sourc
         auto* form = new QFormLayout;
         auto* count = new QSpinBox(this);
         count->setObjectName(QStringLiteral("assemblyCount"));
-        count->setRange(geometry::minAssemblyComponents, geometry::maxAssemblyComponents);
+        count->setRange(existing ? 1 : geometry::minAssemblyComponents, geometry::maxAssemblyComponents);
         count->setValue(existing ? static_cast<int>(existing->components.size()) : geometry::minAssemblyComponents);
         form->addRow(tr("Components"), count);
         layout->addLayout(form);

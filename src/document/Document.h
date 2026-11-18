@@ -7,6 +7,7 @@
 #include "geometry/BodyTransform.h"
 #include "geometry/PartFeatures.h"
 #include "geometry/Fastener.h"
+#include "geometry/SheetMetal.h"
 #include "geometry/Primitive.h"
 #include "geometry/SketchModeling.h"
 
@@ -80,6 +81,7 @@ struct PartProperties {
     std::string name;
     std::string material;
     std::string note;
+    std::optional<geometry::Point3> color;
     bool operator==(const PartProperties&) const = default;
 };
 
@@ -90,6 +92,16 @@ struct ComponentRecord {
     std::string identity;
     bool standard = false;
     bool operator==(const ComponentRecord&) const = default;
+};
+
+struct ExchangeNode {
+    TopoDS_Shape shape;
+    PartProperties properties;
+    std::vector<ExchangeNode> children;
+};
+struct ImportedMesh {
+    std::string name;
+    std::vector<geometry::Point3> vertices; // Consecutive triangle triples in millimetres.
 };
 
 struct LinkedComponent {
@@ -122,7 +134,7 @@ struct MotionInterference {
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
                                 Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend,
-                                geometry::Fastener>;
+                                geometry::Fastener, geometry::SheetMetal, ImportedMesh>;
 
 bool isBody(const Parameters& parameters);
 bool isAdvanced(const Parameters& parameters);
@@ -158,6 +170,8 @@ public:
     ObjectId addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle, ObjectId datumAxis = 0);
     ObjectId addBoolean(ObjectId first, ObjectId second, geometry::BooleanOperation operation);
     ObjectId addImported(std::string name, TopoDS_Shape shape);
+    ObjectId addImportedMesh(ImportedMesh mesh);
+    ObjectId importTree(const std::vector<ExchangeNode>& roots);
     ObjectId addHole(ObjectId body, geometry::FaceReference face, geometry::HoleSize size);
     ObjectId addEdgeTreatment(ObjectId body, geometry::EdgeReference edge, geometry::EdgeTreatmentKind kind, double size);
     ObjectId addEdgeTreatment(ObjectId body, std::vector<geometry::EdgeReference> edges, geometry::EdgeTreatmentKind kind, double size);
@@ -168,6 +182,8 @@ public:
     ObjectId addAssembly(Assembly assembly);
     ObjectId addFastener(geometry::Fastener item);
     bool editFastener(ObjectId id, geometry::Fastener item);
+    ObjectId addSheetMetal(geometry::SheetMetal sheet);
+    bool editSheetMetal(ObjectId id, geometry::SheetMetal sheet);
     ObjectId addLinkedComponent(LinkedComponent component);
     bool refreshLinkedComponents(std::vector<std::pair<ObjectId, LinkedComponent>> components);
     bool setPartProperties(ObjectId id, PartProperties properties);

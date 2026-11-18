@@ -14,3 +14,7 @@ Graph3D использует следующие внешние библиоте�
 заменить совместимыми сборками. Для FFmpeg поставляется отдельная минимальная
 сборка без GPL-компонентов; её параметры описаны в
 [`packaging/windows/build-ffmpeg.sh`](packaging/windows/build-ffmpeg.sh).
+
+Обмен DWG использует отдельно установленные программы `dwg2dxf` и `dxf2dwg`
+из GNU LibreDWG. Они запускаются отдельными процессами. GNU LibreDWG
+распространяется под GNU GPL версии 3 или новее. [GNU LibreDWG](https://www.gnu.org/software/libredwg/)

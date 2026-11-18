@@ -1027,10 +1027,10 @@ void verifyDxf(const QDir& output)
     plate.items.push_back({Horizontal, {40, 30}, {140, 30}, {90, 20}});
 
     const auto path = output.filePath("plate-100x60.dxf");
-    check(io::exportDxf(path, plate) == 1, "DXF must report unsupported dimensions");
+    check(io::exportDxf(path, plate) == 0, "DXF reported a loss for supported drawing items");
     const auto imported = io::importDxf(path);
     const auto& items = imported.drawing.items;
-    check(!imported.skipped && !imported.beyondSheet && items.size() == 7, "DXF lost supported items");
+    check(!imported.skipped && !imported.beyondSheet && items.size() == 8, "DXF lost supported items");
     check(items[0].kind == Polyline && items[0].points.front() == items[0].points.back()
         && QLineF(items[0].points[0], items[0].points[1]).length() == 100
         && QLineF(items[0].points[1], items[0].points[2]).length() == 60, "DXF distorted the plate");
@@ -1042,6 +1042,8 @@ void verifyDxf(const QDir& output)
     check(items[4].kind == Arc && QLineF(items[4].b, plate.items[4].b).length() < 1.e-8
         && items[5].text == plate.items[5].text && items[6].loops == plate.items[6].loops,
         "DXF lost arc, text or hatch");
+    check(items[7].kind == Horizontal && QLineF(items[7].a, items[7].b).length() == 100,
+          "DXF lost the editable plate width");
     const auto native = output.filePath("plate-from-dxf.g3draw");
     io::saveDraft(native, imported.drawing);
     check(io::openDraft(native).items == items, "Imported geometry could not be saved natively");

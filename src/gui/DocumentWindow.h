@@ -12,7 +12,7 @@ class QTabWidget;
 
 namespace graph3d {
 
-namespace drawing { struct SpecificationDocument; }
+namespace drawing { struct SpecificationDocument; struct Draft; }
 class DraftWindow;
 class MainWindow;
 class StartPage;
@@ -46,6 +46,7 @@ private:
     void browse();
     void newProject(bool cube = false, bool sketch = false);
     void newDrawing();
+    void createDrawing(drawing::Draft draft);
     void newSpecification();
     void createSpecification(drawing::SpecificationDocument spec);
     void closeCurrent();

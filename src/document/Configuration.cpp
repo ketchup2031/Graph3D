@@ -46,6 +46,13 @@ void visitFields(P& parameters, Field field)
             }
         } else if constexpr (std::is_same_v<T, MoveFace>) {
             field("distance", p.distance);
+        } else if constexpr (std::is_same_v<T, geometry::SheetMetal>) {
+            field("length", p.length); field("width", p.width); field("thickness", p.thickness);
+            for (std::size_t i = 0; i < p.bends.size(); ++i) {
+                const auto key = "bend." + std::to_string(i+1) + ".";
+                field(key+"flange",p.bends[i].flange); field(key+"radius",p.bends[i].radius);
+                field(key+"angle",p.bends[i].degrees); field(key+"factor",p.bends[i].factor); field(key+"relief",p.bends[i].relief);
+            }
         } else if constexpr (std::is_same_v<T, Shell>) {
             field("thickness", p.thickness);
         } else if constexpr (std::is_same_v<T, DraftAngle>) {

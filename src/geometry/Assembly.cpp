@@ -47,8 +47,8 @@ gp_Trsf assemblyPlacement(const Placement& placement)
 
 TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates, double driveAngle, TopoDS_Shape* preview)
 {
-    if (bodies.size() < minAssemblyComponents || bodies.size() > maxAssemblyComponents) {
-        throw std::invalid_argument("An assembly needs 2 to 100 components.");
+    if (bodies.empty() || bodies.size() > maxAssemblyComponents) {
+        throw std::invalid_argument("An assembly needs 1 to 100 components.");
     }
     BRep_Builder builder;
     TopoDS_Compound assembly;

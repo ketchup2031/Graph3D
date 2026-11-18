@@ -1564,16 +1564,18 @@ private slots:
         QVERIFY(!window.isWindowModified());
         dialogFile(step);
         action("importStep")->trigger();
-        QCOMPARE(tree->topLevelItemCount(), 3);
-        QCOMPARE(tree->topLevelItem(2)->text(0), QStringLiteral("Imported STEP 3"));
+        QCOMPARE(tree->topLevelItemCount(), 4);
+        QCOMPARE(tree->topLevelItem(2)->text(0), QStringLiteral("Imported body 3"));
+        QCOMPARE(tree->topLevelItem(3)->text(0), QStringLiteral("Imported body 4"));
         QVERIFY(window.isWindowModified());
         action("saveProject")->trigger();
         QVERIFY(!window.isWindowModified());
 
         dialogFile(path);
         action("openProject")->trigger();
-        QCOMPARE(tree->topLevelItemCount(), 3);
-        QCOMPARE(tree->topLevelItem(2)->text(1), QStringLiteral("сцена.step"));
+        QCOMPARE(tree->topLevelItemCount(), 4);
+        QCOMPARE(tree->topLevelItem(2)->text(1), QStringLiteral("Graph3D #1"));
+        QCOMPARE(tree->topLevelItem(3)->text(1), QStringLiteral("Graph3D #2"));
         QVERIFY(!window.isWindowModified());
     }
 

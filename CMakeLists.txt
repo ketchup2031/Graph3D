@@ -20,6 +20,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/PartFeatures.cpp
     src/geometry/DirectFeatures.cpp
     src/geometry/Fastener.cpp
+    src/geometry/SheetMetal.cpp
     src/geometry/AdvancedModeling.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp src/geometry/AssemblyMates.cpp)
@@ -31,7 +32,7 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset TKGeomBase)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset TKGeomBase TKGeomAlgo)
 
 add_library(graph3d_document STATIC src/document/Document.cpp src/document/Formula.cpp src/document/Configuration.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
@@ -41,10 +42,10 @@ add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/Projec
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
 
-add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/LinkedComponents.cpp src/io/Exchange.cpp src/io/DraftIO.cpp src/io/DxfIO.cpp src/io/ModelViewsIO.cpp src/io/AssemblyDrawingIO.cpp src/io/SpecificationIO.cpp)
+add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/LinkedComponents.cpp src/io/Exchange.cpp src/io/StructuredExchange.cpp src/io/DraftIO.cpp src/io/DxfIO.cpp src/io/DwgIO.cpp src/io/ModelViewsIO.cpp src/io/AssemblyDrawingIO.cpp src/io/SpecificationIO.cpp src/io/FlatDrawing.cpp)
 set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core
-    PRIVATE graph3d_drawing TKDESTEP TKXSBase TKMesh TKTopAlgo)
+    PRIVATE graph3d_drawing TKDESTEP TKDEIGES TKDESTL TKXCAF TKLCAF TKXSBase TKMesh TKTopAlgo)
 
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
@@ -60,7 +61,7 @@ endif()
 add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.h src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp src/gui/AdvancedDialog.cpp
-    src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp src/gui/FastenerDialog.cpp src/gui/SpecificationWindow.cpp
+    src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp src/gui/FastenerDialog.cpp src/gui/SpecificationWindow.cpp src/gui/SheetMetalDialog.cpp
     src/gui/SpecificationWindow.h
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
@@ -102,6 +103,12 @@ if(BUILD_TESTING)
     set_target_properties(exchange_test PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(exchange_test PRIVATE graph3d_io TKTopAlgo)
     add_test(NAME exchange COMMAND exchange_test)
+
+    add_executable(interchange_sheet_test tests/io/InterchangeSheetTest.cpp)
+    set_target_properties(interchange_sheet_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(interchange_sheet_test PRIVATE graph3d_io Qt6::Gui)
+    add_test(NAME interchange_sheet COMMAND interchange_sheet_test)
+    set_tests_properties(interchange_sheet PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(part_features_test tests/geometry/PartFeaturesTest.cpp)
     set_target_properties(part_features_test PROPERTIES CXX_EXTENSIONS OFF)

@@ -491,6 +491,18 @@ QString draftDimensionText(const DraftItem& item)
     return value;
 }
 
+std::vector<QLineF> dimensionSegments(const DraftItem& item)
+{
+    std::vector<QLineF> result;
+    for(const auto& polygon:itemPath(item).toSubpathPolygons()){
+        for(qsizetype i=1;i<polygon.size();++i)
+            if(polygon[i-1]!=polygon[i]) result.emplace_back(polygon[i-1],polygon[i]);
+    }
+    return result;
+}
+
+QPointF dimensionTextPoint(const DraftItem& item) { return dimensionText(item); }
+
 std::span<const DraftAnchor> draftAnchors(DraftKind kind)
 {
     using enum DraftAnchor;

@@ -20,6 +20,13 @@ namespace graph3d::io {
 namespace {
 
 using namespace drawing;
+QString draftKindName(DraftKind kind)
+{
+    constexpr std::array titles{"LINE","RECTANGLE","CIRCLE","TEXT","HORIZONTAL DIMENSION","VERTICAL DIMENSION",
+        "ARC","POLYLINE","ALIGNED DIMENSION","ANGULAR DIMENSION","RADIAL DIMENSION","DIAMETER DIMENSION",
+        "HATCH","LEADER","DATUM","TOLERANCE","ROUGHNESS","ELLIPSE","SPLINE","CONSTRUCTION LINE","BLOCK","TABLE","THREAD","WELD"};
+    return QString::fromLatin1(titles.at(static_cast<std::size_t>(kind)));
+}
 constexpr double turn = 2 * std::numbers::pi;
 constexpr int maxItems = 20000;
 constexpr int maxPoints = 750000;
@@ -216,6 +223,9 @@ struct Vertex {
 class Reader {
 public:
     explicit Reader(Record header) : scale(mmPerUnit(header)) {}
+    void skip(QString type) { ++result.skipped; ++result.losses[type]; }
+    QHash<QString,std::vector<Record>> blocks;
+    QSet<QString> expanding;
 
     int layer(const QString& raw)
     {
@@ -377,15 +387,16 @@ public:
     void entity(Record record, const std::vector<Vertex>* legacy = nullptr)
     {
         const auto type = record.front().value;
-        if (integer(record, 67) != 0 || number(record, 210) != 0 || number(record, 220) != 0
+        if (number(record, 210) != 0 || number(record, 220) != 0
             || number(record, 230, 1) != 1 || number(record, 38) != 0 || number(record, 39) != 0
             || number(record, 30) != 0 || (type == "LINE" && number(record, 31) != 0)) {
-            ++result.skipped;
+            skip(type);
             return;
         }
         if (type != "LINE" && type != "CIRCLE" && type != "ARC" && type != "TEXT"
-            && type != "LWPOLYLINE" && type != "POLYLINE" && type != "HATCH") {
-            ++result.skipped;
+            && type != "LWPOLYLINE" && type != "POLYLINE" && type != "HATCH"
+            && type != "INSERT" && type != "DIMENSION") {
+            skip(type);
             return;
         }
         DraftItem item;
@@ -395,7 +406,50 @@ public:
             lineType = layerStyles.value(item.layer);
         }
         item.stroke = styles.value(lineType, strokeType(lineType));
-        if (type == "LINE") {
+        if (type == "INSERT") {
+            const auto name=value(record,2).toUpper();
+            if (!blocks.contains(name) || expanding.contains(name) || !expanding.isEmpty()
+                || number(record,41,1)!=1 || number(record,42,1)!=1 || number(record,50)!=0
+                || integer(record,70,1)!=1 || integer(record,71,1)!=1) { skip(type); return; }
+            const auto& definition=blocks[name];
+            if(definition.size()<2) {skip(type); return;}
+            const auto origin=has(definition.front(),10) ? coordinate(definition.front()) : QPointF{};
+            const auto first=result.drawing.items.size();
+            expanding.insert(name);
+            for(std::size_t i=1;i<definition.size();++i) entity(definition[i]);
+            expanding.remove(name);
+            item.kind=DraftKind::Fragment;
+            item.a=coordinate(record);
+            for(std::size_t i=first;i<result.drawing.items.size();++i) {
+                auto child=std::move(result.drawing.items[i]);
+                child.layer=0;
+                child.a-=origin; child.b-=origin; child.label-=origin;
+                for(auto& p:child.points) p-=origin;
+                for(auto& loop:child.loops) for(auto& p:loop) p-=origin;
+                item.fragment.push_back(std::move(child));
+            }
+            result.drawing.items.resize(first);
+            if(item.fragment.empty()) {skip(type); return;}
+        } else if (type == "DIMENSION") {
+            const int mode=integer(record,70)&7;
+            const auto rotation=std::remainder(number(record,50),180.);
+            if(mode==0 || mode==1) {
+                if(mode==0 && std::abs(rotation)>1.e-5 && std::abs(std::abs(rotation)-90)>1.e-5) {skip(type); return;}
+                item.kind=mode==1 ? DraftKind::Aligned : std::abs(rotation)>45 ? DraftKind::Vertical : DraftKind::Horizontal;
+                item.a=coordinate(record,13); item.b=coordinate(record,14); item.label=coordinate(record);
+            } else if (mode==3 || mode==4) {
+                item.kind=mode==3 ? DraftKind::Diameter : DraftKind::Radius;
+                const auto a=coordinate(record), b=coordinate(record,15);
+                item.a=mode==3 ? (a+b)/2 : a; item.b=b;
+                item.label=has(record,11) ? coordinate(record,11) : b+QPointF(12,-8);
+            } else if(mode==5 && has(record,15)) {
+                item.kind=DraftKind::Angular;
+                item.a=coordinate(record,15); item.b=coordinate(record,13);
+                item.points={coordinate(record,14)}; item.label=coordinate(record);
+            } else {skip(type); return;}
+            const auto label=decoded(value(record,1));
+            if(!label.isEmpty() && label!="<>") { item.text=label; }
+        } else if (type == "LINE") {
             item.kind = DraftKind::Line;
             item.a = coordinate(record);
             item.b = coordinate(record, 11);
@@ -424,19 +478,19 @@ public:
         } else if (type == "TEXT") {
             item.kind = DraftKind::Text;
             if (number(record, 50) != 0 || integer(record, 72) != 0 || integer(record, 73) != 0) {
-                ++result.skipped;
+                skip(type);
                 return;
             }
             item.a = coordinate(record);
             item.text = decoded(value(record, 1));
         } else if (type == "HATCH") {
             if (!hatch(std::move(item), record)) {
-                ++result.skipped;
+                skip(type);
             }
             return;
         } else {
             if (type == "POLYLINE" && (!legacy || integer(record, 70) & 126)) {
-                ++result.skipped;
+                skip(type);
                 return;
             }
             polyline(std::move(item), legacy ? *legacy : vertices(record, integer(record, 90)), integer(record, 70) & 1);
@@ -481,7 +535,9 @@ public:
     {
         pair(0, name);
         handle();
+        if(!owner.isEmpty()) pair(330,owner);
         pair(100, "AcDbEntity");
+        if (!layout.isEmpty()) { pair(67,1); pair(410,layout); }
         pair(8, layer);
         pair(6, std::array{"CONTINUOUS", "HIDDEN", "CENTER"}.at(static_cast<unsigned>(stroke)));
         pair(100, type);
@@ -497,9 +553,41 @@ public:
         }
     }
 
-    bool write(const DraftItem& item, const QString& layer)
+    bool write(const DraftItem& item, const QString& layer, const QString& blockName = {})
     {
         switch (item.kind) {
+        case DraftKind::Fragment:
+            if (blockName.isEmpty()) { return false; }
+            entity("INSERT","AcDbBlockReference",layer,item.stroke);
+            pair(2,blockName); point(item.a); pair(30,0);
+            break;
+        case DraftKind::Horizontal: case DraftKind::Vertical: case DraftKind::Aligned:
+        case DraftKind::Diameter: case DraftKind::Radius: case DraftKind::Angular: {
+            const bool angular=item.kind==DraftKind::Angular;
+            const bool radial=item.kind==DraftKind::Radius || item.kind==DraftKind::Diameter;
+            if (blockName.isEmpty()) return false;
+            entity("DIMENSION","AcDbDimension",layer,item.stroke);
+            pair(2,blockName);
+            auto label=item.label;
+            if(item.kind==DraftKind::Horizontal) label.setX(item.b.x());
+            if(item.kind==DraftKind::Vertical) label.setY(item.b.y());
+            point(radial ? (item.kind==DraftKind::Diameter ? 2*item.a-item.b : item.a) : label); pair(30,0);
+            point(item.label,11); pair(31,0);
+            const int type=angular ? 5 : radial ? (item.kind==DraftKind::Diameter?3:4) : item.kind==DraftKind::Aligned?1:0;
+            pair(70,32+type); pair(1,item.text.isEmpty()? QStringLiteral("<>"):encoded(item.text)); pair(3,"Standard");
+            if(radial){
+                pair(100,item.kind==DraftKind::Diameter?"AcDbDiametricDimension":"AcDbRadialDimension");
+                point(item.b,15); pair(35,0); pair(40,QLineF(item.b,item.label).length());
+            } else if(angular){
+                pair(100,"AcDb3PointAngularDimension");
+                point(item.b,13); pair(33,0); point(item.points.front(),14); pair(34,0);
+                point(item.a,15); pair(35,0);
+            } else {
+                pair(100,"AcDbAlignedDimension"); point(item.a,13); pair(33,0); point(item.b,14); pair(34,0);
+                if(type==0){pair(50,item.kind==DraftKind::Vertical?90:0); pair(100,"AcDbRotatedDimension");}
+            }
+            break;
+        }
         case DraftKind::Line:
             entity("LINE", "AcDbLine", layer, item.stroke);
             point(item.a);
@@ -663,10 +751,26 @@ public:
 
     QByteArray data;
     int nextHandle = 256;
+    QString layout;
+    QString owner;
 };
 
 QRectF boundsOf(const DraftItem& item)
 {
+    if(item.kind==DraftKind::Fragment) {
+        QRectF bound;
+        bool first=true;
+        for(const auto& piece:item.fragment) {
+            const auto other=boundsOf(piece).translated(item.a);
+            bound=first?other:bound.united(other); first=false;
+        }
+        return bound;
+    }
+    if(isDimension(item.kind)) {
+        QPolygonF points{item.a,item.b,item.label};
+        for(auto point:item.points) points<<point;
+        return points.boundingRect();
+    }
     if (item.kind == DraftKind::Hatch) {
         QRectF result;
         bool first = true;
@@ -702,13 +806,8 @@ void fitImported(DxfDrawing& result)
     if (!fits) {
         const auto shift = QPointF(25, 10) - bounds.topLeft();
         for (auto& item : result.drawing.items) {
-            switch (item.kind) {
-            case DraftKind::Line:
-            case DraftKind::Circle: item.b += shift; [[fallthrough]];
-            case DraftKind::Text: item.a += shift; break;
-            case DraftKind::Arc: item.a += shift; item.b += shift; item.label += shift; break;
-            default: break;
-            }
+            item.a+=shift;
+            if(item.kind!=DraftKind::Fragment) { item.b+=shift; item.label+=shift; }
             for (auto& point : item.points) {
                 point += shift;
             }
@@ -737,40 +836,188 @@ DxfDrawing importDxf(const QString& path)
     }
     Reader reader(content.value(QStringLiteral("HEADER")));
     reader.layerTable(records(content.value(QStringLiteral("TABLES"))));
-    const auto entities = records(content.value(QStringLiteral("ENTITIES")));
-    for (std::size_t i = 0; i < entities.size(); ++i) {
-        const auto entry = entities[i];
-        if (entry.front().value == "POLYLINE") {
-            std::vector<Vertex> vertices;
-            bool planar = true;
-            while (i + 1 < entities.size() && entities[i + 1].front().value == "VERTEX") {
-                const auto vertex = entities[++i];
-                vertices.push_back({reader.coordinate(vertex), number(vertex, 42)});
-                planar = planar && number(vertex, 30) == 0;
-                if (vertices.size() > 19999) {
-                    invalid();
-                }
-            }
-            if (i + 1 == entities.size() || entities[++i].front().value != "SEQEND") {
-                invalid();
-            }
-            reader.entity(entry, planar ? &vertices : nullptr);
-        } else {
-            reader.entity(entry);
+    QString currentBlock;
+    for(const auto& entry:records(content.value("BLOCKS"))) {
+        const auto type=entry.front().value;
+        if(type=="BLOCK"){currentBlock=value(entry,2).toUpper(); reader.blocks[currentBlock]={entry};}
+        else if(type=="ENDBLK"){currentBlock.clear();}
+        else if(!currentBlock.isEmpty()){reader.blocks[currentBlock].push_back(entry);}
+    }
+    auto entities = records(content.value(QStringLiteral("ENTITIES")));
+    QStringList layouts;
+    std::vector<std::pair<int,QString>> declaredLayouts;
+    QHash<QString,QString> layoutsByOwner;
+    QHash<QString,QString> layoutsByBlock;
+    for (const auto& entry : records(content.value("OBJECTS"))) {
+        if (entry.front().value != "LAYOUT") { continue; }
+        const auto details = std::ranges::find(entry, QStringLiteral("AcDbLayout"), &Pair::value);
+        if (details == entry.end()) { continue; }
+        const Record info(details, entry.end());
+        const auto name = value(info, 1);
+        const auto owner = value(info, 330).toUpper();
+        if (name.isEmpty() || owner.isEmpty() || name.compare("Model", Qt::CaseInsensitive) == 0) { continue; }
+        layoutsByOwner.insert(owner, name);
+        declaredLayouts.emplace_back(integer(info, 71), name);
+    }
+    for (const auto& entry : records(content.value("TABLES"))) {
+        if (entry.front().value == "BLOCK_RECORD") {
+            const auto layout = layoutsByOwner.value(value(entry, 5).toUpper());
+            if (!layout.isEmpty()) { layoutsByBlock.insert(value(entry, 2).toUpper(), layout); }
         }
     }
-    fitImported(reader.result);
-    reader.result.drawing.title = QFileInfo(path).completeBaseName().left(200);
-    return std::move(reader.result);
+    QHash<QString,QList<Record>> paperBlocks;
+    for (const auto& entry : records(content.value("BLOCKS"))) {
+        const auto type = entry.front().value;
+        if (type == "BLOCK") { currentBlock = value(entry,2).toUpper(); }
+        else if (type == "ENDBLK") { currentBlock.clear(); }
+        else if (layoutsByBlock.contains(currentBlock)) {
+            paperBlocks[layoutsByBlock.value(currentBlock)].push_back(entry);
+        }
+    }
+    const auto keyOf = [&](Record record) {
+        const auto key = value(record, 410).trimmed();
+        if (!key.isEmpty()) { return key.compare("Model", Qt::CaseInsensitive) == 0 ? QString{} : key; }
+        const auto owner = layoutsByOwner.value(value(record, 330).toUpper());
+        if (!owner.isEmpty()) { return owner; }
+        return integer(record,67) == 1 ? QStringLiteral("Layout1") : QString{};
+    };
+    QHash<QString,std::vector<Record>> byLayout;
+    QString active;
+    for (const auto& entry : entities) {
+        const auto type = entry.front().value;
+        if (type == "VERTEX" || type == "SEQEND") {
+            byLayout[active].push_back(entry);
+        } else if (type != "VIEWPORT") {
+            active = keyOf(entry);
+            if (!layouts.contains(active)) { layouts << active; }
+            byLayout[active].push_back(entry);
+        }
+    }
+    // Paper space for inactive tabs is stored in their block definitions.
+    for (const auto& [index,name] : declaredLayouts) {
+        if (!paperBlocks.contains(name)) { continue; }
+        for (const auto& item : paperBlocks.value(name)) {
+            if (item.front().value == "VIEWPORT") { continue; }
+            if (!layouts.contains(name)) { layouts << name; }
+            byLayout[name].push_back(item);
+        }
+    }
+    if (std::ranges::any_of(layouts, [](const auto& name) { return !name.isEmpty(); })) {
+        std::ranges::stable_sort(declaredLayouts, {}, &std::pair<int,QString>::first);
+        QStringList ordered;
+        for (const auto& [index,name] : declaredLayouts) {
+            if (!ordered.contains(name)) { ordered << name; }
+        }
+        for (const auto& name : layouts) {
+            if (!ordered.contains(name)) { ordered << name; }
+        }
+        layouts = std::move(ordered);
+    }
+    if (layouts.size() > maxSheets) { fileError(QStringLiteral("DXF contains too many layouts.")); }
+    if (layouts.removeAll(QString{})) { layouts.prepend(QString{}); }
+    DxfDrawing result;
+    bool hasGeometry = false, first = true;
+    for (const auto& layout : layouts) {
+        Reader part = reader;
+        const auto& records = byLayout[layout];
+        for (std::size_t i = 0; i < records.size(); ++i) {
+            const auto entry = records[i];
+            if (entry.front().value != "POLYLINE") {
+                part.entity(entry);
+                continue;
+            }
+            std::vector<Vertex> vertices;
+            bool planar = true;
+            while (i + 1 < records.size() && records[i + 1].front().value == "VERTEX") {
+                const auto vertex = records[++i];
+                vertices.push_back({part.coordinate(vertex), number(vertex, 42)});
+                planar = planar && number(vertex, 30) == 0;
+                if (vertices.size() > 19999) { invalid(); }
+            }
+            if (i + 1 == records.size() || records[++i].front().value != "SEQEND") { invalid(); }
+            part.entity(entry, planar ? &vertices : nullptr);
+        }
+        result.skipped += part.result.skipped;
+        for (auto it = part.result.losses.cbegin(); it != part.result.losses.cend(); ++it) {
+            result.losses[it.key()] += it.value();
+        }
+        if (!part.result.drawing.items.empty()) {
+            fitImported(part.result);
+            hasGeometry = true;
+        } else if (layout.isEmpty()) {
+            continue;
+        }
+        result.beyondSheet = result.beyondSheet || part.result.beyondSheet;
+        part.result.drawing.title = layout.isEmpty() ? QFileInfo(path).completeBaseName().left(200) : decoded(layout).left(200);
+        if (first) { result.drawing = std::move(part.result.drawing); first = false; }
+        else { result.drawing.additionalSheets.push_back(std::move(part.result.drawing)); }
+    }
+    if (!hasGeometry) { fileError(QStringLiteral("DXF contains no supported 2D geometry.")); }
+    return result;
 }
 
-int exportDxf(const QString& path, const Draft& sheet)
+QMap<QString,int> exportDxfReport(const QString& path, const Draft& sheet, bool allSheets)
 {
     Writer writer;
+    std::vector<const Draft*> sheets{&sheet};
+    if(allSheets) for(const auto& item:sheet.additionalSheets) sheets.push_back(&item);
+    if (sheets.size() > maxSheets) { fileError(QStringLiteral("DXF contains too many layouts.")); }
+    QStringList layouts;
+    static const QRegularExpression invalidLayout(QStringLiteral(R"([<>/\\":;?*|=,`])"));
+    for (std::size_t i = 0; i < sheets.size(); ++i) {
+        auto name = sheets[i]->title.trimmed().replace(invalidLayout, QStringLiteral("_")).left(100);
+        if (name.isEmpty() || name.compare("Model", Qt::CaseInsensitive) == 0) {
+            name = QStringLiteral("Sheet_%1").arg(i + 1);
+        }
+        const auto base = name;
+        for (int suffix = 2; layouts.contains(encoded(name), Qt::CaseInsensitive); ++suffix) {
+            name = base + QStringLiteral("_%1").arg(suffix);
+        }
+        layouts << encoded(name);
+    }
+    const bool paper=allSheets && sheets.size()>1;
+    const auto hex=[](int id){return QString::number(id,16).toUpper();};
+    const auto modelHandle=hex(80), collectionHandle=hex(81);
+    const auto paperHandle=[&](int i){return hex(100+i);};
+    const auto layoutHandle=[&](int i){return hex(160+i);};
+    QMap<QString,int> losses;
+    std::vector<QStringList> layerNames;
+    QStringList names;
+    QSet<QString> layerKeys;
+    static const QRegularExpression unsafe(QStringLiteral(R"([<>/\\":;?*|=,`])"));
+    for(const auto* page:sheets) {
+        QStringList these;
+        for(int i=0;i<static_cast<int>(page->layers.size());++i){
+            auto name=page->layers[i].name.trimmed().replace(unsafe,QStringLiteral("_"));
+            if(name.isEmpty()) name=i==0?"0":QStringLiteral("Layer_%1").arg(i+1);
+            const auto base=name;
+            for(int suffix=2;these.contains(encoded(name),Qt::CaseInsensitive);++suffix) name=base.left(190)+QStringLiteral("_%1").arg(suffix);
+            name=encoded(name);
+            these<<name;
+            if(!layerKeys.contains(name.toCaseFolded())){layerKeys.insert(name.toCaseFolded());names<<name;}
+        }
+        layerNames.push_back(std::move(these));
+    }
+    std::vector<std::pair<QString,DraftItem>> blocks;
+    QHash<const DraftItem*,QString> blockNames;
+    for(const auto* page:sheets){
+        const DraftGeometry resolver(*page);
+        for(const auto& item:page->items){
+            if(item.kind!=DraftKind::Fragment && !isDimension(item.kind))continue;
+            const auto resolved=resolver.resolve(item);
+            if(!validItem(item)||resolved.lostReference) continue;
+            const bool dim=isDimension(item.kind);
+            const auto block=QStringLiteral("%1%2").arg(dim?"*D":"GRAPH3D_BLOCK_").arg(blocks.size()+1);
+            blockNames.insert(&item,block);
+            blocks.emplace_back(block,resolved);
+        }
+    }
     writer.section("HEADER");
     writer.pair(9, "$ACADVER"); writer.pair(1, "AC1021");
     writer.pair(9, "$INSUNITS"); writer.pair(70, 4);
     writer.pair(9, "$MEASUREMENT"); writer.pair(70, 1);
+    writer.pair(9,"$TILEMODE"); writer.pair(70,paper?0:1);
+    writer.pair(9,"$DIMSTYLE"); writer.pair(2,"Standard");
     writer.pair(0, "ENDSEC");
     writer.section("TABLES");
     writer.table("LTYPE", 3);
@@ -779,53 +1026,147 @@ int exportDxf(const QString& path, const Draft& sheet)
     writer.lineTable("CENTER", {8, -2, 1.5, -2});
     writer.pair(0, "ENDTAB");
 
-    QStringList names;
-    QSet<QString> used;
-    static const QRegularExpression unsafe(QStringLiteral(R"([<>/\\":;?*|=,`])"));
-    for (int i = 0; i < static_cast<int>(sheet.layers.size()); ++i) {
-        auto name = sheet.layers[i].name.trimmed().replace(unsafe, QStringLiteral("_"));
-        if (name.isEmpty()) {
-            name = i == 0 ? QStringLiteral("0") : QStringLiteral("Layer_%1").arg(i + 1);
-        }
-        const auto base = name;
-        for (int suffix = 2; used.contains(name.toCaseFolded()); ++suffix) {
-            name = base.left(190) + QStringLiteral("_%1").arg(suffix);
-        }
-        used.insert(name.toCaseFolded());
-        names.push_back(encoded(name));
-    }
+    const auto styleTable = hex(writer.nextHandle);
+    writer.table("STYLE", 1);
+    const auto textStyle = hex(writer.nextHandle);
+    writer.pair(0, "STYLE"); writer.handle(); writer.pair(330, styleTable);
+    writer.pair(100, "AcDbSymbolTableRecord"); writer.pair(100, "AcDbTextStyleTableRecord");
+    writer.pair(2, "Standard"); writer.pair(70, 0); writer.pair(40, 0); writer.pair(41, 1);
+    writer.pair(50, 0); writer.pair(71, 0); writer.pair(42, 4); writer.pair(3, "txt"); writer.pair(4, "");
+    writer.pair(0, "ENDTAB");
+
+    const auto dimStyleTable = hex(writer.nextHandle);
+    writer.pair(0, "TABLE"); writer.pair(2, "DIMSTYLE"); writer.handle();
+    writer.pair(100, "AcDbSymbolTable"); writer.pair(70, 1); writer.pair(100, "AcDbDimStyleTable"); writer.pair(71, 1);
+    writer.pair(0, "DIMSTYLE"); writer.pair(105, hex(writer.nextHandle++)); writer.pair(330, dimStyleTable);
+    writer.pair(100, "AcDbSymbolTableRecord"); writer.pair(100, "AcDbDimStyleTableRecord");
+    writer.pair(2, "Standard"); writer.pair(70, 0); writer.pair(41, 2.5); writer.pair(140, 4);
+    writer.pair(271, 2); writer.pair(340, textStyle);
+    writer.pair(0, "ENDTAB");
+
     writer.table("LAYER", static_cast<int>(names.size()));
     for (qsizetype i = 0; i < names.size(); ++i) {
         writer.pair(0, "LAYER"); writer.handle(); writer.pair(100, "AcDbSymbolTableRecord"); writer.pair(100, "AcDbLayerTableRecord");
-        writer.pair(2, names[i]); writer.pair(70, sheet.layers[i].locked ? 4 : 0);
-        writer.pair(62, sheet.layers[i].visible ? 7 : -7); writer.pair(6, "CONTINUOUS");
+        DraftLayer info;
+        for(std::size_t j=0;j<sheets.size();++j){
+            const auto layer=layerNames[j].indexOf(names[i]); if(layer>=0){info=sheets[j]->layers[layer];break;}
+        }
+        writer.pair(2, names[i]); writer.pair(70, info.locked ? 4 : 0);
+        writer.pair(62, info.visible ? 7 : -7); writer.pair(6, "CONTINUOUS");
     }
-    writer.pair(0, "ENDTAB"); writer.pair(0, "ENDSEC");
-    writer.section("BLOCKS"); writer.pair(0, "ENDSEC");
+    writer.pair(0, "ENDTAB");
+    writer.table("BLOCK_RECORD",static_cast<int>(blocks.size()+1+(paper?sheets.size():1)));
+    const auto blockRecord=[&](QString name,QString id,QString layoutId={}) {
+        writer.pair(0,"BLOCK_RECORD");writer.pair(5,id);writer.pair(100,"AcDbSymbolTableRecord");writer.pair(100,"AcDbBlockTableRecord");
+        writer.pair(2,name); if(!layoutId.isEmpty())writer.pair(340,layoutId);writer.pair(70,0);writer.pair(280,1);writer.pair(281,0);
+    };
+    const auto spaceName=[](std::size_t i){return i==0?QStringLiteral("*Paper_Space"):QStringLiteral("*Paper_Space%1").arg(i-1);};
+    blockRecord("*Model_Space",modelHandle,layoutHandle(0));
+    for(std::size_t i=0;i<(paper?sheets.size():1);++i) blockRecord(spaceName(i),paperHandle(i),layoutHandle(i+1));
+    std::vector<QString> blockOwners;
+    for(const auto& [name,item]:blocks){
+        blockOwners.push_back(hex(writer.nextHandle++));
+        blockRecord(name,blockOwners.back());
+    }
+    writer.pair(0,"ENDTAB"); writer.pair(0,"ENDSEC");
+    int written=0;
+    const auto writeSheet = [&](std::size_t index) {
+        const auto& page=*sheets[index];
+        const auto& layer=layerNames[index];
+        writer.layout=paper?layouts[index]:QString{};
+        writer.owner=paper?paperHandle(index):modelHandle;
+        const bool projected = page.modelViews && !layer.isEmpty() && writer.projectedViews(*page.modelViews, layer.front());
+        if(projected) ++written;
+        const DraftGeometry geometry(page);
+        for (const auto& item : page.items) {
+            if (!validItem(item) || item.layer < 0 || item.layer >= layer.size()) {
+                invalid();
+            }
+            const auto exported = item.kind == DraftKind::Hatch || isDimension(item.kind) ? geometry.resolve(item) : item;
+            if (exported.lostReference || !writer.write(exported, layer[item.layer], blockNames.value(&item))) ++losses[draftKindName(item.kind)];
+            else {
+                ++written;
+                if(isDimension(item.kind) && (item.anchorA||item.anchorB||item.anchorC)) ++losses["DIMENSION association"];
+            }
+        }
+        const auto& model=page.modelViews;
+        if(model) {
+            if(!projected) ++losses["Model view"];
+            if(model->dimensions) ++losses["Automatic dimensions"];
+            if(model->detail||model->local) ++losses["Detail or local section"];
+            if(model->assembly && !model->assembly->callouts.empty()) losses["Assembly callouts"]+=static_cast<int>(model->assembly->callouts.size());
+        }
+    };
+    writer.section("BLOCKS");
+    const auto begin=[&](const QString& name,const QString& owner,int flags=0){
+        writer.pair(0,"BLOCK"); writer.handle();writer.pair(330,owner);writer.pair(100,"AcDbEntity");writer.pair(8,"0");
+        writer.pair(100,"AcDbBlockBegin");writer.pair(2,name);writer.pair(70,flags);writer.point({});writer.pair(30,0);writer.pair(3,name);writer.pair(1,"");
+    };
+    const auto end=[&](const QString& owner){
+        writer.pair(0,"ENDBLK");writer.handle();writer.pair(330,owner);writer.pair(100,"AcDbEntity");writer.pair(8,"0");writer.pair(100,"AcDbBlockEnd");
+    };
+    begin("*Model_Space",modelHandle);end(modelHandle);
+    for (std::size_t i = 0; i < (paper ? sheets.size() : 1); ++i) {
+        begin(spaceName(i), paperHandle(i));
+        if (i != 0) { writeSheet(i); }
+        end(paperHandle(i));
+    }
+    writer.layout.clear();
+    for(std::size_t i=0;i<blocks.size();++i){
+        const auto& [name,item]=blocks[i];
+        const bool dim=isDimension(item.kind);
+        begin(name,blockOwners[i],dim?1:0);
+        writer.owner=blockOwners[i];
+        if(dim) {
+            for(const auto& line:dimensionSegments(item)) writer.write(DraftItem{DraftKind::Line,line.p1(),line.p2()},"0");
+            DraftItem text{DraftKind::Text,dimensionTextPoint(item)};text.text=draftDimensionText(item);writer.write(text,"0");
+        } else {
+            for(auto child:item.fragment){
+                if(isDimension(child.kind)||!writer.write(child,"0")) ++losses[QStringLiteral("BLOCK/")+draftKindName(child.kind)];
+            }
+        }
+        end(blockOwners[i]);
+    }
+    writer.pair(0,"ENDSEC");
     writer.section("ENTITIES");
-    int skipped = 0;
-    const bool projected = sheet.modelViews && !names.isEmpty() && writer.projectedViews(*sheet.modelViews, names.front());
-    const DraftGeometry geometry(sheet);
-    for (const auto& item : sheet.items) {
-        if (!validItem(item) || item.layer < 0 || item.layer >= names.size()) {
-            invalid();
-        }
-        const auto exported = item.kind == DraftKind::Hatch ? geometry.resolve(item) : item;
-        if (exported.lostReference || !writer.write(exported, names[item.layer])) {
-            ++skipped;
-        }
-    }
-    if (!projected && sheet.items.size() == static_cast<std::size_t>(skipped)) {
+    writeSheet(0);
+    if (!written) {
         fileError(QStringLiteral("This sheet contains no supported geometry to export to DXF."));
     }
-    writer.pair(0, "ENDSEC"); writer.pair(0, "EOF");
+    writer.pair(0, "ENDSEC");
+    writer.section("OBJECTS");
+    writer.pair(0,"DICTIONARY");writer.pair(5,"C");writer.pair(330,"0");writer.pair(100,"AcDbDictionary");
+    writer.pair(3,"ACAD_LAYOUT");writer.pair(350,collectionHandle);
+    writer.pair(0,"DICTIONARY");writer.pair(5,collectionHandle);writer.pair(330,"C");writer.pair(100,"AcDbDictionary");
+    writer.pair(3,"Model");writer.pair(350,layoutHandle(0));
+    for(std::size_t i=0;i<(paper?sheets.size():1);++i){
+        writer.pair(3,paper?layouts[i]:QStringLiteral("Layout1"));writer.pair(350,layoutHandle(i+1));
+    }
+    const auto space=[&](QString name,QString id,QString owner,int index,QSizeF size){
+        writer.pair(0,"LAYOUT");writer.pair(5,id);writer.pair(330,collectionHandle);writer.pair(100,"AcDbPlotSettings");
+        writer.pair(1,"");writer.pair(2,"");writer.pair(4,"");writer.pair(6,"");
+        writer.pair(44,size.width());writer.pair(45,size.height());writer.pair(72,1);
+        writer.pair(100,"AcDbLayout");writer.pair(1,name);writer.pair(70,1);writer.pair(71,index);
+        // Drawing coordinates use the DXF upward Y axis; preserve the printable limits.
+        writer.pair(10,0);writer.pair(20,-size.height());writer.pair(11,size.width());writer.pair(21,0);
+        writer.pair(12,0);writer.pair(22,0);writer.pair(32,0);writer.pair(330,owner);
+    };
+    space("Model",layoutHandle(0),modelHandle,0,draftSize(sheet));
+    for(std::size_t i=0;i<(paper?sheets.size():1);++i) space(paper?layouts[i]:QStringLiteral("Layout1"),layoutHandle(i+1),
+        paperHandle(i),static_cast<int>(i)+1,paper?draftSize(*sheets[i]):draftSize(sheet));
+    writer.pair(0,"ENDSEC");writer.pair(0, "EOF");
     if (writer.data.size() > fileLimit) {
         invalid();
     }
     writeFile(path, writer.data);
-    const auto& model = sheet.modelViews;
-    return skipped + (model && (!projected || model->dimensions || model->detail || model->local || !model->additional.empty()
-                                || (model->assembly && !model->assembly->callouts.empty())) ? 1 : 0);
+    return losses;
+}
+
+int exportDxf(const QString& path,const Draft& sheet)
+{
+    int total=0;
+    for(const auto value:exportDxfReport(path,sheet)) total+=value;
+    return total;
 }
 
 }  // namespace graph3d::io

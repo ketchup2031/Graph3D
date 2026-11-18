@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <QDir>
+#include <QFileInfo>
 
 #include <algorithm>
 #include <array>
@@ -307,6 +309,19 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
     if (version >= 2) {
         validateLinks(draft);
     }
+    if (version >= 10 && root.contains("flatPattern")) {
+        const auto flat = root.value("flatPattern").toObject();
+        const auto source = flat.value("path").toString();
+        const int id = flat.value("id").toInt();
+        const auto ids = flat.value("geometry").toArray();
+        if (source.isEmpty() || source.size() > 4096 || id <= 0 || ids.size() > 200
+            || !flat.value("geometry").isArray()) {
+            fileError(QStringLiteral("Invalid sheet metal source reference."));
+        }
+        draft.flatPattern = drawing::FlatPatternReference{
+            QDir::cleanPath(QFileInfo(path).absoluteDir().absoluteFilePath(source)),id,{}};
+        for (const auto value : ids) { draft.flatPattern->geometry.push_back(readId(value)); }
+    }
     if (version == 3 || (version >= 4 && root.contains("modelViews"))) {
         const auto model = root.value("modelViews").toObject();
         if (version < 6 && model.contains("assembly")) {
@@ -427,6 +442,13 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
     }
     QJsonObject root{{"paper", draft.a3 ? "A3" : "A4"}, {"title", draft.title}, {"number", draft.number},
         {"author", draft.author}, {"items", items}};
+    if (draft.flatPattern) {
+        QJsonArray ids;
+        for (const auto& id : draft.flatPattern->geometry) { ids.append(id.toString()); }
+        root.insert("flatPattern", QJsonObject{
+            {"path", QFileInfo(path).absoluteDir().relativeFilePath(QFileInfo(draft.flatPattern->sourcePath).absoluteFilePath())},
+            {"id", draft.flatPattern->objectId}, {"geometry", ids}});
+    }
     if (draft.modelViews) {
         root.insert("modelViews", writeModelViews(*draft.modelViews, path, version >= 7));
     }
@@ -463,6 +485,9 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
 
 int draftVersion(const drawing::Draft& draft)
 {
+    if (draft.flatPattern || std::ranges::any_of(draft.additionalSheets, [](const auto& sheet) { return sheet.flatPattern.has_value(); })) {
+        return 10;
+    }
     const auto specification = [](const auto& sheet) {
         if (!sheet.modelViews) { return false; }
         const auto& model = *sheet.modelViews;
@@ -518,7 +543,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const int version = root.value("version").toInt();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 9
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 10
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }

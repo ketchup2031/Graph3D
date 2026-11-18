@@ -3,6 +3,7 @@
 #include "drawing/ModelViews.h"
 
 #include <QHash>
+#include <QLineF>
 #include <QPointF>
 #include <QSizeF>
 #include <QString>
@@ -113,6 +114,12 @@ struct DraftPaper {
     bool operator==(const DraftPaper&) const = default;
 };
 
+struct FlatPatternReference {
+    QString sourcePath;
+    int objectId;
+    std::vector<QUuid> geometry;
+};
+
 struct Draft {
     QString title;
     QString number;
@@ -123,6 +130,7 @@ struct Draft {
     DraftPaper paper;
     std::vector<DraftLayer> layers{{}};
     std::vector<Draft> additionalSheets;
+    std::optional<FlatPatternReference> flatPattern;
 };
 
 bool isAnnotation(DraftKind kind);
@@ -142,6 +150,8 @@ struct ModelPick {
 std::optional<ModelPick> pickModelGeometry(const ModelViews& model, QPointF page,
                                            double tolerance, bool circularOnly = false);
 QString draftDimensionText(const DraftItem& item);
+std::vector<QLineF> dimensionSegments(const DraftItem& item);
+QPointF dimensionTextPoint(const DraftItem& item);
 
 class DraftGeometry {
 public:

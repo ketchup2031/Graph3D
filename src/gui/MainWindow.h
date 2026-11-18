@@ -53,7 +53,7 @@ private:
     bool saveProject(bool choosePath);
     bool confirmSave();
     void openProject();
-    void importStep();
+    void importModel(io::ExchangeFormat format);
     void exportModel(io::ExchangeFormat format);
     enum class Machining { Hole, Chamfer, Fillet, SketchFace, ChamferSet, FilletSet, MeasureVertices, MoveFace, RemoveBlend };
     void startMachining(Machining operation);
@@ -68,6 +68,8 @@ private:
     void transformCurrent(const QString& title, const geometry::BodyTransform& defaults);
     void configureAssembly(int id);
     void configureFastener(int id = 0);
+    void configureSheetMetal(int id = 0);
+    void showFlatSheet(bool dxf);
     void createAssemblySpecification();
     void insertLinkedComponent(bool replace);
     void updateLinkedComponents(bool selected);

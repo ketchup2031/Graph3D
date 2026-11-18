@@ -36,10 +36,12 @@ protected:
 
 private:
     friend class DocumentWindow;
+    friend class MainWindow;
     void browseDrawing();
     void browseDxf();
     bool importDxf(const QString& path);
     void exportDxf();
+    void exportCad(bool allSheets, bool dwg);
     bool saveDrawing(bool saveAs);
     void exportPdf();
     void editSheet();

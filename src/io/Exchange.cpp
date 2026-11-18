@@ -29,6 +29,8 @@
 #include <sstream>
 
 namespace graph3d::io {
+void writeStructuredStep(const QString& path,const document::Document& document);
+void writeIges(const QString& path,const TopoDS_Shape& shape);
 namespace {
 
 TopoDS_Shape visibleSolids(const document::Document& document)
@@ -51,19 +53,6 @@ TopoDS_Shape visibleSolids(const document::Document& document)
         fileError(QStringLiteral("There are no visible solids to export."));
     }
     return group;
-}
-
-void writeStep(const QString& path, const TopoDS_Shape& shape)
-{
-    STEPControl_Writer writer;
-    DESTEP_Parameters parameters;
-    parameters.WriteUnit = UnitsMethods_LengthUnit_Millimeter;
-    std::ostringstream stream;
-    if (writer.Transfer(shape, STEPControl_AsIs, parameters) != IFSelect_RetDone
-        || writer.WriteStream(stream) != IFSelect_RetDone || !stream) {
-        fileError(QStringLiteral("Open CASCADE could not write the STEP file."));
-    }
-    writeFile(path, QByteArray::fromStdString(stream.str()));
 }
 
 float coordinate(double value)
@@ -156,8 +145,9 @@ void exportVisible(const QString& path, const document::Document& document, Exch
     try {
         const auto shape = visibleSolids(document);
         switch (format) {
-        case ExchangeFormat::Step: writeStep(path, shape); break;
+        case ExchangeFormat::Step: writeStructuredStep(path, document); break;
         case ExchangeFormat::Stl: writeStl(path, shape); break;
+        case ExchangeFormat::Iges: writeIges(path,shape); break;
         }
     } catch (const Standard_Failure& error) {
         fileError(QCoreApplication::translate("Diagnostic", "Geometry export failed: %1").arg(QString::fromUtf8(error.GetMessageString())));

@@ -24,6 +24,8 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QColor>
+#include <Quantity_Color.hxx>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
@@ -268,12 +270,18 @@ void MainWindow::createMenus()
 
     file->addSeparator();
     auto* import = menuAction(file, tr("Import STEP…"), "importStep");
-    connect(import, &QAction::triggered, this, &MainWindow::importStep);
+    connect(import, &QAction::triggered, this, [this] { importModel(io::ExchangeFormat::Step); });
+    auto* importIges = menuAction(file, tr("Import IGES…"), "importIges");
+    connect(importIges, &QAction::triggered, this, [this] { importModel(io::ExchangeFormat::Iges); });
+    auto* importStl = menuAction(file, tr("Import STL…"), "importStl");
+    connect(importStl, &QAction::triggered, this, [this] { importModel(io::ExchangeFormat::Stl); });
     auto* exportStep = menuAction(file, tr("Export visible bodies to STEP…"), "exportStep");
     connect(exportStep, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Step); });
     auto* exportStl = menuAction(file, tr("Export visible bodies to STL…"), "exportStl");
     connect(exportStl, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Stl); });
-    fileActions_ = {save, saveAs, import, exportStep, exportStl};
+    auto* exportIges = menuAction(file, tr("Export visible bodies to IGES…"), "exportIges");
+    connect(exportIges, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Iges); });
+    fileActions_ = {save, saveAs, import, importIges, importStl, exportStep, exportStl, exportIges};
 
     file->addSeparator();
     auto* quit = file->addAction(tr("E&xit"), this, [this] {
@@ -333,6 +341,11 @@ void MainWindow::createMenus()
     connect(editSketch_, &QAction::triggered, this, [this] { editSketch(selectedId()); });
 
     auto* model = menuBar()->addMenu(tr("&Model"));
+    auto* metal = model->addMenu(tr("Sheet metal"));
+    connect(menuAction(metal,tr("New sheet part…"),"newSheetMetal"),&QAction::triggered,this,[this]{configureSheetMetal();});
+    connect(menuAction(metal,tr("Edit sheet part…"),"editSheetMetal"),&QAction::triggered,this,[this]{if(selectedId()) configureSheetMetal(selectedId());});
+    connect(menuAction(metal,tr("Create flat drawing…"),"flatDrawing"),&QAction::triggered,this,[this]{showFlatSheet(false);});
+    connect(menuAction(metal,tr("Export flat DXF…"),"flatDxf"),&QAction::triggered,this,[this]{showFlatSheet(true);});
     variables_ = menuAction(model, tr("Variables and variants…"), "modelVariables");
     connect(variables_, &QAction::triggered, this, &MainWindow::editVariables);
     model->addSeparator();
@@ -565,6 +578,8 @@ void MainWindow::createModelTree()
             configureAssembly(id);
         } else if (object && std::holds_alternative<geometry::Fastener>(object->parameters)) {
             configureFastener(id);
+        } else if (object && std::holds_alternative<geometry::SheetMetal>(object->parameters)) {
+            configureSheetMetal(id);
         } else if (object && std::holds_alternative<document::Hole>(object->parameters)) {
             const auto& hole = std::get<document::Hole>(object->parameters);
             configureHole(hole.body, hole.face, hole.size, id);
@@ -782,7 +797,7 @@ QString MainWindow::objectName(const document::Object& object) const
             const auto name = object.properties.name.empty() ? operation.record.properties.name : object.properties.name;
             return name.empty() ? tr("Linked component") : QString::fromStdString(name);
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
-            return tr("Imported STEP");
+            return tr("Imported body");
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
             if (operation.size.style == geometry::HoleStyle::Counterbore) { return tr("Counterbore"); }
             if (operation.size.style == geometry::HoleStyle::Countersink) { return tr("Countersink"); }
@@ -804,7 +819,11 @@ QString MainWindow::objectName(const document::Object& object) const
             }
             return tr("Mirror");
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
-            return tr("Assembly");
+            return object.properties.name.empty() ? tr("Assembly") : QString::fromStdString(object.properties.name);
+        } else if constexpr (std::is_same_v<Type, geometry::SheetMetal>) {
+            return tr("Sheet metal");
+        } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
+            return tr("Imported mesh");
         } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
             return operation.kind == geometry::FastenerKind::Bolt ? tr("Hex bolt")
                 : operation.kind == geometry::FastenerKind::Nut ? tr("Hex nut") : tr("Flat washer");
@@ -858,6 +877,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return tr("%1 · object #%2").arg(QDir::toNativeSeparators(QString::fromStdString(operation.sourcePath))).arg(operation.sourceObject);
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
             return QString::fromStdString(operation.name);
+        } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
+            return tr("%1 · %2 triangles").arg(QString::fromStdString(operation.name)).arg(operation.vertices.size()/3);
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
             const auto mode = operation.size.through ? tr("Through")
                 : tr("Depth %1 mm").arg(operation.size.depth);
@@ -1262,23 +1283,39 @@ void MainWindow::openProjectPath(const QString& path, bool example)
     }
 }
 
-void MainWindow::importStep()
+void MainWindow::importModel(io::ExchangeFormat format)
 {
-    const auto path = QFileDialog::getOpenFileName(this, tr("Import STEP"), projectPath_,
-                                                  tr("STEP files (*.step *.stp)"), nullptr,
+    const bool step = format == io::ExchangeFormat::Step;
+    const bool stl = format == io::ExchangeFormat::Stl;
+    const auto title = step ? tr("Import STEP") : stl ? tr("Import STL") : tr("Import IGES");
+    const auto filter = step ? tr("STEP files (*.step *.stp)") : stl ? tr("STL files (*.stl)")
+        : tr("IGES files (*.iges *.igs)");
+    const auto path = QFileDialog::getOpenFileName(this, title, projectPath_, filter, nullptr,
                                                   (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
-    if (!path.isEmpty()) {
-        addFeature(tr("Import STEP"), [this, &path] {
-            const auto name = QFileInfo(path).fileName().toUtf8().toStdString();
-            return document_.addImported(name, io::readStep(path));
-        });
+    if (path.isEmpty()) {
+        return;
     }
+    double scale = 1;
+    if (stl) {
+        bool accepted = false;
+        scale = QInputDialog::getDouble(this, title, tr("Millimetres per STL unit"), 1,
+                                        .000001, 1000000, 6, &accepted);
+        if (!accepted) { return; }
+    }
+    addFeature(title, [this, &path, step, stl, scale] {
+        if (step) { return document_.importTree(io::readStepTree(path)); }
+        const auto name = QFileInfo(path).fileName().toUtf8().toStdString();
+        if (stl) { return document_.addImportedMesh(io::readStl(path, scale)); }
+        return document_.addImported(name, io::readIges(path));
+    });
 }
 
 void MainWindow::exportModel(io::ExchangeFormat format)
 {
     const bool step = format == io::ExchangeFormat::Step;
-    const auto filter = step ? tr("STEP files (*.step *.stp)") : tr("STL files (*.stl)");
+    const bool stl = format == io::ExchangeFormat::Stl;
+    const auto filter = step ? tr("STEP files (*.step *.stp)") : stl ? tr("STL files (*.stl)")
+        : tr("IGES files (*.iges *.igs)");
     auto path = projectPath_;
     if (!path.isEmpty()) {
         const QFileInfo info(path);
@@ -1287,14 +1324,15 @@ void MainWindow::exportModel(io::ExchangeFormat format)
     QFileDialog dialog(this, tr("Export visible bodies"), path, filter);
     dialog.setOption(QFileDialog::DontUseNativeDialog, darkThemeEnabled() || russianInterface());
     dialog.setAcceptMode(QFileDialog::AcceptSave);
-    dialog.setDefaultSuffix(step ? QStringLiteral("step") : QStringLiteral("stl"));
+    dialog.setDefaultSuffix(step ? QStringLiteral("step") : stl ? QStringLiteral("stl") : QStringLiteral("iges"));
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) {
         return;
     }
     path = dialog.selectedFiles().constFirst();
     try {
         const auto suffix = QFileInfo(path).suffix().toLower();
-        if (step ? suffix != "step" && suffix != "stp" : suffix != "stl") {
+        if (step ? suffix != "step" && suffix != "stp"
+                 : stl ? suffix != "stl" : suffix != "iges" && suffix != "igs") {
             throw std::invalid_argument("Use the extension for the selected export format.");
         }
         io::exportVisible(path, document_, format);
@@ -1509,14 +1547,34 @@ void MainWindow::editPartProperties()
     const auto name = field(tr("Name"), object->properties.name, inherited.name);
     const auto material = field(tr("Material"), object->properties.material, inherited.material);
     const auto note = field(tr("Note"), object->properties.note, inherited.note);
+    const auto colorName = [](const auto& color) -> std::string {
+        if (!color) { return {}; }
+        double red, green, blue;
+        Quantity_Color((*color)[0], (*color)[1], (*color)[2], Quantity_TOC_RGB)
+            .Values(red, green, blue, Quantity_TOC_sRGB);
+        return QColor::fromRgbF(red, green, blue).name().toStdString();
+    };
+    const auto color = field(tr("Color (#RRGGBB)"), colorName(object->properties.color), colorName(inherited.color));
     designation->setObjectName(QStringLiteral("componentDesignation"));
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     form.addRow(&buttons);
     connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() == QDialog::Accepted) {
-        const document::PartProperties properties{designation->text().trimmed().toStdString(),
+        document::PartProperties properties{designation->text().trimmed().toStdString(),
             name->text().trimmed().toStdString(), material->text().trimmed().toStdString(), note->text().trimmed().toStdString()};
+        const auto colorText = color->text().trimmed();
+        if (colorText == QString::fromStdString(colorName(object->properties.color))) {
+            properties.color = object->properties.color;
+        } else if (!colorText.isEmpty()) {
+            const QColor rgb(colorText);
+            if (!rgb.isValid() || colorText.size() != 7 || !colorText.startsWith(u'#')) {
+                QMessageBox::warning(this, tr("Component properties"), tr("Enter a color as #RRGGBB."));
+                return;
+            }
+            const Quantity_Color linear(rgb.redF(), rgb.greenF(), rgb.blueF(), Quantity_TOC_sRGB);
+            properties.color = {{linear.Red(), linear.Green(), linear.Blue()}};
+        }
         if (document_.setPartProperties(id, properties)) {
             refreshDocument(id);
         }

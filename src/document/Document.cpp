@@ -7,6 +7,9 @@
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <BRep_Builder.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopoDS_Face.hxx>
 
 #include <algorithm>
 #include <array>
@@ -177,6 +180,23 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
     return std::visit(Visit{
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
         [](const geometry::Fastener& p) { return geometry::makeFastener(p); },
+        [](const geometry::SheetMetal& p) { return geometry::makeSheetMetal(p); },
+        [](const ImportedMesh& p) -> TopoDS_Shape {
+            if (p.vertices.empty() || p.vertices.size()%3 || p.vertices.size()>1500000)
+                throw std::invalid_argument("Invalid or oversized mesh.");
+            const auto count=static_cast<int>(p.vertices.size());
+            Handle(Poly_Triangulation) mesh=new Poly_Triangulation(count,count/3,false);
+            for(int i=0;i<count;++i){
+                const auto& v=p.vertices[i];
+                if(!std::ranges::all_of(v,[](double x){return std::isfinite(x) && std::abs(x)<=1.e9;}))
+                    throw std::invalid_argument("Invalid mesh coordinates.");
+                mesh->SetNode(i+1,gp_Pnt(v[0],v[1],v[2]));
+            }
+            for(int i=0;i<count;i+=3) mesh->SetTriangle(i/3+1,Poly_Triangle(i+1,i+2,i+3));
+            TopoDS_Face face;
+            BRep_Builder{}.MakeFace(face,mesh);
+            return face;
+        },
         [&state](const geometry::Sketch& p) -> TopoDS_Shape {
             const auto context = resolveContext(state, p);
             if (p.trajectory) {
@@ -278,7 +298,8 @@ bool isBody(const Parameters& parameters)
 {
     return !std::holds_alternative<geometry::Sketch>(parameters)
         && !std::holds_alternative<geometry::DatumPlane>(parameters)
-        && !std::holds_alternative<geometry::DatumAxis>(parameters);
+        && !std::holds_alternative<geometry::DatumAxis>(parameters)
+        && !std::holds_alternative<ImportedMesh>(parameters);
 }
 
 bool isAdvanced(const Parameters& parameters)
@@ -391,6 +412,35 @@ ObjectId Document::addImported(std::string name, TopoDS_Shape shape)
     return append(Imported{std::move(name), std::move(shape)});
 }
 
+ObjectId Document::addImportedMesh(ImportedMesh mesh) { return append(std::move(mesh)); }
+
+ObjectId Document::importTree(const std::vector<ExchangeNode>& roots)
+{
+    if(roots.empty()) throw std::invalid_argument("No transferable solid roots.");
+    Document candidate;
+    candidate.objects_=objects_;
+    candidate.configuration_=configuration_;
+    const auto add=[&](auto&& self,const ExchangeNode& node,int depth)->ObjectId {
+        if(depth>24 || candidate.objects_.size()>=10000) throw std::invalid_argument("Imported assembly exceeds the model limits.");
+        ObjectId id;
+        if(node.children.size()>=2){
+            Assembly assembly;
+            for(const auto& child:node.children) assembly.components.push_back({self(self,child,depth+1),{}});
+            id=candidate.addAssembly(std::move(assembly));
+        } else if(node.children.size()==1) {
+            const auto child=self(self,node.children.front(),depth+1);
+            id=candidate.addAssembly({{{child,{}}}});
+        } else id=candidate.addImported(node.properties.name,node.shape);
+        candidate.setPartProperties(id,node.properties);
+        candidate.clearHistory();
+        return id;
+    };
+    ObjectId id=0;
+    for(const auto& root:roots) id=add(add,root,0);
+    commit(std::move(candidate.objects_));
+    return id;
+}
+
 ObjectId Document::addHole(ObjectId body, geometry::FaceReference face, geometry::HoleSize size)
 {
     requireBody(objectAt(objects_, body));
@@ -498,6 +548,21 @@ ObjectId Document::addFastener(geometry::Fastener item)
     return append(item);
 }
 
+ObjectId Document::addSheetMetal(geometry::SheetMetal sheet) { return append(std::move(sheet)); }
+
+bool Document::editSheetMetal(ObjectId id, geometry::SheetMetal sheet)
+{
+    const auto* prior = std::get_if<geometry::SheetMetal>(&objectAt(objects_, id).parameters);
+    if (!prior) { throw std::invalid_argument("Select a sheet metal part."); }
+    if (*prior == sheet) { return false; }
+    auto next = objects_;
+    next[id-1].parameters = std::move(sheet);
+    rebuild(next,id-1);
+    if (next[id-1].status != Status::Ready) { throw std::invalid_argument(next[id-1].error); }
+    commit(std::move(next));
+    return true;
+}
+
 bool Document::editFastener(ObjectId id, geometry::Fastener item)
 {
     const auto* prior = std::get_if<geometry::Fastener>(&objectAt(objects_, id).parameters);
@@ -554,6 +619,8 @@ bool Document::setPartProperties(ObjectId id, PartProperties properties)
 {
     const auto& object = objectAt(objects_, id);
     requireBody(object);
+    if(properties.color && !std::ranges::all_of(*properties.color,[](double c){return std::isfinite(c)&&c>=0&&c<=1;}))
+        throw std::invalid_argument("Invalid component color.");
     if (std::ranges::any_of(std::array{&properties.designation, &properties.name, &properties.material, &properties.note},
         [](const auto* value) { return value->size() > 4000; })) {
         throw std::invalid_argument("Invalid component properties.");
@@ -590,6 +657,7 @@ ComponentRecord Document::componentRecord(ObjectId id) const
             record.properties.*field = object.properties.*field;
         }
     }
+    if (object.properties.color) { record.properties.color = object.properties.color; }
     if (object.densityKgM3) {
         record.densityKgM3 = object.densityKgM3;
     }
@@ -809,7 +877,7 @@ bool Document::editAssembly(ObjectId id, Assembly assembly)
     if (!existing) {
         throw std::invalid_argument("Select an assembly.");
     }
-    if (assembly.components.size() < geometry::minAssemblyComponents
+    if (assembly.components.empty()
         || assembly.components.size() > geometry::maxAssemblyComponents) {
         throw std::invalid_argument("An assembly needs 2 to 100 components.");
     }

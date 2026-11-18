@@ -37,6 +37,7 @@ constexpr int configurationVersion = 9;
 constexpr int machiningVersion = 10;
 constexpr int motionVersion = 11;
 constexpr int fastenerVersion = 12;
+constexpr int sheetMetalVersion = 13;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -368,8 +369,10 @@ QJsonObject encodeTransform(const document::Transform& item)
 
 QJsonObject encodeProperties(const document::PartProperties& properties)
 {
-    return {{"designation", QString::fromStdString(properties.designation)}, {"name", QString::fromStdString(properties.name)},
+    QJsonObject result{{"designation", QString::fromStdString(properties.designation)}, {"name", QString::fromStdString(properties.name)},
             {"material", QString::fromStdString(properties.material)}, {"note", QString::fromStdString(properties.note)}};
+    if (properties.color) { result.insert("color", encodePoint3(*properties.color)); }
+    return result;
 }
 
 document::PartProperties decodeProperties(const QJsonObject& object)
@@ -381,7 +384,13 @@ document::PartProperties decodeProperties(const QJsonObject& object)
         }
         return value.toString().toStdString();
     };
-    return {read("designation"), read("name"), read("material"), read("note")};
+    document::PartProperties result{read("designation"), read("name"), read("material"), read("note")};
+    if (object.contains("color")) {
+        const auto rgb = decodePoint3(object.value("color"));
+        if (std::ranges::any_of(rgb, [](double v) { return v < 0 || v > 1; })) { fileError(QStringLiteral("Invalid component color.")); }
+        result.color = rgb;
+    }
+    return result;
 }
 
 QJsonObject encodeRecord(const document::ComponentRecord& record, int depth, int& remaining)
@@ -501,6 +510,17 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
         } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
             return {{"type", "fastener"}, {"kind", name(item.kind, fastenerKinds)},
                     {"diameter", item.diameter}, {"length", item.length}};
+        } else if constexpr (std::is_same_v<Type, geometry::SheetMetal>) {
+            return {{"type","sheet-metal"},{"length",encodeNumber(item.length)},{"width",encodeNumber(item.width)},
+                {"thickness",encodeNumber(item.thickness)},{"bends",encodeList(item.bends,[](const auto& bend){
+                    return QJsonObject{{"left",bend.left},{"flange",bend.flange},{"radius",bend.radius},
+                        {"angle",bend.degrees},{"factor",bend.factor},{"relief",bend.relief}};
+                })},{"holes",encodeList(item.holes,[](const auto& hole){
+                    return QJsonObject{{"panel",hole.panel},{"along",hole.along},{"across",hole.across},{"diameter",hole.diameter}};
+                })}};
+        } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
+            return {{"type","mesh"},{"name",QString::fromStdString(item.name)},
+                {"vertices",encodeList(item.vertices,encodePoint3)}};
         } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
             if (item.entities.size() > maxEntities) {
                 fileError(QStringLiteral("Too many entities in a sketch."));
@@ -849,7 +869,7 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
     }
     if (type == "assembly" && version >= assemblyVersion) {
         const auto components = object.value("components").toArray();
-        if (!object.value("components").isArray() || components.size() < geometry::minAssemblyComponents
+        if (!object.value("components").isArray() || components.size() < (version>=sheetMetalVersion?1:geometry::minAssemblyComponents)
             || components.size() > geometry::maxAssemblyComponents) {
             fileError(QStringLiteral("Invalid assembly component list."));
         }
@@ -891,6 +911,24 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         geometry::fastenerSize(item);
         return item;
     }
+    if (type == "sheet-metal" && version >= sheetMetalVersion) {
+        return geometry::SheetMetal{number(object.value("length"),"length"),number(object.value("width"),"width"),
+            number(object.value("thickness"),"thickness"), decodeList(object.value("bends"),0,24,[](const auto& value) {
+                const auto bend = value.toObject();
+                if (!bend.value("left").isBool()) { fileError(QStringLiteral("Invalid sheet bend.")); }
+                return geometry::SheetBend{bend.value("left").toBool(), number(bend.value("flange"),"flange"),
+                    number(bend.value("radius"),"radius"),number(bend.value("angle"),"angle"),number(bend.value("factor"),"factor"),
+                    number(bend.value("relief"),"relief")};
+            }),decodeList(object.value("holes"),0,128,[](const auto& value) {
+                const auto hole = value.toObject();
+                return geometry::SheetHole{signedInteger(hole.value("panel"),"panel"),number(hole.value("along"),"along"),
+                    number(hole.value("across"),"across"),number(hole.value("diameter"),"diameter")};
+            })};
+    }
+    if (type=="mesh" && version>=sheetMetalVersion) {
+        return document::ImportedMesh{string(object.value("name"),"name").toStdString(),
+            decodeList(object.value("vertices"),3,1500000,decodePoint3)};
+    }
     if (type == "imported") {
         return document::Imported{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
     }
@@ -921,8 +959,11 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::ranges::any_of(sketch->constraints, [](const auto& c) {
                     return c.kind > geometry::ConstraintKind::OnProjection;
                 }));
-            if (std::holds_alternative<geometry::Fastener>(object.parameters)) {
-                version = fastenerVersion;
+            if (std::holds_alternative<geometry::SheetMetal>(object.parameters) || std::holds_alternative<document::ImportedMesh>(object.parameters)
+                || (assembly && assembly->components.size()==1) || object.properties.color) {
+                version = sheetMetalVersion;
+            } else if (std::holds_alternative<geometry::Fastener>(object.parameters)) {
+                version = std::max(version, fastenerVersion);
             } else if (assembly && (assembly->driveAngle != 0
                 || std::ranges::any_of(assembly->mates, [](const auto& mate) { return mate.mode != geometry::MateMode::Align; })
                 || std::ranges::any_of(assembly->components, [](const auto& c) { return c.simplified || c.context.has_value(); }))) {
@@ -1007,7 +1048,7 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
          && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion
          && parsedVersion != configurationVersion && parsedVersion != machiningVersion && parsedVersion != motionVersion
-         && parsedVersion != fastenerVersion)
+         && parsedVersion != fastenerVersion && parsedVersion != sheetMetalVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
