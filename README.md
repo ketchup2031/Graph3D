@@ -4,6 +4,17 @@ Graph3D — проект параметрической CAD-системы дл�
 Прототип показывает интерактивную 3D-сцену на базе Open CASCADE Technology (OCCT).
 План следующих этапов приведён в [дорожной карте](Graph3D_Development_Plan.md).
 
+## Установка на Windows
+
+Откройте [Graph3D v0.1.0](https://github.com/ketchup2031/Graph3D/releases/tag/v0.1.0)
+и скачайте `Graph3D-0.1.0-Windows-x64-Setup.exe` из раздела **Assets**.
+Запустите установщик, затем откройте **Graph3D** через меню «Пуск». Мастер
+также может создать ярлык на рабочем столе. Qt, OCCT и другие нужные
+библиотеки входят в установщик. MSYS2 понадобится только для сборки из исходников.
+
+Graph3D устанавливается для текущего пользователя. Его можно удалить через
+список приложений в настройках Windows. Установщик этой версии не подписан.
+
 ## Стартовая страница
 
 При запуске Graph3D открывается стартовая страница. В **Open** можно выбрать
@@ -442,6 +453,30 @@ ctest --preset dev
 ```
 
 Этот тест требует рабочий OpenGL и видимое окно. Сборка на Linux пока не проверена.
+
+### Сборка установщика
+
+Установите Inno Setup 6 для текущего пользователя. В терминале **MSYS2 UCRT64**
+соберите Release и подготовьте минимальные библиотеки FFmpeg под LGPL:
+
+```bash
+pacman -S --needed make diffutils
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/release
+mkdir -p build/installers/ffmpeg-src
+curl -fL https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz -o build/installers/ffmpeg-src/ffmpeg-9.0.2.tar.xz
+bash packaging/windows/build-ffmpeg.sh build/installers/ffmpeg-src/ffmpeg-9.0.2.tar.xz build/installers/ffmpeg-src
+```
+
+Затем из папки проекта в PowerShell:
+
+```powershell
+.\packaging\windows\package.ps1 -Version 0.1.0
+```
+
+В `build/installers` появятся установщик, контрольная сумма SHA-256 и список
+поставляемых библиотек со ссылками на исходники. Если Inno Setup или MSYS2
+установлены в другую папку, используйте параметры `-InnoCompiler` и `-MsysRoot`.
 
 Лицензия Graph3D ещё не выбрана. Сведения о прямых зависимостях см.
 в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
