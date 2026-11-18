@@ -38,6 +38,7 @@ constexpr int machiningVersion = 10;
 constexpr int motionVersion = 11;
 constexpr int fastenerVersion = 12;
 constexpr int sheetMetalVersion = 13;
+constexpr int surfaceAnnotationVersion = 14;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -521,6 +522,20 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
         } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
             return {{"type","mesh"},{"name",QString::fromStdString(item.name)},
                 {"vertices",encodeList(item.vertices,encodePoint3)}};
+        } else if constexpr (std::is_same_v<Type, geometry::SpatialCurve>) {
+            return {{"type", "spatial-curve"}, {"points", encodeList(item.points, encodePoint3)},
+                    {"spline", item.spline}, {"closed", item.closed}};
+        } else if constexpr (std::is_same_v<Type, document::Surface>) {
+            return {{"type", "surface"}, {"operation", static_cast<int>(item.kind)},
+                    {"sources", encodeList(item.sources, [](int id) { return QJsonValue(id); })},
+                    {"distance", encodeNumber(item.distance)}, {"index", item.index}};
+        } else if constexpr (std::is_same_v<Type, document::ImportedSurface>) {
+            return {{"type", "imported-surface"}, {"name", QString::fromStdString(item.name)},
+                    {"brep", encodeBrep(item.sourceShape)}};
+        } else if constexpr (std::is_same_v<Type, document::Annotation3d>) {
+            return {{"type", "annotation-3d"}, {"kind", static_cast<int>(item.kind)}, {"body", item.body},
+                    {"first", item.first}, {"second", item.second}, {"face", encodeFace(item.face)},
+                    {"text", QString::fromStdString(item.text)}, {"vertices", static_cast<qint64>(item.vertexCount)}};
         } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
             if (item.entities.size() > maxEntities) {
                 fileError(QStringLiteral("Too many entities in a sketch."));
@@ -911,6 +926,41 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         geometry::fastenerSize(item);
         return item;
     }
+    if (version >= surfaceAnnotationVersion) {
+        if (type == "spatial-curve") {
+            if (!object.value("spline").isBool() || !object.value("closed").isBool()) {
+                fileError(QStringLiteral("Invalid spatial curve settings."));
+            }
+            return geometry::SpatialCurve{decodeList(object.value("points"), 2, 512, decodePoint3),
+                object.value("spline").toBool(), object.value("closed").toBool()};
+        }
+        if (type == "surface") {
+            const auto operation = signedInteger(object.value("operation"), "operation");
+            if (operation < 0 || operation > static_cast<int>(geometry::SurfaceKind::OpenEdges)) {
+                fileError(QStringLiteral("Invalid surface operation."));
+            }
+            return document::Surface{static_cast<geometry::SurfaceKind>(operation),
+                decodeList(object.value("sources"), 1, 32, [](const auto& value) { return integer(value, "source"); }),
+                number(object.value("distance"), "distance"), signedInteger(object.value("index"), "index")};
+        }
+        if (type == "imported-surface") {
+            return document::ImportedSurface{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
+        }
+        if (type == "annotation-3d") {
+            const auto kind = signedInteger(object.value("kind"), "kind");
+            const auto vertexCount = signedInteger(object.value("vertices"), "vertices");
+            const auto text = object.value("text");
+            if (kind < 0 || kind > static_cast<int>(document::AnnotationKind::Roughness)) {
+                fileError(QStringLiteral("Invalid 3D annotation type."));
+            }
+            if (vertexCount < 0 || !text.isString() || text.toString().toUtf8().size() > 160) {
+                fileError(QStringLiteral("Invalid 3D annotation."));
+            }
+            return document::Annotation3d{static_cast<document::AnnotationKind>(kind), integer(object.value("body"), "body"),
+                integer(object.value("first"), "first"), integer(object.value("second"), "second"),
+                decodeFace(object.value("face")), text.toString().toStdString(), static_cast<std::size_t>(vertexCount)};
+        }
+    }
     if (type == "sheet-metal" && version >= sheetMetalVersion) {
         return geometry::SheetMetal{number(object.value("length"),"length"),number(object.value("width"),"width"),
             number(object.value("thickness"),"thickness"), decodeList(object.value("bends"),0,24,[](const auto& value) {
@@ -959,9 +1009,12 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::ranges::any_of(sketch->constraints, [](const auto& c) {
                     return c.kind > geometry::ConstraintKind::OnProjection;
                 }));
-            if (std::holds_alternative<geometry::SheetMetal>(object.parameters) || std::holds_alternative<document::ImportedMesh>(object.parameters)
+            if (std::holds_alternative<geometry::SpatialCurve>(object.parameters) || std::holds_alternative<document::Surface>(object.parameters)
+                || std::holds_alternative<document::ImportedSurface>(object.parameters) || std::holds_alternative<document::Annotation3d>(object.parameters)) {
+                version = surfaceAnnotationVersion;
+            } else if (std::holds_alternative<geometry::SheetMetal>(object.parameters) || std::holds_alternative<document::ImportedMesh>(object.parameters)
                 || (assembly && assembly->components.size()==1) || object.properties.color) {
-                version = sheetMetalVersion;
+                version = std::max(version, sheetMetalVersion);
             } else if (std::holds_alternative<geometry::Fastener>(object.parameters)) {
                 version = std::max(version, fastenerVersion);
             } else if (assembly && (assembly->driveAngle != 0
@@ -1048,7 +1101,7 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
          && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion
          && parsedVersion != configurationVersion && parsedVersion != machiningVersion && parsedVersion != motionVersion
-         && parsedVersion != fastenerVersion && parsedVersion != sheetMetalVersion)
+         && parsedVersion != fastenerVersion && parsedVersion != sheetMetalVersion && parsedVersion != surfaceAnnotationVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

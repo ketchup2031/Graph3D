@@ -1093,6 +1093,7 @@ QMap<QString,int> exportDxfReport(const QString& path, const Draft& sheet, bool 
         if(model) {
             if(!projected) ++losses["Model view"];
             if(model->dimensions) ++losses["Automatic dimensions"];
+            if (!model->annotations.empty()) { losses["3D annotations"] += static_cast<int>(model->annotations.size()); }
             if(model->detail||model->local) ++losses["Detail or local section"];
             if(model->assembly && !model->assembly->callouts.empty()) losses["Assembly callouts"]+=static_cast<int>(model->assembly->callouts.size());
         }

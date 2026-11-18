@@ -8,6 +8,7 @@
 #include "geometry/PartFeatures.h"
 #include "geometry/Fastener.h"
 #include "geometry/SheetMetal.h"
+#include "geometry/SurfaceModeling.h"
 #include "geometry/Primitive.h"
 #include "geometry/SketchModeling.h"
 
@@ -16,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -29,6 +31,44 @@ struct Extrude { ObjectId profile; double distance; };
 struct Revolve { ObjectId profile; geometry::Axis axis; double offset; double angle; ObjectId datumAxis = 0; };
 struct Boolean { ObjectId first, second; geometry::BooleanOperation operation; };
 struct Imported { std::string name; TopoDS_Shape sourceShape; };
+struct ImportedSurface { std::string name; TopoDS_Shape sourceShape; };
+struct Surface {
+    geometry::SurfaceKind kind;
+    std::vector<ObjectId> sources;
+    double distance = .001;
+    int index = 1;
+    bool operator==(const Surface&) const = default;
+};
+enum class AnnotationKind { Linear, Diameter, Datum, Roughness };
+struct Annotation3d {
+    AnnotationKind kind;
+    ObjectId body;
+    int first = 1, second = 2; // Vertex indices for a linear dimension.
+    geometry::FaceReference face{};
+    std::string text;
+    std::size_t vertexCount = 0;
+    bool operator==(const Annotation3d&) const = default;
+};
+struct ResolvedAnnotation {
+    AnnotationKind kind;
+    geometry::Point3 first, second, normal;
+    double value = 0;
+    std::string text;
+};
+struct MaterialEntry {
+    const char* name;
+    double densityKgM3;
+};
+std::span<const MaterialEntry> materialCatalog();
+
+struct Measurement {
+    geometry::MassProperties geometric;
+    std::optional<double> massKg;
+    std::optional<geometry::Point3> centerMm;
+    // XX, YY, ZZ, XY, XZ, YZ about the centre of mass, in world axes and kg m².
+    std::optional<std::array<double, 6>> inertiaKgM2;
+    int missingDensities = 0;
+};
 struct Hole { ObjectId body; geometry::FaceReference face; geometry::HoleSize size; };
 struct EdgeTreatment {
     ObjectId body;
@@ -134,9 +174,12 @@ struct MotionInterference {
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
                                 Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend,
-                                geometry::Fastener, geometry::SheetMetal, ImportedMesh>;
+                                geometry::Fastener, geometry::SheetMetal, ImportedMesh, geometry::SpatialCurve,
+                                Surface, ImportedSurface, Annotation3d>;
 
 bool isBody(const Parameters& parameters);
+bool isSurface(const Parameters& parameters);
+std::vector<geometry::Point3> annotationVertices(const TopoDS_Shape& shape);
 bool isAdvanced(const Parameters& parameters);
 std::vector<std::string> formulaFields(const Parameters& parameters);
 ObjectId featureBase(const Parameters& parameters);
@@ -178,12 +221,18 @@ public:
     ObjectId addAdvanced(Parameters parameters);
     bool editAdvanced(ObjectId id, Parameters parameters);
     bool setDensity(ObjectId id, std::optional<double> densityKgM3);
+    bool setCatalogMaterial(ObjectId id, std::string_view name);
+    Measurement measure(ObjectId id, std::optional<double> densityOverride = {}) const;
     ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
     ObjectId addAssembly(Assembly assembly);
     ObjectId addFastener(geometry::Fastener item);
     bool editFastener(ObjectId id, geometry::Fastener item);
     ObjectId addSheetMetal(geometry::SheetMetal sheet);
     bool editSheetMetal(ObjectId id, geometry::SheetMetal sheet);
+    ObjectId addAnnotation(Annotation3d annotation);
+    bool editAnnotation(ObjectId id, Annotation3d annotation);
+    std::optional<ResolvedAnnotation> resolveAnnotation(ObjectId id) const;
+    bool annotationBelongsTo(ObjectId annotation, ObjectId body) const;
     ObjectId addLinkedComponent(LinkedComponent component);
     bool refreshLinkedComponents(std::vector<std::pair<ObjectId, LinkedComponent>> components);
     bool setPartProperties(ObjectId id, PartProperties properties);

@@ -2092,6 +2092,88 @@ private slots:
         QVERIFY(assembly->text(1).contains("3") && assembly->text(2).isEmpty());
     }
 
+    void surfaceAndAnnotationMenus()
+    {
+        using namespace graph3d;
+        const auto accept = [](const char* name, std::function<void(QDialog*)> change = {}) {
+            QTimer::singleShot(0, [name, change] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog) { return; }
+                if (dialog->objectName() != QLatin1String(name)) { dialog->reject(); return; }
+                if (change) { change(dialog); }
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+        };
+        MainWindow surface;
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        auto* surfaceTree = surface.findChild<QTreeWidget*>("modelTree");
+        QVERIFY(surfaceTree);
+        for (int z : {0,30}) {
+            accept("spatialCurveDialog", [z](QDialog* dialog) {
+                dialog->findChild<QPlainTextEdit*>("spatialPoints")->setPlainText(
+                    QStringLiteral("0,0,%1\n60,0,%1\n60,40,%1\n0,40,%1").arg(z));
+                dialog->findChild<QCheckBox*>("spatialClosed")->setChecked(true);
+            });
+            surface.findChild<QAction*>("spatialCurve")->trigger();
+        }
+        QCOMPARE(surfaceTree->topLevelItemCount(), 2);
+        accept("surfaceOperationDialog", [](QDialog* dialog) {
+            dialog->findChild<QLineEdit*>("surfaceInputs")->setText(QStringLiteral("1,2"));
+        });
+        surface.findChild<QAction*>("surfaceLoft")->trigger();
+        QCOMPARE(surfaceTree->topLevelItemCount(), 3);
+        QCOMPARE(surfaceTree->topLevelItem(2)->text(0), QStringLiteral("Surface loft 3"));
+        QVERIFY(!frame(surface.findChild<Viewport*>()).isNull());
+        surface.hide();
+
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        document::Document model;
+        const auto stock = model.addPrimitive(geometry::Primitive::Cube);
+        const auto faces = geometry::planarFaces(model.find(stock)->shape);
+        const auto upper = std::ranges::find_if(faces, [](const auto& face) { return face.outward[2] > .99; });
+        QVERIFY(upper != faces.end());
+        const auto hole = model.addHole(stock, *upper, {16,100,true});
+        const auto project = folder.filePath("annotated.graph3d");
+        io::saveProject(project, model);
+        DocumentWindow host;
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QVERIFY(host.openDocument(project));
+        auto* editor = host.findChild<MainWindow*>();
+        QVERIFY(editor);
+        auto* tree = editor->findChild<QTreeWidget*>("modelTree");
+        const auto holes = tree->findItems(QStringLiteral("Hole %1").arg(hole), Qt::MatchExactly | Qt::MatchRecursive);
+        QCOMPARE(holes.size(), 1);
+        tree->setCurrentItem(holes.front());
+        accept("annotation3dDialog");
+        editor->findChild<QAction*>("pmiDiameter")->trigger();
+        editor->findChild<QAction*>("saveProject")->trigger();
+        auto loaded = io::openModelSource(project);
+        const auto id = hole + 1;
+        QVERIFY(loaded.document.resolveAnnotation(id));
+        drawing::Draft sheet;
+        sheet.modelViews = io::buildModelViews(loaded, hole, {}, drawing::draftSize(sheet));
+        const auto layout = folder.filePath("annotated.g3draw");
+        io::saveDraft(layout, sheet);
+        QVERIFY(host.openDocument(layout));
+        auto* draft = host.findChild<DraftWindow*>();
+        QVERIFY(draft);
+        accept("transferAnnotationsDialog", [](QDialog* dialog) { dialog->findChild<QComboBox*>()->setCurrentIndex(3); });
+        draft->findChild<QAction*>("transferModelAnnotations")->trigger();
+        draft->findChild<QAction*>("saveDraft")->trigger();
+        auto stored = io::openDraft(layout);
+        QCOMPARE(stored.modelViews->annotations.size(), 1);
+        QCOMPARE(stored.modelViews->annotations.front().value, 16.);
+        QVERIFY(loaded.document.editHole(hole, {24,100,true}));
+        io::saveProject(project, loaded.document);
+        draft->findChild<QAction*>("linkedViewsRefresh")->trigger();
+        draft->findChild<QAction*>("saveDraft")->trigger();
+        stored = io::openDraft(layout);
+        QCOMPARE(stored.modelViews->annotations.front().value, 24.);
+    }
+
     void advancedModelingThroughMenus()
     {
         using namespace graph3d;

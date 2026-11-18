@@ -84,12 +84,19 @@ void writeStructuredStep(const QString& path,const document::Document& document)
         }
         return label;
     };
+    bool hasGeometry = false;
     for(const auto& object:document.objects()){
-        if(!object.visible||!document::isBody(object.parameters)) continue;
+        if(!object.visible || (!document::isBody(object.parameters) && !document::isSurface(object.parameters)
+            && !std::holds_alternative<geometry::SpatialCurve>(object.parameters))) continue;
+        if (object.status != document::Status::Ready || object.shape.IsNull()) {
+            fileError(QStringLiteral("Visible geometry #%1 has an error. Fix or hide it before exporting.").arg(object.id));
+        }
+        hasGeometry = true;
         auto node=exportNode(object.shape,document.componentRecord(object.id),0);
         if(node.properties.name.empty()) node.properties.name="Graph3D #"+std::to_string(object.id);
         add(add,node);
     }
+    if (!hasGeometry) { fileError(QStringLiteral("There is no visible geometry to export to STEP.")); }
     shapes->UpdateAssemblies();
     STEPCAFControl_Writer writer;
     DESTEP_Parameters parameters;
@@ -139,8 +146,9 @@ std::vector<Node> readStepTree(const QString& path)
                     if(reference) shape=shape.Moved(loc);
                     else shape=shape.Moved(parent);
                 }
-                if(shape.IsNull()||!TopExp_Explorer(shape,TopAbs_SOLID).More()||!BRepCheck_Analyzer(shape).IsValid())
-                    fileError(QStringLiteral("A STEP component is not a valid solid."));
+                if(shape.IsNull() || (!TopExp_Explorer(shape,TopAbs_FACE).More() && !TopExp_Explorer(shape,TopAbs_EDGE).More())
+                    || !BRepCheck_Analyzer(shape).IsValid())
+                    fileError(QStringLiteral("A STEP component has no valid geometry."));
                 result.shape=std::move(shape);
             }
             return result;
@@ -149,7 +157,7 @@ std::vector<Node> readStepTree(const QString& path)
         shapes->GetFreeShapes(roots);
         std::vector<Node> result;
         for(int i=1;i<=roots.Length();++i) result.push_back(read(read,roots.Value(i),{},0));
-        if(result.empty()) fileError(QStringLiteral("This STEP file contains no solid bodies."));
+        if(result.empty()) fileError(QStringLiteral("This STEP file contains no transferable geometry."));
         return result;
     } catch(const Standard_Failure& e) {
         fileError(QStringLiteral("STEP import failed: %1").arg(QString::fromUtf8(e.GetMessageString())));

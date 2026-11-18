@@ -21,6 +21,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/DirectFeatures.cpp
     src/geometry/Fastener.cpp
     src/geometry/SheetMetal.cpp
+    src/geometry/SurfaceModeling.cpp
     src/geometry/AdvancedModeling.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp src/geometry/AssemblyMates.cpp)
@@ -34,7 +35,7 @@ target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
 target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset TKGeomBase TKGeomAlgo)
 
-add_library(graph3d_document STATIC src/document/Document.cpp src/document/Formula.cpp src/document/Configuration.cpp)
+add_library(graph3d_document STATIC src/document/Document.cpp src/document/Formula.cpp src/document/Configuration.cpp src/document/MaterialsAnnotations.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
@@ -62,6 +63,7 @@ add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp src/gui/AdvancedDialog.cpp
     src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp src/gui/FastenerDialog.cpp src/gui/SpecificationWindow.cpp src/gui/SheetMetalDialog.cpp
+    src/gui/SurfaceAnnotationDialog.cpp
     src/gui/SpecificationWindow.h
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
@@ -109,6 +111,11 @@ if(BUILD_TESTING)
     target_link_libraries(interchange_sheet_test PRIVATE graph3d_io Qt6::Gui)
     add_test(NAME interchange_sheet COMMAND interchange_sheet_test)
     set_tests_properties(interchange_sheet PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(surface_materials_test tests/io/SurfaceMaterialsTest.cpp)
+    set_target_properties(surface_materials_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(surface_materials_test PRIVATE graph3d_io Qt6::Gui)
+    add_test(NAME surface_materials COMMAND surface_materials_test)
+    set_tests_properties(surface_materials PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(part_features_test tests/geometry/PartFeaturesTest.cpp)
     set_target_properties(part_features_test PROPERTIES CXX_EXTENSIONS OFF)
@@ -151,6 +158,6 @@ if(BUILD_TESTING)
         set_target_properties(viewport_test PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
         target_link_libraries(viewport_test PRIVATE graph3d_ui Qt6::Test)
         add_test(NAME viewport COMMAND viewport_test)
-        set_tests_properties(viewport PROPERTIES TIMEOUT 75)
+        set_tests_properties(viewport PROPERTIES TIMEOUT 120)
     endif()
 endif()

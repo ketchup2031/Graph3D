@@ -44,6 +44,8 @@ std::vector<ObjectId> inputs(const Parameters& parameters)
         [](const Revolve& p) { return p.datumAxis ? std::vector{p.profile, p.datumAxis} : std::vector{p.profile}; },
         [](const Sweep& p) { return p.pathSketch ? std::vector{p.profile, p.pathSketch} : std::vector{p.profile}; },
         [](const Loft& p) { return p.profiles; },
+        [](const Surface& p) { return p.sources; },
+        [](const Annotation3d& p) { return std::vector{p.body}; },
         [](const Shell& p) { return std::vector{p.body}; },
         [](const DraftAngle& p) { return std::vector{p.body}; },
         [](const Boolean& p) { return std::vector{p.first, p.second}; },
@@ -151,6 +153,25 @@ void validateAdvancedInputs(const std::vector<Object>& state, const Parameters& 
             }
         },
         [&](const Shell& p) { requireBody(prior(p.body)); },
+        [&](const Surface& p) {
+            for (const auto source : p.sources) {
+                const auto& input = prior(source);
+                if (!(isSurface(input.parameters) || std::holds_alternative<geometry::SpatialCurve>(input.parameters)
+                    || std::holds_alternative<geometry::Sketch>(input.parameters))) {
+                    throw std::invalid_argument("Select a curve, sketch or free surface as an input.");
+                }
+            }
+        },
+        [&](const Annotation3d& p) {
+            const auto& input = prior(p.body);
+            requireBody(input);
+            if (p.kind == AnnotationKind::Diameter && !std::holds_alternative<Hole>(input.parameters)) {
+                throw std::invalid_argument("Select a hole feature for a diameter annotation.");
+            }
+            if (p.first < 1 || p.second < 1 || p.text.size() > 160) {
+                throw std::invalid_argument("Invalid 3D annotation.");
+            }
+        },
         [&](const DraftAngle& p) { requireBody(prior(p.body)); },
         [&](const FeaturePattern& p) {
             if (!featureBase(prior(p.seed).parameters)) { throw std::invalid_argument("Select an individual operation as the pattern seed."); }
@@ -181,6 +202,21 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
         [](const geometry::Fastener& p) { return geometry::makeFastener(p); },
         [](const geometry::SheetMetal& p) { return geometry::makeSheetMetal(p); },
+        [](const geometry::SpatialCurve& p) { return geometry::makeSpatialCurve(p); },
+        [&state](const Surface& p) {
+            std::vector<TopoDS_Shape> shapes;
+            for (const auto id : p.sources) { shapes.push_back(objectAt(state, id).shape); }
+            return geometry::buildSurface(p.kind, shapes, p.distance, p.index);
+        },
+        [](const ImportedSurface& p) {
+            if (p.sourceShape.IsNull() || (!TopExp_Explorer(p.sourceShape, TopAbs_FACE).More()
+                && !TopExp_Explorer(p.sourceShape, TopAbs_EDGE).More())
+                || TopExp_Explorer(p.sourceShape, TopAbs_SOLID).More() || !BRepCheck_Analyzer(p.sourceShape).IsValid()) {
+                throw std::invalid_argument("Invalid imported curve or free surface.");
+            }
+            return p.sourceShape;
+        },
+        [](const Annotation3d&) -> TopoDS_Shape { return {}; },
         [](const ImportedMesh& p) -> TopoDS_Shape {
             if (p.vertices.empty() || p.vertices.size()%3 || p.vertices.size()>1500000)
                 throw std::invalid_argument("Invalid or oversized mesh.");
@@ -299,7 +335,18 @@ bool isBody(const Parameters& parameters)
     return !std::holds_alternative<geometry::Sketch>(parameters)
         && !std::holds_alternative<geometry::DatumPlane>(parameters)
         && !std::holds_alternative<geometry::DatumAxis>(parameters)
-        && !std::holds_alternative<ImportedMesh>(parameters);
+        && !std::holds_alternative<ImportedMesh>(parameters)
+        && !std::holds_alternative<geometry::SpatialCurve>(parameters)
+        && !std::holds_alternative<Annotation3d>(parameters)
+        && !isSurface(parameters);
+}
+
+bool isSurface(const Parameters& parameters)
+{
+    if (const auto* surface = std::get_if<Surface>(&parameters)) {
+        return surface->kind != geometry::SurfaceKind::Solid;
+    }
+    return std::holds_alternative<ImportedSurface>(parameters);
 }
 
 bool isAdvanced(const Parameters& parameters)
@@ -308,7 +355,8 @@ bool isAdvanced(const Parameters& parameters)
         || std::holds_alternative<Sweep>(parameters) || std::holds_alternative<Loft>(parameters)
         || std::holds_alternative<Shell>(parameters) || std::holds_alternative<DraftAngle>(parameters)
         || std::holds_alternative<FeaturePattern>(parameters) || std::holds_alternative<MoveFace>(parameters)
-        || std::holds_alternative<RemoveBlend>(parameters);
+        || std::holds_alternative<RemoveBlend>(parameters) || std::holds_alternative<geometry::SpatialCurve>(parameters)
+        || std::holds_alternative<Surface>(parameters);
 }
 
 ObjectId featureBase(const Parameters& parameters)
@@ -420,9 +468,21 @@ ObjectId Document::importTree(const std::vector<ExchangeNode>& roots)
     Document candidate;
     candidate.objects_=objects_;
     candidate.configuration_=configuration_;
+    const auto hasFreeGeometry = [](auto&& self, const ExchangeNode& node, int depth) -> bool {
+        if (depth > 24) { throw std::invalid_argument("Imported assembly exceeds the model limits."); }
+        if (node.children.empty()) {
+            return node.shape.IsNull() || !TopExp_Explorer(node.shape, TopAbs_SOLID).More();
+        }
+        return std::ranges::any_of(node.children, [&](const auto& child) { return self(self, child, depth + 1); });
+    };
     const auto add=[&](auto&& self,const ExchangeNode& node,int depth)->ObjectId {
         if(depth>24 || candidate.objects_.size()>=10000) throw std::invalid_argument("Imported assembly exceeds the model limits.");
         ObjectId id;
+        if (!node.children.empty() && hasFreeGeometry(hasFreeGeometry, node, depth)) {
+            ObjectId last = 0;
+            for (const auto& child : node.children) { last = self(self, child, depth + 1); }
+            return last;
+        }
         if(node.children.size()>=2){
             Assembly assembly;
             for(const auto& child:node.children) assembly.components.push_back({self(self,child,depth+1),{}});
@@ -430,8 +490,13 @@ ObjectId Document::importTree(const std::vector<ExchangeNode>& roots)
         } else if(node.children.size()==1) {
             const auto child=self(self,node.children.front(),depth+1);
             id=candidate.addAssembly({{{child,{}}}});
-        } else id=candidate.addImported(node.properties.name,node.shape);
-        candidate.setPartProperties(id,node.properties);
+        } else if (TopExp_Explorer(node.shape, TopAbs_SOLID).More()) {
+            id = candidate.addImported(node.properties.name, node.shape);
+        } else {
+            id = candidate.append(ImportedSurface{node.properties.name, node.shape});
+            candidate.objects_[id - 1].properties = node.properties;
+        }
+        if (isBody(candidate.find(id)->parameters)) { candidate.setPartProperties(id,node.properties); }
         candidate.clearHistory();
         return id;
     };
@@ -489,7 +554,8 @@ bool Document::editAdvanced(ObjectId id, Parameters parameters)
         if constexpr (std::is_same_v<T, geometry::DatumPlane> || std::is_same_v<T, geometry::DatumAxis>
             || std::is_same_v<T, Sweep> || std::is_same_v<T, Loft> || std::is_same_v<T, Shell>
             || std::is_same_v<T, DraftAngle> || std::is_same_v<T, FeaturePattern>
-            || std::is_same_v<T, MoveFace> || std::is_same_v<T, RemoveBlend>) {
+            || std::is_same_v<T, MoveFace> || std::is_same_v<T, RemoveBlend>
+            || std::is_same_v<T, geometry::SpatialCurve> || std::is_same_v<T, Surface>) {
             return value == std::get<T>(before);
         }
         return false;
@@ -652,6 +718,16 @@ ComponentRecord Document::componentRecord(ObjectId id) const
     if (const auto* linked = std::get_if<LinkedComponent>(&object.parameters)) {
         record = linked->record;
     }
+    auto parent = featureBase(object.parameters);
+    if (const auto* pattern = std::get_if<FeaturePattern>(&object.parameters)) { parent = pattern->seed; }
+    if (const auto* transform = std::get_if<Transform>(&object.parameters)) { parent = transform->body; }
+    if (parent != 0) {
+        const auto inherited = componentRecord(parent);
+        if (inherited.children.empty()) {
+            if (object.properties.material.empty()) { record.properties.material = inherited.properties.material; }
+            record.densityKgM3 = inherited.densityKgM3;
+        }
+    }
     for (auto field : {&PartProperties::name, &PartProperties::designation, &PartProperties::material, &PartProperties::note}) {
         if (!(object.properties.*field).empty()) {
             record.properties.*field = object.properties.*field;
@@ -750,7 +826,8 @@ Document Document::fromDefinitions(std::vector<Definition> definitions, Configur
             && (std::holds_alternative<Primitive>(object.parameters)
                 || (std::holds_alternative<geometry::Sketch>(object.parameters)
                     && !std::get<geometry::Sketch>(object.parameters).support && !std::get<geometry::Sketch>(object.parameters).datumPlane)
-                || std::holds_alternative<Imported>(object.parameters))) {
+                || std::holds_alternative<Imported>(object.parameters)
+                || std::holds_alternative<ImportedSurface>(object.parameters))) {
             throw std::invalid_argument("Object #" + std::to_string(object.id) + ": " + object.error);
         }
     }
@@ -767,7 +844,10 @@ ObjectId Document::append(Parameters parameters)
     if (next.back().status != Status::Ready) {
         throw std::invalid_argument(next.back().error);
     }
-    if (isBody(next.back().parameters)) {
+    if (isBody(next.back().parameters)
+        || (std::holds_alternative<Surface>(next.back().parameters)
+            && std::get<Surface>(next.back().parameters).kind != geometry::SurfaceKind::Patch
+            && std::get<Surface>(next.back().parameters).kind != geometry::SurfaceKind::OpenEdges)) {
         for (const auto input : inputs(next.back().parameters)) {
             if (!std::holds_alternative<geometry::DatumAxis>(next[input - 1].parameters)) {
                 next[input - 1].visible = false;

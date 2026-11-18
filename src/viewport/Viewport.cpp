@@ -6,7 +6,13 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <AIS_ColoredShape.hxx>
+#include <AIS_TextLabel.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp_Circ.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopExp_Explorer.hxx>
 #include <BRep_Tool.hxx>
 #include <QKeyEvent>
 #include <Aspect_DisplayConnection.hxx>
@@ -65,6 +71,7 @@ struct Viewport::Scene {
     Handle(AIS_InteractiveContext) context;
     Handle(V3d_View) view;
     std::vector<Handle(AIS_Shape)> objects;
+    std::vector<Handle(AIS_InteractiveObject)> annotations;
     std::vector<bool> simplified;
     QPoint previousMouse;
     int pickId = 0;
@@ -168,7 +175,11 @@ void Viewport::syncDocument(const document::Document& document)
                 }
                 continue;
             }
-            const bool wire = !document::isBody(record.parameters) && !std::holds_alternative<document::ImportedMesh>(record.parameters);
+            const auto* surface = std::get_if<document::Surface>(&record.parameters);
+            const bool openEdges = surface && surface->kind == geometry::SurfaceKind::OpenEdges;
+            const bool wire = !document::isBody(record.parameters)
+                && !std::holds_alternative<document::ImportedMesh>(record.parameters)
+                && (!document::isSurface(record.parameters) || !TopExp_Explorer(record.shape, TopAbs_FACE).More());
             const auto& displayShape = record.preview.IsNull() ? record.shape : record.preview;
             document::ComponentRecord metadata;
             if (record.preview.IsNull() && (std::holds_alternative<document::Assembly>(record.parameters)
@@ -187,6 +198,7 @@ void Viewport::syncDocument(const document::Document& document)
             }
             const auto color = record.properties.color
                 ? Quantity_Color((*record.properties.color)[0],(*record.properties.color)[1],(*record.properties.color)[2],Quantity_TOC_RGB)
+                : openEdges ? Quantity_Color(1.0, 0.44, 0.28, Quantity_TOC_sRGB)
                 : std::holds_alternative<geometry::Sketch>(record.parameters)
                 ? Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB)
                 : wire ? Quantity_Color(0.87, 0.65, 0.23, Quantity_TOC_sRGB)
@@ -234,6 +246,64 @@ void Viewport::syncDocument(const document::Document& document)
             } else if (!record.visible && displayed) {
                 scene_->context->Erase(object, false);
             }
+        }
+        for (const auto& item : scene_->annotations) { scene_->context->Remove(item, false); }
+        scene_->annotations.clear();
+        const auto show = [&](const Handle(AIS_InteractiveObject)& item) {
+            scene_->context->Display(item, 0, -1, false);
+            scene_->annotations.push_back(item);
+        };
+        for (const auto& record : records) {
+            if (!record.visible || !std::holds_alternative<document::Annotation3d>(record.parameters)) { continue; }
+            if (!std::ranges::any_of(records, [&](const auto& body) {
+                return body.visible && document::isBody(body.parameters) && document.annotationBelongsTo(record.id, body.id);
+            })) { continue; }
+            const auto data = document.resolveAnnotation(record.id);
+            if (!data) { continue; }
+            using Kind = document::AnnotationKind;
+            const gp_Pnt first(data->first[0], data->first[1], data->first[2]);
+            const gp_Pnt second(data->second[0], data->second[1], data->second[2]);
+            gp_Pnt textPosition = first.Translated(gp_Vec(12, 8, 12));
+            BRep_Builder builder;
+            TopoDS_Compound linework;
+            builder.MakeCompound(linework);
+            const auto line = [&](const gp_Pnt& a, const gp_Pnt& b) {
+                builder.Add(linework, BRepBuilderAPI_MakeEdge(a, b).Edge());
+            };
+            QString text = QString::fromStdString(data->text);
+            if (data->kind == Kind::Linear) {
+                const gp_Vec axis(first, second);
+                gp_Vec offset = axis.Crossed(gp_Vec(0,0,1));
+                if (offset.Magnitude() <= 1.e-6) { offset = axis.Crossed(gp_Vec(0,1,0)); }
+                offset.Normalize();
+                offset *= std::clamp(data->value * .15, 4., 15.);
+                const auto a = first.Translated(offset), b = second.Translated(offset);
+                line(first, a); line(second, b); line(a, b);
+                textPosition = a.Translated(gp_Vec(a, b) * .5);
+                text = tr("%1 mm").arg(data->value, 0, 'g', 7);
+            } else {
+                line(first, textPosition);
+                if (data->kind == Kind::Diameter) {
+                    const gp_Dir normal(data->normal[0], data->normal[1], data->normal[2]);
+                    builder.Add(linework, BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(first, normal), data->value / 2)).Edge());
+                    text = QStringLiteral("Ø") + tr("%1 mm").arg(data->value, 0, 'g', 7);
+                } else if (data->kind == Kind::Datum) {
+                    text = QStringLiteral("[%1]").arg(text);
+                } else {
+                    text = QStringLiteral("Ra %1").arg(text);
+                }
+            }
+            const Quantity_Color ink(1., .84, .36, Quantity_TOC_sRGB);
+            Handle(AIS_Shape) strokes = new AIS_Shape(linework);
+            strokes->SetColor(ink);
+            strokes->SetWidth(2);
+            show(strokes);
+            Handle(AIS_TextLabel) caption = new AIS_TextLabel;
+            caption->SetText(TCollection_ExtendedString(text.toUtf8().constData(), true));
+            caption->SetPosition(textPosition);
+            caption->SetColor(ink);
+            caption->SetHeight(15);
+            show(caption);
         }
         scene_->view->ZFitAll();
         scene_->context->UpdateCurrentViewer();

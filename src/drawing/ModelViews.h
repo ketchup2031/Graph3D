@@ -119,6 +119,22 @@ struct ThreadCallout {
     QString designation;
 };
 
+enum class ModelAnnotationKind { Linear, Diameter, Datum, Roughness };
+struct AnnotationTransfer {
+    int sourceId;
+    int view;
+    bool operator==(const AnnotationTransfer&) const = default;
+};
+struct ProjectedAnnotation {
+    int sourceId;
+    int view;
+    ModelAnnotationKind kind;
+    QPointF first, second;
+    double value;
+    QString text;
+    bool faceOn;
+};
+
 struct ModelViews {
     QString sourcePath;
     int bodyId = 0;
@@ -136,6 +152,8 @@ struct ModelViews {
     std::optional<QString> variant;
     std::vector<ThreadCallout> threads;
     QString specificationPath;
+    std::vector<AnnotationTransfer> annotationSelection;
+    std::vector<ProjectedAnnotation> annotations;
 };
 
 struct LocatedView {

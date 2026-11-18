@@ -8,6 +8,7 @@
 
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Vec.hxx>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -432,8 +433,10 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
     model.bodyId = bodyId;
     model.sourceDigest = source.digest;
     model.titleData = {QString::fromStdString(item->properties.name), QString::fromStdString(item->properties.designation), {}};
-    if (item->densityKgM3) {
-        model.titleData.massKg = geometry::massProperties(item->shape, *item->densityKgM3).massKg;
+    try {
+        model.titleData.massKg = selected.document.measure(bodyId).massKg;
+    } catch (const std::invalid_argument&) {
+        // A linked title can still be generated when mass is unavailable.
     }
     if (!previous) {
         model.layout = defaultViewLayout(snapshot->views, paper);
@@ -480,6 +483,26 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
     }
     const bool sameSource = previous && previous->bodyId == bodyId
         && (previous->sourcePath == source.path || previous->sourceDigest == source.digest);
+    if (!sameSource) { model.annotationSelection.clear(); }
+    model.annotations.clear();
+    for (const auto& request : model.annotationSelection) {
+        if (request.view < 0 || request.view > 2 || !selected.document.annotationBelongsTo(request.sourceId, bodyId)) { continue; }
+        const auto annotation = selected.document.resolveAnnotation(request.sourceId);
+        if (!annotation) { continue; }
+        const auto& view = baseModelView(model, request.view);
+        const auto direction = standardDirection(request.view);
+        const gp_Vec normal(direction.normal[0], direction.normal[1], direction.normal[2]);
+        const gp_Vec x(direction.right[0], direction.right[1], direction.right[2]);
+        const auto y = normal.Crossed(x);
+        const auto toView = [&](const geometry::Point3& point) {
+            const gp_Vec position(point[0], point[1], point[2]);
+            return QPointF(position.Dot(x) - view.origin.x, position.Dot(y) - view.origin.y);
+        };
+        const gp_Vec face(annotation->normal[0], annotation->normal[1], annotation->normal[2]);
+        model.annotations.push_back({request.sourceId, request.view, static_cast<ModelAnnotationKind>(annotation->kind),
+            toView(annotation->first), toView(annotation->second), annotation->value,
+            QString::fromStdString(annotation->text), std::abs(face.Dot(normal)) > .999});
+    }
     rebuildDrawingViews(model, item->shape, sameSource ? previous : nullptr);
     validateSnapshot(*snapshot, model.additional);
     const auto prior = previous && previous->bodyId == bodyId && previous->sourcePath == source.path
@@ -593,6 +616,33 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
             result.threads.push_back({view, {center.x, center.y}, positive(entry.value("diameter"), maxCoordinate), designation});
         }
     }
+    if (object.contains("annotationSelection")) {
+        const auto entries = array(object.value("annotationSelection"));
+        if (entries.size() > 256) { invalid(); }
+        for (const auto& value : entries) {
+            const auto entry = value.toObject();
+            const int id = entry.value("sourceId").toInt(-1), view = entry.value("view").toInt(-1);
+            if (id < 1 || id > 10000 || view < 0 || view > 2) { invalid(); }
+            const AnnotationTransfer request{id, view};
+            if (std::ranges::find(result.annotationSelection, request) != result.annotationSelection.end()) { invalid(); }
+            result.annotationSelection.push_back(request);
+        }
+        const auto snapshots = array(object.value("annotations"));
+        if (snapshots.size() > entries.size()) { invalid(); }
+        for (const auto& value : snapshots) {
+            const auto entry = value.toObject();
+            const int id = entry.value("sourceId").toInt(-1), view = entry.value("view").toInt(-1);
+            const int kind = entry.value("kind").toInt(-1);
+            const auto a = readPoint(entry.value("a")), b = readPoint(entry.value("b"));
+            const auto text = entry.value("text").toString();
+            const auto size = entry.value("value").toDouble(-1);
+            if (kind < 0 || kind > 3 || size < 0 || size > maxCoordinate || text.size() > 160
+                || !entry.value("faceOn").isBool()
+                || std::ranges::find(result.annotationSelection, AnnotationTransfer{id, view}) == result.annotationSelection.end()) { invalid(); }
+            result.annotations.push_back({id, view, static_cast<ModelAnnotationKind>(kind),
+                {a.x, a.y}, {b.x, b.y}, size, text, entry.value("faceOn").toBool()});
+        }
+    }
     return result;
 }
 
@@ -629,6 +679,21 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath, b
                 {"diameter", thread.diameter}, {"designation", thread.designation}});
         }
         result.insert("threads", entries);
+    }
+    if (!model.annotationSelection.empty()) {
+        if (model.annotationSelection.size() > 256 || model.annotations.size() > model.annotationSelection.size()) { invalid(); }
+        QJsonArray selection, snapshots;
+        for (const auto& request : model.annotationSelection) {
+            selection.append(QJsonObject{{"sourceId", request.sourceId}, {"view", request.view}});
+        }
+        for (const auto& annotation : model.annotations) {
+            snapshots.append(QJsonObject{{"sourceId", annotation.sourceId}, {"view", annotation.view},
+                {"kind", static_cast<int>(annotation.kind)}, {"a", writePoint({annotation.first.x(), annotation.first.y()})},
+                {"b", writePoint({annotation.second.x(), annotation.second.y()})}, {"value", annotation.value},
+                {"text", annotation.text}, {"faceOn", annotation.faceOn}});
+        }
+        result.insert("annotationSelection", selection);
+        result.insert("annotations", snapshots);
     }
     if (model.geometry->section) {
         result.insert("section", writeSection(*model.geometry->section, references));

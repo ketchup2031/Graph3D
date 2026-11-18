@@ -355,7 +355,7 @@ std::optional<document::Parameters> advancedParameters(QWidget* parent, const QS
     return dialog.run(facesEditor(dialog, document.find(p.body)->shape, p.body, p.walls, p.neutral, p.degrees));
 }
 
-std::optional<double> bodyPropertiesDialog(QWidget* parent, const document::Object& object)
+std::optional<double> bodyPropertiesDialog(QWidget* parent, const document::Document& document, const document::Object& object)
 {
     QDialog dialog(parent);
     dialog.setObjectName(QStringLiteral("bodyMeasuresDialog"));
@@ -367,20 +367,34 @@ std::optional<double> bodyPropertiesDialog(QWidget* parent, const document::Obje
     density.setRange(0, 1.e9);
     density.setSpecialValueText(tr("Unspecified"));
     density.setValue(object.densityKgM3.value_or(0));
-    QLabel volume, mass, center;
-    const auto values = geometry::massProperties(object.shape, 0);
-    volume.setText(QString::number(values.volumeMm3, 'g', 10));
-    center.setText(xyz(values.centerMm));
+    QLabel volume, geometricCenter, mass, center, principal, products;
+    const auto original = density.value();
+    const auto initial = document.measure(object.id);
+    volume.setText(QString::number(initial.geometric.volumeMm3, 'g', 10));
+    geometricCenter.setText(xyz(initial.geometric.centerMm));
     const auto update = [&] {
-        mass.setText(density.value() > 0 ? QString::number(values.volumeMm3 * density.value() / 1.e9, 'g', 10)
-                                         : tr("Set a density to calculate mass"));
+        const auto result = density.value() == original ? initial : document.measure(object.id, density.value());
+        mass.setText(result.massKg ? QString::number(*result.massKg, 'g', 10)
+                                   : tr("Missing density for %1 part(s)").arg(result.missingDensities));
+        center.setText(result.centerMm ? xyz(*result.centerMm) : QStringLiteral("—"));
+        if (result.inertiaKgM2) {
+            const auto& i = *result.inertiaKgM2;
+            principal.setText(xyz({i[0], i[1], i[2]}));
+            products.setText(xyz({i[3], i[4], i[5]}));
+        } else {
+            principal.setText(QStringLiteral("—"));
+            products.setText(QStringLiteral("—"));
+        }
     };
     update();
     QObject::connect(&density, &QDoubleSpinBox::valueChanged, &dialog, update);
     form.addRow(tr("Volume (mm³)"), &volume);
+    form.addRow(tr("Geometric center (mm)"), &geometricCenter);
     form.addRow(tr("Center of mass (mm)"), &center);
     form.addRow(tr("Material density (kg/m³)"), &density);
     form.addRow(tr("Mass (kg)"), &mass);
+    form.addRow(tr("Inertia Ixx, Iyy, Izz (kg m²)"), &principal);
+    form.addRow(tr("Inertia Ixy, Ixz, Iyz (kg m²)"), &products);
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     form.addRow(&buttons);
     QObject::connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);

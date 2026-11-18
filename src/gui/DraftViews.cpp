@@ -2,6 +2,8 @@
 #include "gui/InterfaceLanguage.h"
 #include "io/ModelViewsIO.h"
 
+#include <Standard_Failure.hxx>
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -15,6 +17,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 
@@ -23,6 +26,70 @@
 #include <stdexcept>
 
 namespace graph3d {
+
+void DraftWindow::manageModelAnnotations()
+{
+    if (!draft_.modelViews) { return; }
+    try {
+        auto model = *draft_.modelViews;
+        const auto source = io::openModelSource(model.sourcePath);
+        auto configured = source.document;
+        if (model.variant) { configured.selectVariant(model.variant->toStdString()); }
+        QDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("transferAnnotationsDialog"));
+        dialog.setWindowTitle(tr("Transfer 3D annotations"));
+        dialog.resize(380, 320);
+        auto* outer = new QVBoxLayout(&dialog);
+        auto* scroll = new QScrollArea(&dialog);
+        scroll->setWidgetResizable(true);
+        outer->addWidget(scroll);
+        auto* content = new QWidget(scroll);
+        auto* form = new QFormLayout(content);
+        scroll->setWidget(content);
+        std::vector<std::pair<int,QComboBox*>> choices;
+        for (const auto& object : configured.objects()) {
+            if (!configured.annotationBelongsTo(object.id, model.bodyId)) { continue; }
+            const auto notation = configured.resolveAnnotation(object.id);
+            if (!notation) { continue; }
+            auto* view = new QComboBox(content);
+            view->addItems({tr("Do not transfer"), tr("Front"), tr("Right"), tr("Top")});
+            const auto previous = std::ranges::find(model.annotationSelection, object.id, &drawing::AnnotationTransfer::sourceId);
+            if (previous != model.annotationSelection.end()) { view->setCurrentIndex(previous->view + 1); }
+            const auto name = [&] {
+                using K = document::AnnotationKind;
+                switch (notation->kind) {
+                case K::Linear: return tr("Linear dimension %1").arg(notation->value, 0, 'g', 8);
+                case K::Diameter: return tr("Hole diameter Ø%1").arg(notation->value, 0, 'g', 8);
+                case K::Datum: return tr("Datum %1").arg(QString::fromStdString(notation->text));
+                case K::Roughness: return tr("Ra %1").arg(QString::fromStdString(notation->text));
+                }
+                return QString{};
+            }();
+            form->addRow(QStringLiteral("#%1 · %2").arg(object.id).arg(name), view);
+            choices.emplace_back(object.id, view);
+        }
+        if (choices.empty() && model.annotationSelection.empty()) {
+            QMessageBox::information(this, dialog.windowTitle(), tr("This model has no 3D annotations for the linked body."));
+            return;
+        }
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        outer->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted) { return; }
+        model.annotationSelection.clear();
+        for (const auto& [id, view] : choices) {
+            if (view->currentIndex() > 0) { model.annotationSelection.push_back({id, view->currentIndex() - 1}); }
+        }
+        if (model.annotationSelection.size() > 256) { throw std::invalid_argument("Select at most 256 annotations per sheet."); }
+        setModelViews(io::buildModelViews(source, model.bodyId, drawing::sectionSettings(model),
+            drawing::draftSize(draft_), &model), tr("Transfer 3D annotations"));
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, tr("Transfer 3D annotations"), localizedDiagnostic(error.what()));
+    } catch (const Standard_Failure& error) {
+        QMessageBox::warning(this, tr("Transfer 3D annotations"), localizedDiagnostic(error.GetMessageString()));
+    }
+}
 namespace {
 
 using namespace drawing;

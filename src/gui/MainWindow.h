@@ -54,6 +54,10 @@ private:
     bool confirmSave();
     void openProject();
     void importModel(io::ExchangeFormat format);
+    void configureSpatialCurve(int id = 0);
+    void configureSurface(geometry::SurfaceKind kind, int id = 0);
+    void configureAnnotation(document::AnnotationKind kind, int id = 0);
+    void chooseCatalogMaterial();
     void exportModel(io::ExchangeFormat format);
     enum class Machining { Hole, Chamfer, Fillet, SketchFace, ChamferSet, FilletSet, MeasureVertices, MoveFace, RemoveBlend };
     void startMachining(Machining operation);

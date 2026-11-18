@@ -64,6 +64,7 @@ private:
     void chooseModel();
     void refreshModel();
     void editModelViews();
+    void manageModelAnnotations();
     void manageDrawingViews();
     void editDetail();
     void placeSectionLine();

@@ -485,6 +485,10 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
 
 int draftVersion(const drawing::Draft& draft)
 {
+    const auto hasAnnotations = [](const auto& sheet) {
+        return sheet.modelViews && !sheet.modelViews->annotationSelection.empty();
+    };
+    if (hasAnnotations(draft) || std::ranges::any_of(draft.additionalSheets, hasAnnotations)) { return 11; }
     if (draft.flatPattern || std::ranges::any_of(draft.additionalSheets, [](const auto& sheet) { return sheet.flatPattern.has_value(); })) {
         return 10;
     }
@@ -543,7 +547,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const int version = root.value("version").toInt();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 10
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 11
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }

@@ -143,11 +143,10 @@ void writeStl(const QString& path, const TopoDS_Shape& shape)
 void exportVisible(const QString& path, const document::Document& document, ExchangeFormat format)
 {
     try {
-        const auto shape = visibleSolids(document);
         switch (format) {
         case ExchangeFormat::Step: writeStructuredStep(path, document); break;
-        case ExchangeFormat::Stl: writeStl(path, shape); break;
-        case ExchangeFormat::Iges: writeIges(path,shape); break;
+        case ExchangeFormat::Stl: writeStl(path, visibleSolids(document)); break;
+        case ExchangeFormat::Iges: writeIges(path, visibleSolids(document)); break;
         }
     } catch (const Standard_Failure& error) {
         fileError(QCoreApplication::translate("Diagnostic", "Geometry export failed: %1").arg(QString::fromUtf8(error.GetMessageString())));
@@ -169,7 +168,12 @@ TopoDS_Shape readStep(const QString& path)
         TopTools_IndexedMapOfShape solids;
         TopExp::MapShapes(reader.OneShape(), TopAbs_SOLID, solids);
         if (solids.IsEmpty()) {
-            fileError(QStringLiteral("This STEP file contains no solid bodies."));
+            const auto shape = reader.OneShape();
+            if (shape.IsNull() || !BRepCheck_Analyzer(shape, true).IsValid()
+                || (!TopExp_Explorer(shape, TopAbs_FACE).More() && !TopExp_Explorer(shape, TopAbs_EDGE).More())) {
+                fileError(QStringLiteral("The STEP file contains no valid transferable geometry."));
+            }
+            return shape;
         }
         BRep_Builder builder;
         TopoDS_Compound result;

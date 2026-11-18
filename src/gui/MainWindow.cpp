@@ -57,6 +57,7 @@
 #include <cmath>
 #include <exception>
 #include <type_traits>
+#include <tuple>
 
 namespace graph3d {
 namespace {
@@ -275,7 +276,7 @@ void MainWindow::createMenus()
     connect(importIges, &QAction::triggered, this, [this] { importModel(io::ExchangeFormat::Iges); });
     auto* importStl = menuAction(file, tr("Import STL…"), "importStl");
     connect(importStl, &QAction::triggered, this, [this] { importModel(io::ExchangeFormat::Stl); });
-    auto* exportStep = menuAction(file, tr("Export visible bodies to STEP…"), "exportStep");
+    auto* exportStep = menuAction(file, tr("Export visible geometry to STEP…"), "exportStep");
     connect(exportStep, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Step); });
     auto* exportStl = menuAction(file, tr("Export visible bodies to STL…"), "exportStl");
     connect(exportStl, &QAction::triggered, this, [this] { exportModel(io::ExchangeFormat::Stl); });
@@ -342,6 +343,29 @@ void MainWindow::createMenus()
 
     auto* model = menuBar()->addMenu(tr("&Model"));
     auto* metal = model->addMenu(tr("Sheet metal"));
+    auto* surfaces = model->addMenu(tr("Curves and surfaces"));
+    connect(menuAction(surfaces, tr("Spatial curve…"), "spatialCurve"), &QAction::triggered,
+        this, [this] { configureSpatialCurve(); });
+    for (const auto& [kind, text, name] : {
+        std::tuple{geometry::SurfaceKind::Loft, tr("Surface through sections…"), "surfaceLoft"},
+        {geometry::SurfaceKind::Sweep, tr("Sweep surface…"), "surfaceSweep"},
+        {geometry::SurfaceKind::Network, tr("Surface from curve network…"), "surfaceNetwork"},
+        {geometry::SurfaceKind::Trim, tr("Trim surface…"), "surfaceTrim"},
+        {geometry::SurfaceKind::Extend, tr("Extend surface…"), "surfaceExtend"},
+        {geometry::SurfaceKind::Patch, tr("Patch boundary…"), "surfacePatch"},
+        {geometry::SurfaceKind::Sew, tr("Sew surfaces…"), "surfaceSew"},
+        {geometry::SurfaceKind::Solid, tr("Create solid from surfaces…"), "surfaceSolid"},
+        {geometry::SurfaceKind::OpenEdges, tr("Show open edges…"), "surfaceOpenEdges"}}) {
+        connect(menuAction(surfaces, text, name), &QAction::triggered, this, [this, kind] { configureSurface(kind); });
+    }
+    auto* annotations = model->addMenu(tr("3D annotations"));
+    for (const auto& [kind, text, name] : {
+        std::tuple{document::AnnotationKind::Linear, tr("Linear dimension…"), "pmiLinear"},
+        {document::AnnotationKind::Diameter, tr("Hole diameter…"), "pmiDiameter"},
+        {document::AnnotationKind::Datum, tr("Datum on face…"), "pmiDatum"},
+        {document::AnnotationKind::Roughness, tr("Surface roughness…"), "pmiRoughness"}}) {
+        connect(menuAction(annotations, text, name), &QAction::triggered, this, [this, kind] { configureAnnotation(kind); });
+    }
     connect(menuAction(metal,tr("New sheet part…"),"newSheetMetal"),&QAction::triggered,this,[this]{configureSheetMetal();});
     connect(menuAction(metal,tr("Edit sheet part…"),"editSheetMetal"),&QAction::triggered,this,[this]{if(selectedId()) configureSheetMetal(selectedId());});
     connect(menuAction(metal,tr("Create flat drawing…"),"flatDrawing"),&QAction::triggered,this,[this]{showFlatSheet(false);});
@@ -406,11 +430,13 @@ void MainWindow::createMenus()
     });
     connect(editAdvanced_, &QAction::triggered, this, [this] {
         const auto* object = document_.find(selectedId());
-        if (object && document::isAdvanced(object->parameters)) {
+        if (object && (document::isAdvanced(object->parameters) || std::holds_alternative<document::Annotation3d>(object->parameters))) {
             configureAdvanced(objectName(*object), object->parameters, object->id);
         }
     });
     auto* measure = model->addMenu(tr("Measure"));
+    connect(menuAction(measure, tr("Assign catalog material…"), "catalogMaterial"), &QAction::triggered,
+        this, &MainWindow::chooseCatalogMaterial);
     measureBody_ = menuAction(measure, tr("Volume and mass…"), "measureBody");
     measureDistance_ = menuAction(measure, tr("Distance between bodies…"), "measureBodyDistance");
     auto* vertices = menuAction(measure, tr("Distance between vertices"), "measureVertices");
@@ -585,7 +611,7 @@ void MainWindow::createModelTree()
             configureHole(hole.body, hole.face, hole.size, id);
         } else if (object && std::holds_alternative<document::EdgeTreatment>(object->parameters)) {
             configureEdgeTreatment(std::get<document::EdgeTreatment>(object->parameters), id);
-        } else if (object && document::isAdvanced(object->parameters)) {
+        } else if (object && (document::isAdvanced(object->parameters) || std::holds_alternative<document::Annotation3d>(object->parameters))) {
             configureAdvanced(objectName(*object), object->parameters, id);
         } else {
             editSketch(id);
@@ -732,7 +758,8 @@ void MainWindow::updateActions()
     loft_->setEnabled(available && sketches >= 2);
     shell_->setEnabled(available && selectedBody);
     draftAngle_->setEnabled(available && selectedBody);
-    editAdvanced_->setEnabled(available && object && document::isAdvanced(object->parameters));
+    editAdvanced_->setEnabled(available && object && (document::isAdvanced(object->parameters)
+        || std::holds_alternative<document::Annotation3d>(object->parameters)));
     measureBody_->setEnabled(available && selectedBody);
     measureDistance_->setEnabled(available && selectedBody && bodies >= 2);
     finishEdgeSet_->setEnabled(modeling && !pickedEdges_.empty()
@@ -824,6 +851,16 @@ QString MainWindow::objectName(const document::Object& object) const
             return tr("Sheet metal");
         } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
             return tr("Imported mesh");
+        } else if constexpr (std::is_same_v<Type, geometry::SpatialCurve>) {
+            return operation.spline ? tr("Spatial spline") : tr("Spatial polyline");
+        } else if constexpr (std::is_same_v<Type, document::ImportedSurface>) {
+            return tr("Imported free geometry");
+        } else if constexpr (std::is_same_v<Type, document::Surface>) {
+            const std::array names{tr("Surface loft"), tr("Surface sweep"), tr("Curve network"), tr("Trimmed surface"),
+                tr("Extended surface"), tr("Patch"), tr("Sewn shell"), tr("Solid from surfaces"), tr("Open edges")};
+            return names.at(static_cast<std::size_t>(operation.kind));
+        } else if constexpr (std::is_same_v<Type, document::Annotation3d>) {
+            return tr("3D annotation");
         } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
             return operation.kind == geometry::FastenerKind::Bolt ? tr("Hex bolt")
                 : operation.kind == geometry::FastenerKind::Nut ? tr("Hex nut") : tr("Flat washer");
@@ -845,7 +882,7 @@ QString MainWindow::objectDetails(const document::Object& object) const
     if (object.status == document::Status::Ready && document_.configuration().bindings.contains(object.id)) {
         parameters = document_.effectiveParameters(object.id);
     }
-    return std::visit([this](const auto& operation) -> QString {
+    return std::visit([this, &object](const auto& operation) -> QString {
         using Type = std::decay_t<decltype(operation)>;
         const auto source = [this](int id) {
             const auto* input = document_.find(id);
@@ -877,6 +914,20 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return tr("%1 · object #%2").arg(QDir::toNativeSeparators(QString::fromStdString(operation.sourcePath))).arg(operation.sourceObject);
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
             return QString::fromStdString(operation.name);
+        } else if constexpr (std::is_same_v<Type, document::ImportedSurface>) {
+            return QString::fromStdString(operation.name);
+        } else if constexpr (std::is_same_v<Type, document::Surface>) {
+            QStringList sources;
+            for (const auto id : operation.sources) { sources << QString::number(id); }
+            return sources.join(QStringLiteral(", "));
+        } else if constexpr (std::is_same_v<Type, document::Annotation3d>) {
+            const auto value = document_.resolveAnnotation(object.id);
+            if (!value) { return tr("Lost 3D reference"); }
+            if (value->kind == document::AnnotationKind::Linear || value->kind == document::AnnotationKind::Diameter) {
+                return (value->kind == document::AnnotationKind::Diameter ? QStringLiteral("Ø") : QString{})
+                    + tr("%1 mm").arg(value->value, 0, 'g', 8);
+            }
+            return QString::fromStdString(value->text);
         } else if constexpr (std::is_same_v<Type, document::ImportedMesh>) {
             return tr("%1 · %2 triangles").arg(QString::fromStdString(operation.name)).arg(operation.vertices.size()/3);
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
@@ -1857,6 +1908,12 @@ void MainWindow::configureAdvanced(const QString& title, const document::Paramet
     if (pages_->currentWidget() != viewport_ || pendingMachining_) {
         return;
     }
+    if (std::holds_alternative<geometry::SpatialCurve>(defaults)) { configureSpatialCurve(editing); return; }
+    if (const auto* surface = std::get_if<document::Surface>(&defaults)) { configureSurface(surface->kind, editing); return; }
+    if (const auto* annotation = std::get_if<document::Annotation3d>(&defaults)) {
+        configureAnnotation(annotation->kind, editing);
+        return;
+    }
     try {
         const auto result = advancedParameters(this, title, document_, defaults, editing);
         if (!result) {
@@ -1892,7 +1949,7 @@ void MainWindow::measureBody()
     }
     const int id = body->id;
     try {
-        if (const auto value = bodyPropertiesDialog(this, *body)) {
+        if (const auto value = bodyPropertiesDialog(this, document_, *body)) {
             if (document_.setDensity(id, *value > 0 ? value : std::nullopt)) {
                 refreshDocument(id);
                 report(tr("Material density saved."));

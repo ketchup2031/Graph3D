@@ -982,6 +982,47 @@ bool draftHit(const DraftItem& item, QPointF point, double tolerance)
     return stroke.createStroke(path).contains(point);
 }
 
+static void paintTransferredAnnotations(QPainter& painter, const ModelViews& model)
+{
+    for (const auto& annotation : model.annotations) {
+        if (!model.showBase[annotation.view]) { continue; }
+        const auto& slot = model.layout[annotation.view];
+        const auto onPaper = [&](QPointF position) {
+            return slot.center + QPointF(position.x(), -position.y()) * slot.scale;
+        };
+        const auto a = onPaper(annotation.first), b = onPaper(annotation.second);
+        DraftItem item{DraftKind::Leader, a, b, a + QPointF(8, -9), annotation.text};
+        switch (annotation.kind) {
+        case ModelAnnotationKind::Linear: {
+            const QLineF segment(a, b);
+            if (segment.length() > .01 && annotation.value > 0) {
+                item.kind = DraftKind::Aligned;
+                item.label = (a + b) / 2 + QPointF(segment.dy(), -segment.dx()) * (8 / segment.length());
+                item.measurementScale = segment.length() / annotation.value;
+            } else {
+                item.text = QString::number(annotation.value, 'g', 8);
+            }
+            break;
+        }
+        case ModelAnnotationKind::Diameter:
+            if (annotation.faceOn && annotation.value > 0) {
+                item.kind = DraftKind::Diameter;
+                item.b = a + QPointF(annotation.value * slot.scale * .5, 0);
+                item.measurementScale = slot.scale;
+            } else {
+                item.text = QStringLiteral("⌀") + QString::number(annotation.value, 'g', 8);
+            }
+            break;
+        case ModelAnnotationKind::Datum: item.kind = DraftKind::Datum; break;
+        case ModelAnnotationKind::Roughness:
+            item.kind = DraftKind::Roughness;
+            item.text = QStringLiteral("Ra %1").arg(annotation.text);
+            break;
+        }
+        paintDraftItem(painter, item, false);
+    }
+}
+
 static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int selected,
                             const DraftItem* preview, int sheet, int total, bool construction)
 {
@@ -1009,6 +1050,7 @@ static void paintSheetDraft(QPainter& p, const Draft& draft, bool grid, int sele
     if (draft.modelViews) {
         paintModelViews(p, *draft.modelViews, draft.paper.eskd);
         paintPositionCallouts(p, *draft.modelViews);
+        paintTransferredAnnotations(p, *draft.modelViews);
     }
     const DraftGeometry geometry(draft, preview);
     for (const bool hatches : {true, false}) {

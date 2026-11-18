@@ -226,6 +226,11 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
     modelRefresh_->setObjectName(QStringLiteral("linkedViewsRefresh"));
     modelSettings_ = views->addAction(tr("View layout and section…"), this, &DraftWindow::editModelViews);
     modelSettings_->setObjectName(QStringLiteral("linkedViewsSettings"));
+    auto* transferAnnotations = views->addAction(tr("Transfer 3D annotations…"), this, &DraftWindow::manageModelAnnotations);
+    transferAnnotations->setObjectName(QStringLiteral("transferModelAnnotations"));
+    connect(views, &QMenu::aboutToShow, this, [this, transferAnnotations] {
+        transferAnnotations->setEnabled(draft_.modelViews.has_value());
+    });
     views->addAction(tr("Arrange and add views…"), this, &DraftWindow::manageDrawingViews)
         ->setObjectName(QStringLiteral("manageDrawingViews"));
     sectionLine_ = views->addAction(tr("Place section line on view"), this, &DraftWindow::placeSectionLine);
