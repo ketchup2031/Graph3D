@@ -16,6 +16,8 @@
 #include <utility>
 
 namespace graph3d::document {
+Parameters applyBindings(const Parameters&, const Expressions&, const FormulaValues&);
+void validateConfiguration(const Configuration&, const std::vector<Object>&);
 namespace {
 
 template<class... Functions>
@@ -45,6 +47,9 @@ std::vector<ObjectId> inputs(const Parameters& parameters)
         [](const Hole& p) { return std::vector{p.body}; },
         [](const EdgeTreatment& p) { return std::vector{p.body}; },
         [](const Transform& p) { return std::vector{p.body}; },
+        [](const FeaturePattern& p) { return p.path ? std::vector{p.seed, p.path} : std::vector{p.seed}; },
+        [](const MoveFace& p) { return std::vector{p.body}; },
+        [](const RemoveBlend& p) { return std::vector{p.body}; },
         [](const auto&) { return std::vector<ObjectId>{}; }
     }, parameters);
 }
@@ -144,6 +149,14 @@ void validateAdvancedInputs(const std::vector<Object>& state, const Parameters& 
         },
         [&](const Shell& p) { requireBody(prior(p.body)); },
         [&](const DraftAngle& p) { requireBody(prior(p.body)); },
+        [&](const FeaturePattern& p) {
+            if (!featureBase(prior(p.seed).parameters)) { throw std::invalid_argument("Select an individual operation as the pattern seed."); }
+            if (p.path && (!requireSketch(prior(p.path)).trajectory || p.step != geometry::Point3{})) {
+                throw std::invalid_argument("Select a finished trajectory sketch.");
+            }
+        },
+        [&](const MoveFace& p) { requireBody(prior(p.body)); },
+        [&](const RemoveBlend& p) { requireBody(prior(p.body)); },
         [](const auto&) {}
     }, parameters);
 }
@@ -192,8 +205,28 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [&state](const EdgeTreatment& p) {
             auto edges = p.additionalEdges;
             edges.insert(edges.begin(), p.edge);
-            return geometry::treatEdges(objectAt(state, p.body).shape, edges, p.kind, p.size);
+            return geometry::treatEdges(objectAt(state, p.body).shape, edges, p.kind, p.size, p.followTangency, p.endRadius);
         },
+        [&state](const FeaturePattern& p) {
+            const auto& seed = objectAt(state, p.seed);
+            const auto& base = objectAt(state, featureBase(seed.parameters));
+            if (p.count < 2 || p.count > geometry::maxArrayInstances) {
+                throw std::invalid_argument("Use 2 to 100 pattern instances.");
+            }
+            std::vector<geometry::Point3> offsets;
+            if (p.path) {
+                offsets = geometry::pathArrayOffsets(TopoDS::Wire(objectAt(state, p.path).shape), p.count, p.reverse);
+            } else {
+                if (!std::isfinite(std::hypot(p.step[0], p.step[1], p.step[2]))
+                    || std::hypot(p.step[0], p.step[1], p.step[2]) < 1.e-6) {
+                    throw std::invalid_argument("Enter a nonzero pattern step.");
+                }
+                for (int i = 1; i < p.count; ++i) { offsets.push_back({i*p.step[0], i*p.step[1], i*p.step[2]}); }
+            }
+            return geometry::patternFeature(base.shape, seed.shape, offsets);
+        },
+        [&state](const MoveFace& p) { return geometry::movePlanarFace(objectAt(state, p.body).shape, p.face, p.distance); },
+        [&state](const RemoveBlend& p) { return geometry::removeBlend(objectAt(state, p.body).shape, p.face); },
         [&state](const Transform& p) {
             return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
         },
@@ -248,7 +281,21 @@ bool isAdvanced(const Parameters& parameters)
 {
     return std::holds_alternative<geometry::DatumPlane>(parameters) || std::holds_alternative<geometry::DatumAxis>(parameters)
         || std::holds_alternative<Sweep>(parameters) || std::holds_alternative<Loft>(parameters)
-        || std::holds_alternative<Shell>(parameters) || std::holds_alternative<DraftAngle>(parameters);
+        || std::holds_alternative<Shell>(parameters) || std::holds_alternative<DraftAngle>(parameters)
+        || std::holds_alternative<FeaturePattern>(parameters) || std::holds_alternative<MoveFace>(parameters)
+        || std::holds_alternative<RemoveBlend>(parameters);
+}
+
+ObjectId featureBase(const Parameters& parameters)
+{
+    return std::visit([](const auto& p) -> ObjectId {
+        using T = std::decay_t<decltype(p)>;
+        if constexpr (std::is_same_v<T, Hole> || std::is_same_v<T, EdgeTreatment>
+            || std::is_same_v<T, MoveFace> || std::is_same_v<T, RemoveBlend>
+            || std::is_same_v<T, Shell> || std::is_same_v<T, DraftAngle>) { return p.body; }
+        else if constexpr (std::is_same_v<T, Boolean>) { return p.first; }
+        return 0;
+    }, parameters);
 }
 
 ObjectId Document::addPrimitive(geometry::Primitive kind)
@@ -278,6 +325,16 @@ bool Document::editSketch(ObjectId id, geometry::Sketch sketch)
     const auto& original = requireSketch(objectAt(objects_, id));
     if (original == sketch) {
         return false;
+    }
+    if (configuration_.bindings.contains(id)) {
+        for (std::size_t i = 0; i < original.constraints.size(); ++i) {
+            if (!configuration_.bindings.at(id).contains("dimension." + std::to_string(i + 1))) { continue; }
+            if (i >= sketch.constraints.size() || original.constraints[i].kind != sketch.constraints[i].kind
+                || original.constraints[i].first != sketch.constraints[i].first
+                || original.constraints[i].second != sketch.constraints[i].second) {
+                throw std::invalid_argument("Remove the formula before changing its sketch dimension.");
+            }
+        }
     }
     validateAdvancedInputs(objects_, Parameters(sketch), id);
     if (sketch.support) {
@@ -361,6 +418,12 @@ ObjectId Document::addAdvanced(Parameters parameters)
     return append(std::move(parameters));
 }
 
+ObjectId Document::addEdgeTreatment(EdgeTreatment treatment)
+{
+    requireBody(objectAt(objects_, treatment.body));
+    return append(std::move(treatment));
+}
+
 bool Document::editAdvanced(ObjectId id, Parameters parameters)
 {
     const auto& before = objectAt(objects_, id).parameters;
@@ -371,7 +434,8 @@ bool Document::editAdvanced(ObjectId id, Parameters parameters)
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, geometry::DatumPlane> || std::is_same_v<T, geometry::DatumAxis>
             || std::is_same_v<T, Sweep> || std::is_same_v<T, Loft> || std::is_same_v<T, Shell>
-            || std::is_same_v<T, DraftAngle>) {
+            || std::is_same_v<T, DraftAngle> || std::is_same_v<T, FeaturePattern>
+            || std::is_same_v<T, MoveFace> || std::is_same_v<T, RemoveBlend>) {
             return value == std::get<T>(before);
         }
         return false;
@@ -381,11 +445,14 @@ bool Document::editAdvanced(ObjectId id, Parameters parameters)
     // Keep the operation's dependencies and visibility rules stable while editing it.
     const auto currentInputs = inputs(parameters);
     const auto oldInputs = inputs(before);
-    if (!std::is_permutation(currentInputs.begin(), currentInputs.end(), oldInputs.begin(), oldInputs.end())) {
+    const auto* newPattern = std::get_if<FeaturePattern>(&parameters);
+    if (newPattern ? newPattern->seed != std::get<FeaturePattern>(before).seed
+        : !std::is_permutation(currentInputs.begin(), currentInputs.end(), oldInputs.begin(), oldInputs.end())) {
         throw std::invalid_argument("Edit the parameters of the original inputs.");
     }
     validateAdvancedInputs(objects_, parameters, id);
     auto next = objects_;
+    if (newPattern && newPattern->path) { next[newPattern->path - 1].visible = false; }
     next[id - 1].parameters = std::move(parameters);
     rebuild(next, id - 1);
     commit(std::move(next));
@@ -505,7 +572,7 @@ geometry::AssemblySolution Document::assemblySolution(const Assembly& assembly) 
     return geometry::solveAssembly(placedBodies(objects_, assembly), assembly.mates);
 }
 
-Document Document::fromDefinitions(std::vector<Definition> definitions)
+Document Document::fromDefinitions(std::vector<Definition> definitions, Configuration configuration)
 {
     Document document;
     auto& records = document.objects_;
@@ -549,7 +616,9 @@ Document Document::fromDefinitions(std::vector<Definition> definitions)
         }
         records.push_back({id, std::move(definition.parameters), {}, Status::Ready, {}, definition.visible, definition.densityKgM3, std::move(definition.properties)});
     }
-    rebuild(records, 0, true);
+    validateConfiguration(configuration, records);
+    document.configuration_ = std::move(configuration);
+    document.rebuild(records, 0, true);
     for (const auto& object : records) {
         if (object.status != Status::Ready
             && (std::holds_alternative<Primitive>(object.parameters)
@@ -623,8 +692,7 @@ bool Document::editHole(ObjectId id, geometry::HoleSize size)
     if (!operation) {
         throw std::invalid_argument("Select a Hole operation.");
     }
-    if (operation->size.diameter == size.diameter && operation->size.depth == size.depth
-        && operation->size.through == size.through) {
+    if (operation->size == size) {
         return false;
     }
     auto next = objects_;
@@ -640,11 +708,22 @@ bool Document::editEdgeTreatment(ObjectId id, double size)
     if (!operation) {
         throw std::invalid_argument("Select a Chamfer or Fillet operation.");
     }
-    if (operation->size == size) {
+    auto treatment = *operation;
+    treatment.size = size;
+    return editEdgeTreatment(id, std::move(treatment));
+}
+
+bool Document::editEdgeTreatment(ObjectId id, EdgeTreatment treatment)
+{
+    const auto* operation = std::get_if<EdgeTreatment>(&objectAt(objects_, id).parameters);
+    if (!operation || operation->body != treatment.body || operation->kind != treatment.kind) {
+        throw std::invalid_argument("Select a matching edge treatment.");
+    }
+    if (*operation == treatment) {
         return false;
     }
     auto next = objects_;
-    std::get<EdgeTreatment>(next[id - 1].parameters).size = size;
+    next[id - 1].parameters = std::move(treatment);
     rebuild(next, id - 1);
     commit(std::move(next));
     return true;
@@ -698,11 +777,18 @@ bool Document::editAssembly(ObjectId id, Assembly assembly)
 }
 
 void Document::rebuild(State& state, std::size_t first, bool all)
+    const
+{
+    rebuildConfigured(state, first, all, configuration_);
+}
+
+void Document::rebuildConfigured(State& state, std::size_t first, bool all, const Configuration& config)
 {
     if (state.empty()) {
         return;
     }
     std::vector<bool> changed(state.size(), all);
+    const auto formulaValues = config.bindings.empty() ? FormulaValues{} : resolveFormulas(config);
     changed[first] = true;
     for (std::size_t i = first; i < state.size(); ++i) {
         auto& object = state[i];
@@ -729,7 +815,11 @@ void Document::rebuild(State& state, std::size_t first, bool all)
             continue;
         }
         try {
-            object.shape = evaluate(state, object.parameters);
+            if (const auto binding = config.bindings.find(object.id); binding != config.bindings.end()) {
+                object.shape = evaluate(state, applyBindings(object.parameters, binding->second, formulaValues));
+            } else {
+                object.shape = evaluate(state, object.parameters);
+            }
         } catch (const Standard_Failure& error) {
             object.status = Status::Failed;
             const auto* message = error.GetMessageString();
@@ -754,16 +844,17 @@ bool Document::setVisible(ObjectId id, bool visible)
 
 bool Document::clear()
 {
-    if (objects_.empty()) {
+    if (objects_.empty() && configuration_ == Configuration{}) {
         return false;
     }
     commit({});
+    configuration_ = {};
     return true;
 }
 
 void Document::commit(State next)
 {
-    undo_.push_back({std::move(objects_), revision_});
+    undo_.push_back({std::move(objects_), revision_, configuration_});
     objects_ = std::move(next);
     revision_ = nextRevision_++;
     redo_.clear();
@@ -774,9 +865,10 @@ bool Document::undo()
     if (!canUndo()) {
         return false;
     }
-    redo_.push_back({std::move(objects_), revision_});
+    redo_.push_back({std::move(objects_), revision_, std::move(configuration_)});
     revision_ = undo_.back().revision;
     objects_ = std::move(undo_.back().objects);
+    configuration_ = std::move(undo_.back().configuration);
     undo_.pop_back();
     return true;
 }
@@ -786,9 +878,10 @@ bool Document::redo()
     if (!canRedo()) {
         return false;
     }
-    undo_.push_back({std::move(objects_), revision_});
+    undo_.push_back({std::move(objects_), revision_, std::move(configuration_)});
     revision_ = redo_.back().revision;
     objects_ = std::move(redo_.back().objects);
+    configuration_ = std::move(redo_.back().configuration);
     redo_.pop_back();
     return true;
 }
@@ -797,6 +890,59 @@ void Document::clearHistory()
 {
     undo_.clear();
     redo_.clear();
+}
+
+bool Document::setConfiguration(Configuration configuration)
+{
+    if (configuration_ == configuration) { return false; }
+    validateConfiguration(configuration, objects_);
+    const auto validateGeometry = [&](const Configuration& candidate) {
+        auto built = objects_;
+        rebuildConfigured(built, 0, true, candidate);
+        for (const auto& object : built) {
+            if (object.status == Status::Failed && (candidate.bindings.contains(object.id)
+                || objects_[object.id - 1].status == Status::Ready)) {
+                const auto variant = candidate.activeVariant.empty() ? "" : candidate.activeVariant + " / ";
+                throw std::invalid_argument(variant + "Object #" + std::to_string(object.id) + ": " + object.error);
+            }
+        }
+        return built;
+    };
+    // Verify every new or edited execution before recording a family. Switching an
+    // existing variant rebuilds just that variant.
+    auto previousDefinitions = configuration_;
+    previousDefinitions.activeVariant = configuration.activeVariant;
+    if (previousDefinitions != configuration && !configuration.bindings.empty()) {
+        auto candidate = configuration;
+        if (!candidate.activeVariant.empty()) {
+            candidate.activeVariant.clear();
+            validateGeometry(candidate);
+        }
+        for (const auto& [label, overrides] : configuration.variants) {
+            if (label == configuration.activeVariant) { continue; }
+            candidate.activeVariant = label;
+            validateGeometry(candidate);
+        }
+    }
+    auto next = validateGeometry(configuration);
+    commit(std::move(next));
+    configuration_ = std::move(configuration);
+    return true;
+}
+
+bool Document::selectVariant(std::string name)
+{
+    auto configuration = configuration_;
+    configuration.activeVariant = std::move(name);
+    return setConfiguration(std::move(configuration));
+}
+
+Parameters Document::effectiveParameters(ObjectId id) const
+{
+    const auto& object = objectAt(objects_, id);
+    const auto binding = configuration_.bindings.find(id);
+    return binding == configuration_.bindings.end() ? object.parameters
+        : applyBindings(object.parameters, binding->second, resolveFormulas(configuration_));
 }
 
 const Object* Document::find(ObjectId id) const

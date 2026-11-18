@@ -105,6 +105,12 @@ struct ModelTitleData {
     QString designation;
     std::optional<double> massKg;
 };
+struct ThreadCallout {
+    int view;
+    QPointF center; // View coordinates, Y is upwards.
+    double diameter;
+    QString designation;
+};
 
 struct ModelViews {
     QString sourcePath;
@@ -120,6 +126,8 @@ struct ModelViews {
     std::array<bool, 3> showBase{true, true, true};
     std::vector<DrawingView> additional;
     ModelTitleData titleData;
+    std::optional<QString> variant;
+    std::vector<ThreadCallout> threads;
 };
 
 struct LocatedView {

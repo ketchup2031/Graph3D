@@ -119,7 +119,9 @@ MainWindow::MainWindow(DocumentWindow* host)
         });
     connect(properties_, &PropertyPanel::holeEdited, this, [this](int id, double diameter, double depth, bool through) {
         editFeature(id, [this, id, diameter, depth, through] {
-            return document_.editHole(id, {diameter, depth, through});
+            auto size = std::get<document::Hole>(document_.find(id)->parameters).size;
+            size.diameter = diameter; size.depth = depth; size.through = through;
+            return document_.editHole(id, size);
         });
     });
     connect(properties_, &PropertyPanel::edgeTreatmentEdited, this, [this](int id, double size) {
@@ -132,6 +134,11 @@ MainWindow::MainWindow(DocumentWindow* host)
     connect(properties_, &PropertyPanel::assemblyEditRequested, this, &MainWindow::configureAssembly);
     connect(viewport_, &Viewport::operationFailed, this, &MainWindow::showSceneError);
     connect(viewport_, &Viewport::facePicked, this, &MainWindow::makeHole);
+    connect(viewport_, &Viewport::blendPicked, this, [this](int id, const geometry::BlendReference& face) {
+        if (pendingMachining_ != Machining::RemoveBlend) { return; }
+        endMachining(id);
+        addFeature(tr("Remove blend"), [this, id, face] { return document_.addAdvanced(document::RemoveBlend{id, face}); });
+    });
     connect(viewport_, &Viewport::edgePicked, this, &MainWindow::makeEdgeTreatment);
     connect(viewport_, &Viewport::vertexPicked, this, [this](int, const geometry::Point3& point) {
         if (pendingMachining_ != Machining::MeasureVertices) {
@@ -325,6 +332,9 @@ void MainWindow::createMenus()
     connect(editSketch_, &QAction::triggered, this, [this] { editSketch(selectedId()); });
 
     auto* model = menuBar()->addMenu(tr("&Model"));
+    variables_ = menuAction(model, tr("Variables and variants…"), "modelVariables");
+    connect(variables_, &QAction::triggered, this, &MainWindow::editVariables);
+    model->addSeparator();
     extrude_ = menuAction(model, tr("Extrude sketch…"), "extrudeSketch");
     revolve_ = menuAction(model, tr("Revolve sketch…"), "revolveSketch");
     connect(extrude_, &QAction::triggered, this, &MainWindow::extrudeCurrent);
@@ -345,10 +355,14 @@ void MainWindow::createMenus()
         machiningActions_.append(action);
     };
     machiningAction(tr("Hole…"), "makeHole", Machining::Hole);
+    machiningAction(tr("Move flat face…"), "moveFlatFace", Machining::MoveFace);
+    machiningAction(tr("Remove blend…"), "removeBlend", Machining::RemoveBlend);
     machiningAction(tr("Chamfer…"), "makeChamfer", Machining::Chamfer);
     machiningAction(tr("Fillet…"), "makeFillet", Machining::Fillet);
     machiningAction(tr("Chamfer multiple edges…"), "makeMultiChamfer", Machining::ChamferSet);
     machiningAction(tr("Fillet multiple edges…"), "makeMultiFillet", Machining::FilletSet);
+    featurePattern_ = menuAction(model, tr("Pattern individual operation…"), "patternOperation");
+    connect(featurePattern_, &QAction::triggered, this, [this] { configureFeaturePattern(selectedId()); });
     finishEdgeSet_ = menuAction(model, tr("Finish selecting edges"), "finishEdgeSet");
     connect(finishEdgeSet_, &QAction::triggered, this, &MainWindow::finishEdgeSet);
     connect(viewport_, &Viewport::edgeSetFinished, this, &MainWindow::finishEdgeSet);
@@ -542,6 +556,11 @@ void MainWindow::createModelTree()
         const auto* object = document_.find(id);
         if (object && std::holds_alternative<document::Assembly>(object->parameters)) {
             configureAssembly(id);
+        } else if (object && std::holds_alternative<document::Hole>(object->parameters)) {
+            const auto& hole = std::get<document::Hole>(object->parameters);
+            configureHole(hole.body, hole.face, hole.size, id);
+        } else if (object && std::holds_alternative<document::EdgeTreatment>(object->parameters)) {
+            configureEdgeTreatment(std::get<document::EdgeTreatment>(object->parameters), id);
         } else if (object && document::isAdvanced(object->parameters)) {
             configureAdvanced(objectName(*object), object->parameters, id);
         } else {
@@ -586,6 +605,11 @@ void MainWindow::refreshDocument(int selection)
                     parentId = shell->body;
                 } else if (const auto* draft = std::get_if<document::DraftAngle>(&object.parameters)) {
                     parentId = draft->body;
+                } else if (const auto* pattern = std::get_if<document::FeaturePattern>(&object.parameters)) {
+                    parentId = pattern->seed;
+                } else if (std::holds_alternative<document::MoveFace>(object.parameters)
+                    || std::holds_alternative<document::RemoveBlend>(object.parameters)) {
+                    parentId = document::featureBase(object.parameters);
                 } else if (const auto* extrusion = std::get_if<document::Extrude>(&object.parameters)) {
                     parentId = extrusion->profile;
                 } else if (const auto* revolution = std::get_if<document::Revolve>(&object.parameters)) {
@@ -675,6 +699,8 @@ void MainWindow::updateActions()
     properties_->setEnabled(modeling);
     editSketch_->setEnabled(modeling && sketch && !pendingMachining_);
     const bool available = modeling && !pendingMachining_;
+    variables_->setEnabled(available);
+    featurePattern_->setEnabled(available && object && validBody(*object) && document::featureBase(object->parameters));
     const bool selectedBody = object && validBody(*object);
     newDatumSketch_->setEnabled(available && object && object->status == document::Status::Ready
         && std::holds_alternative<geometry::DatumPlane>(object->parameters));
@@ -746,7 +772,15 @@ QString MainWindow::objectName(const document::Object& object) const
         } else if constexpr (std::is_same_v<Type, document::Imported>) {
             return tr("Imported STEP");
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
+            if (operation.size.style == geometry::HoleStyle::Counterbore) { return tr("Counterbore"); }
+            if (operation.size.style == geometry::HoleStyle::Countersink) { return tr("Countersink"); }
             return tr("Hole");
+        } else if constexpr (std::is_same_v<Type, document::FeaturePattern>) {
+            return tr("Operation pattern");
+        } else if constexpr (std::is_same_v<Type, document::MoveFace>) {
+            return tr("Move flat face");
+        } else if constexpr (std::is_same_v<Type, document::RemoveBlend>) {
+            return tr("Remove blend");
         } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
             return operation.kind == geometry::EdgeTreatmentKind::Chamfer ? tr("Chamfer") : tr("Fillet");
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
@@ -773,6 +807,10 @@ QString MainWindow::objectName(const document::Object& object) const
 
 QString MainWindow::objectDetails(const document::Object& object) const
 {
+    auto parameters = object.parameters;
+    if (object.status == document::Status::Ready && document_.configuration().bindings.contains(object.id)) {
+        parameters = document_.effectiveParameters(object.id);
+    }
     return std::visit([this](const auto& operation) -> QString {
         using Type = std::decay_t<decltype(operation)>;
         const auto source = [this](int id) {
@@ -822,13 +860,19 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return tr("%1 · %2 mm wall").arg(source(operation.body)).arg(operation.thickness);
         } else if constexpr (std::is_same_v<Type, document::DraftAngle>) {
             return tr("%1 · %2°").arg(source(operation.body)).arg(operation.degrees);
+        } else if constexpr (std::is_same_v<Type, document::FeaturePattern>) {
+            return tr("%1 · %2 instances").arg(source(operation.seed)).arg(operation.count);
+        } else if constexpr (std::is_same_v<Type, document::MoveFace>) {
+            return tr("%1 · %2 mm").arg(source(operation.body)).arg(operation.distance);
+        } else if constexpr (std::is_same_v<Type, document::RemoveBlend>) {
+            return source(operation.body);
         } else if constexpr (std::is_same_v<Type, document::Transform>) {
             return source(operation.body);
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
             return tr("Components: %1").arg(operation.components.size());
         }
         return {};
-    }, object.parameters);
+    }, parameters);
 }
 
 void MainWindow::beginSketch(geometry::Plane plane)
@@ -1252,7 +1296,8 @@ void MainWindow::startMachining(Machining operation)
         return;
     }
     const auto pick = operation == Machining::SketchFace ? SubshapePick::SketchFace
-        : operation == Machining::Hole ? SubshapePick::Face
+        : operation == Machining::Hole || operation == Machining::MoveFace ? SubshapePick::Face
+        : operation == Machining::RemoveBlend ? SubshapePick::Blend
         : operation == Machining::MeasureVertices ? SubshapePick::Vertex
         : operation == Machining::ChamferSet || operation == Machining::FilletSet ? SubshapePick::EdgeSet
         : SubshapePick::Edge;
@@ -1260,6 +1305,8 @@ void MainWindow::startMachining(Machining operation)
         pendingMachining_ = operation;
         updateActions();
         statusBar()->showMessage(pick == SubshapePick::SketchFace ? tr("Click a planar face for the sketch. Esc cancels.")
+            : operation == Machining::MoveFace ? tr("Click a planar face to move. Esc cancels.")
+            : pick == SubshapePick::Blend ? tr("Click a blend face to remove. Esc cancels.")
             : pick == SubshapePick::Face ? tr("Click the hole center on a planar face. Esc cancels.")
             : pick == SubshapePick::Vertex ? tr("Pick the first vertex on the selected body. Esc cancels.")
             : pick == SubshapePick::EdgeSet ? tr("Select edges and press Enter to confirm. Esc cancels.")
@@ -1527,10 +1574,27 @@ void MainWindow::makeHole(int id, const geometry::FaceReference& face)
         beginSketch(sketch);
         return;
     }
+    if (pendingMachining_ == Machining::MoveFace) {
+        endMachining(id);
+        bool accepted = false;
+        const auto distance = QInputDialog::getDouble(this, tr("Move flat face"), tr("Outward displacement (mm)"),
+            5, -100000, 100000, 3, &accepted);
+        if (accepted) {
+            addFeature(tr("Move flat face"), [=, this] {
+                return document_.addAdvanced(document::MoveFace{id, face, distance});
+            });
+        }
+        return;
+    }
     if (pendingMachining_ != Machining::Hole) {
         return;
     }
     endMachining(id);
+    configureHole(id, face, {10, 10, true});
+}
+
+void MainWindow::configureHole(int id, const geometry::FaceReference& face, geometry::HoleSize size, int editing)
+{
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("holeDialog"));
     dialog.setWindowTitle(tr("Hole"));
@@ -1538,28 +1602,72 @@ void MainWindow::makeHole(int id, const geometry::FaceReference& face)
     auto* diameter = new QDoubleSpinBox(&dialog);
     diameter->setObjectName(QStringLiteral("holeDiameter"));
     diameter->setRange(0.01, 100000);
-    diameter->setValue(10);
+    diameter->setValue(size.diameter);
     diameter->setSuffix(tr(" mm"));
     form->addRow(tr("Diameter"), diameter);
     auto* through = new QCheckBox(tr("Through"), &dialog);
     through->setObjectName(QStringLiteral("holeThrough"));
-    through->setChecked(true);
+    through->setChecked(size.through);
     form->addRow(through);
     auto* depth = new QDoubleSpinBox(&dialog);
     depth->setObjectName(QStringLiteral("holeDepth"));
     depth->setRange(0.01, 100000);
-    depth->setValue(10);
+    depth->setValue(size.depth);
     depth->setSuffix(tr(" mm"));
-    depth->setEnabled(false);
+    depth->setEnabled(!size.through);
     form->addRow(tr("Blind depth"), depth);
     connect(through, &QCheckBox::toggled, depth, &QDoubleSpinBox::setDisabled);
+    auto* style = new QComboBox(&dialog);
+    style->addItems({tr("Straight hole"), tr("Counterbore"), tr("Countersink")});
+    style->setCurrentIndex(static_cast<int>(size.style));
+    form->addRow(tr("Hole type"), style);
+    const auto number = [&](const QString& label, double value, double min = 0.01, double max = 100000.) {
+        auto* field = new QDoubleSpinBox(&dialog);
+        field->setDecimals(3);
+        field->setRange(min, max);
+        field->setValue(value);
+        form->addRow(label, field);
+        return field;
+    };
+    const auto head = number(tr("Head diameter (mm)"), size.headDiameter > 0 ? size.headDiameter : 16);
+    const auto recess = number(tr("Counterbore depth (mm)"), size.style == geometry::HoleStyle::Counterbore ? size.seat : 3);
+    const auto angle = number(tr("Countersink included angle (°)"),
+        size.style == geometry::HoleStyle::Countersink ? size.seat : 90, 30, 150);
+    connect(style, &QComboBox::currentIndexChanged, &dialog, [=](int i) {
+        head->setEnabled(i != 0); recess->setEnabled(i == 1); angle->setEnabled(i == 2);
+    });
+    head->setEnabled(style->currentIndex() != 0);
+    recess->setEnabled(style->currentIndex() == 1);
+    angle->setEnabled(style->currentIndex() == 2);
+    auto* threaded = new QCheckBox(tr("Thread designation"), &dialog);
+    threaded->setChecked(size.thread.has_value());
+    form->addRow(threaded);
+    auto* nominal = number(tr("Thread diameter (mm)"), size.thread ? size.thread->diameter : 12);
+    auto* pitch = number(tr("Thread pitch (mm)"), size.thread ? size.thread->pitch : 1.75);
+    auto* length = number(tr("Thread length (mm)"), size.thread ? size.thread->length : 6);
+    auto* left = new QCheckBox(tr("Left-handed thread"), &dialog);
+    left->setChecked(size.thread && size.thread->leftHanded);
+    form->addRow(left);
+    for (auto* widget : std::array<QWidget*, 4>{nominal, pitch, length, left}) {
+        widget->setEnabled(threaded->isChecked());
+        connect(threaded, &QCheckBox::toggled, widget, &QWidget::setEnabled);
+    }
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (dialog.exec() == QDialog::Accepted) {
-        const geometry::HoleSize size{diameter->value(), depth->value(), through->isChecked()};
-        addFeature(tr("Hole"), [this, id, face, size] { return document_.addHole(id, face, size); });
+        geometry::HoleSize staged{diameter->value(), depth->value(), through->isChecked()};
+        staged.style = static_cast<geometry::HoleStyle>(style->currentIndex());
+        if (staged.style != geometry::HoleStyle::Straight) {
+            staged.headDiameter = head->value();
+            staged.seat = staged.style == geometry::HoleStyle::Counterbore ? recess->value() : angle->value();
+        }
+        if (threaded->isChecked()) {
+            staged.thread = geometry::ThreadSize{nominal->value(), pitch->value(), length->value(), left->isChecked()};
+        }
+        if (editing) { editFeature(editing, [=, this] { return document_.editHole(editing, staged); }); }
+        else { addFeature(tr("Hole"), [=, this] { return document_.addHole(id, face, staged); }); }
     } else {
         statusBar()->showMessage(tr("Hole cancelled"));
     }
@@ -1606,15 +1714,49 @@ void MainWindow::finishEdgeSet()
 
 void MainWindow::applyEdgeTreatment(int id, geometry::EdgeTreatmentKind kind, std::vector<geometry::EdgeReference> edges)
 {
-    const bool chamfer = kind == geometry::EdgeTreatmentKind::Chamfer;
+    configureEdgeTreatment({id, edges.front(), kind, 2, {edges.begin() + 1, edges.end()}});
+}
+
+void MainWindow::configureEdgeTreatment(document::EdgeTreatment treatment, int editing)
+{
+    const bool chamfer = treatment.kind == geometry::EdgeTreatmentKind::Chamfer;
     const auto title = chamfer ? tr("Chamfer") : tr("Fillet");
-    bool accepted = false;
-    const auto value = QInputDialog::getDouble(this, title,
-        chamfer ? tr("Equal distances (mm)") : tr("Radius (mm)"), 2, 0.01, 100000, 2, &accepted);
-    if (accepted) {
-        addFeature(title, [this, id, &edges, kind, value] {
-            return document_.addEdgeTreatment(id, std::move(edges), kind, value);
-        });
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("edgeTreatmentDialog"));
+    dialog.setWindowTitle(title);
+    auto* form = new QFormLayout(&dialog);
+    const auto number = [&](double value) {
+        auto* field = new QDoubleSpinBox(&dialog);
+        field->setDecimals(3);
+        field->setRange(.01, 100000);
+        field->setValue(value);
+        return field;
+    };
+    auto* size = number(treatment.size);
+    size->setObjectName(QStringLiteral("edgeStartRadius"));
+    form->addRow(chamfer ? tr("Equal distances (mm)") : tr("Radius (mm)"), size);
+    auto* tangency = new QCheckBox(tr("Follow tangent chain"), &dialog);
+    tangency->setChecked(treatment.followTangency);
+    form->addRow(tangency);
+    auto* variable = new QCheckBox(tr("Variable radius"), &dialog);
+    auto* end = number(treatment.endRadius.value_or(1));
+    variable->setChecked(treatment.endRadius.has_value());
+    end->setEnabled(variable->isChecked());
+    if (!chamfer) {
+        form->addRow(variable);
+        form->addRow(tr("End radius (mm)"), end);
+        connect(variable, &QCheckBox::toggled, end, &QWidget::setEnabled);
+    } else { variable->hide(); end->hide(); }
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted) {
+        treatment.size = size->value();
+        treatment.followTangency = tangency->isChecked();
+        treatment.endRadius = variable->isChecked() ? std::optional(end->value()) : std::nullopt;
+        if (editing) { editFeature(editing, [&, this] { return document_.editEdgeTreatment(editing, treatment); }); }
+        else { addFeature(title, [&, this] { return document_.addEdgeTreatment(treatment); }); }
     } else {
         statusBar()->showMessage(tr("%1 cancelled").arg(title));
     }
@@ -1640,6 +1782,16 @@ void MainWindow::configureAdvanced(const QString& title, const document::Paramet
     } catch (const Standard_Failure& error) {
         showSceneError(localizedDiagnostic(error.GetMessageString()));
     }
+}
+
+void MainWindow::configureFeaturePattern(int seed)
+{
+    const auto* object = document_.find(seed);
+    if (!object || !document::featureBase(object->parameters)) {
+        report(tr("Select an individual operation in the model tree."));
+        return;
+    }
+    configureAdvanced(tr("Operation pattern"), document::FeaturePattern{seed, 4, {20, 0, 0}});
 }
 
 void MainWindow::measureBody()

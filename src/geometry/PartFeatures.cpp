@@ -4,6 +4,7 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -190,12 +191,39 @@ TopoDS_Edge findEdge(const TopoDS_Solid& solid, const EdgeReference& reference)
 }
 
 template<class Builder>
-TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const std::vector<TopoDS_Edge>& edges, double size)
+TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const std::vector<TopoDS_Edge>& edges,
+                            double size, bool follow, std::optional<double> end)
 {
     Builder operation(body);
     for (const auto& edge : edges) {
         if (operation.Contour(edge) == 0) {
-            operation.Add(size, edge);
+            if constexpr (std::is_same_v<Builder, BRepFilletAPI_MakeFillet>) {
+                operation.Add(size, edge);
+                if (end) {
+                    const auto index = operation.Contour(edge);
+                    if (!index) { throw std::invalid_argument("Cannot start a fillet on this edge."); }
+                    double total = 0;
+                    std::vector<double> lengths;
+                    for (int j = 1; j <= operation.NbEdges(index); ++j) {
+                        GProp_GProps props;
+                        BRepGProp::LinearProperties(operation.Edge(index, j), props);
+                        lengths.push_back(props.Mass());
+                        total += props.Mass();
+                    }
+                    if (total <= tolerance) { throw std::invalid_argument("The tangent chain is too short."); }
+                    if (operation.Closed(index) && size != *end) {
+                        throw std::invalid_argument("A closed tangent chain requires equal end radii.");
+                    }
+                    double position = 0;
+                    for (int j = 1; j <= operation.NbEdges(index); ++j) {
+                        const auto start = std::lerp(size, *end, position / total);
+                        position += lengths[j - 1];
+                        operation.SetRadius(start, std::lerp(size, *end, position / total), index, j);
+                    }
+                }
+            } else {
+                operation.Add(size, edge);
+            }
         }
     }
     for (const auto& edge : edges) {
@@ -203,7 +231,7 @@ TopoDS_Shape finishTreatment(const TopoDS_Solid& body, const std::vector<TopoDS_
             throw std::invalid_argument("Every selected edge must support the edge treatment.");
         }
     }
-    for (int i = 1; i <= operation.NbContours(); ++i) {
+    for (int i = 1; !follow && i <= operation.NbContours(); ++i) {
         for (int j = 1; j <= operation.NbEdges(i); ++j) {
             if (std::ranges::none_of(edges, [&](const auto& edge) { return edge.IsSame(operation.Edge(i, j)); })) {
                 throw std::invalid_argument("Select every edge in a tangent chain.");
@@ -366,7 +394,25 @@ TopoDS_Shape drillHole(const TopoDS_Shape& body, const FaceReference& reference,
     const auto face = findFace(solid, reference);
     const auto center = point(reference.center);
     const double radius = size.diameter / 2;
-    if (radius + tolerance >= distanceToBoundary(face, center)) {
+    double head = radius;
+    double recess = 0;
+    if (size.style != HoleStyle::Straight) {
+        positive(size.headDiameter, "The head diameter must be positive.");
+        head = size.headDiameter / 2;
+        if (head <= radius + tolerance) { throw std::invalid_argument("The head must be wider than the hole."); }
+        if (size.style == HoleStyle::Counterbore) {
+            recess = size.seat;
+        } else if (size.style == HoleStyle::Countersink) {
+            if (!std::isfinite(size.seat) || size.seat < 30 || size.seat > 150) {
+                throw std::invalid_argument("Use a countersink angle between 30 and 150 degrees.");
+            }
+            recess = (head - radius) / std::tan(size.seat * std::numbers::pi / 360);
+        } else {
+            throw std::invalid_argument("Unknown hole style.");
+        }
+        positive(recess, "The recess depth must be positive.");
+    }
+    if (head + tolerance >= distanceToBoundary(face, center)) {
         throw std::invalid_argument("The hole must fit inside the selected face.");
     }
     const gp_Dir inward(-reference.outward[0], -reference.outward[1], -reference.outward[2]);
@@ -395,13 +441,40 @@ TopoDS_Shape drillHole(const TopoDS_Shape& body, const FaceReference& reference,
     }
     const auto start = center.Translated(-direction * margin);
     const auto cutter = BRepPrimAPI_MakeCylinder(gp_Ax2(start, inward), radius, depth + margin).Shape();
-    const auto result = checkedResult(solid, booleanResult(solid, cutter, BooleanOperation::Difference));
+    if (recess >= depth - tolerance
+        || (recess && BRepClass3d_SolidClassifier(solid, center.Translated(direction * (recess + margin)), tolerance).State() != TopAbs_IN)) {
+        throw std::invalid_argument("The head recess must end inside the hole.");
+    }
+    if (size.thread) {
+        const auto& thread = *size.thread;
+        positive(thread.pitch, "The thread pitch must be positive.");
+        positive(thread.length, "The thread length must be positive.");
+        positive(thread.diameter, "The thread diameter must be positive.");
+        if (thread.diameter < size.diameter || thread.pitch >= thread.diameter || thread.length > depth - recess + tolerance
+            || BRepClass3d_SolidClassifier(solid,
+                center.Translated(direction * (recess + thread.length - margin)), tolerance).State() != TopAbs_IN) {
+            throw std::invalid_argument("The thread must fit inside the available hole depth.");
+        }
+    }
+    auto result = checkedResult(solid, booleanResult(solid, cutter, BooleanOperation::Difference));
+    if (recess) {
+        TopoDS_Shape opening;
+        if (size.style == HoleStyle::Counterbore) {
+            opening = BRepPrimAPI_MakeCylinder(gp_Ax2(start, inward), head, recess + margin).Shape();
+        } else {
+            const auto slope = (head - radius) / recess;
+            opening = BRepPrimAPI_MakeCone(gp_Ax2(start, inward), head + margin * slope, radius, recess + margin).Shape();
+        }
+        result = checkedResult(result, booleanResult(result, opening, BooleanOperation::Difference));
+    }
     const double removed = volume(solid) - volume(result);
     if (!(removed > 0)) {
         throw std::runtime_error("The hole did not remove material.");
     }
     if (!size.through) {
-        const double expected = std::numbers::pi * radius * radius * depth;
+        const double extra = size.style == HoleStyle::Counterbore ? (head * head - radius * radius) * recess
+            : size.style == HoleStyle::Countersink ? (head * head + head * radius - 2 * radius * radius) * recess / 3 : 0;
+        const double expected = std::numbers::pi * (radius * radius * depth + extra);
         if (std::abs(removed - expected) > std::max(1.e-6, expected * 1.e-6)) {
             throw std::invalid_argument("The blind hole intersects another surface or void.");
         }
@@ -415,9 +488,13 @@ TopoDS_Shape treatEdge(const TopoDS_Shape& body, const EdgeReference& reference,
 }
 
 TopoDS_Shape treatEdges(const TopoDS_Shape& body, std::span<const EdgeReference> references,
-                       EdgeTreatmentKind kind, double size)
+                       EdgeTreatmentKind kind, double size, bool follow, std::optional<double> end)
 {
     positive(size, "Enter a positive chamfer distance or fillet radius.");
+    if (end) {
+        positive(*end, "Enter a positive end radius.");
+        if (kind != EdgeTreatmentKind::Fillet) { throw std::invalid_argument("Only fillets support a variable radius."); }
+    }
     if (references.empty() || references.size() > 64) {
         throw std::invalid_argument("Select between one and 64 edges.");
     }
@@ -431,8 +508,8 @@ TopoDS_Shape treatEdges(const TopoDS_Shape& body, std::span<const EdgeReference>
         edges.push_back(edge);
     }
     switch (kind) {
-    case EdgeTreatmentKind::Chamfer: return finishTreatment<BRepFilletAPI_MakeChamfer>(solid, edges, size);
-    case EdgeTreatmentKind::Fillet: return finishTreatment<BRepFilletAPI_MakeFillet>(solid, edges, size);
+    case EdgeTreatmentKind::Chamfer: return finishTreatment<BRepFilletAPI_MakeChamfer>(solid, edges, size, follow, end);
+    case EdgeTreatmentKind::Fillet: return finishTreatment<BRepFilletAPI_MakeFillet>(solid, edges, size, follow, end);
     }
     throw std::invalid_argument("Unknown edge treatment.");
 }

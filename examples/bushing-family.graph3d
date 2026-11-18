@@ -1,0 +1,28 @@
+{
+  "format": "Graph3D",
+  "version": 9,
+  "unit": "mm",
+  "configuration": {
+    "variables": { "outer": "30", "wall": "3", "inner": "outer - 2*wall", "height": "8" },
+    "variants": { "Small": { "outer": "30" }, "Large": { "outer": "40" } },
+    "active": "Small",
+    "bindings": {
+      "1": { "dimension.1": "outer", "dimension.2": "inner" },
+      "2": { "distance": "height" }
+    }
+  },
+  "objects": [
+    {
+      "id": 1, "type": "sketch", "visible": false, "plane": "XY",
+      "entities": [
+        { "type": "circle", "center": [0, 0], "radius": 15 },
+        { "type": "circle", "center": [0, 0], "radius": 12 }
+      ],
+      "constraints": [
+        { "kind": "diameter", "first": [0, 0], "second": [0, 0], "value": 30 },
+        { "kind": "diameter", "first": [1, 0], "second": [0, 0], "value": 24 }
+      ]
+    },
+    { "id": 2, "type": "extrude", "visible": true, "profile": 1, "distance": 8 }
+  ]
+}

@@ -13,7 +13,7 @@ namespace graph3d::document { class Document; }
 namespace graph3d {
 
 enum class ViewDirection { Front, Top, Right, Isometric };
-enum class SubshapePick { Face, Edge, SketchFace, EdgeSet, Vertex };
+enum class SubshapePick { Face, Edge, SketchFace, EdgeSet, Vertex, Blend };
 
 class Viewport final : public QWidget {
     Q_OBJECT
@@ -39,6 +39,7 @@ signals:
     void operationFailed(const QString& message);
     void objectSelected(int id);
     void facePicked(int id, const geometry::FaceReference& face);
+    void blendPicked(int id, const geometry::BlendReference& face);
     void edgePicked(int id, const geometry::EdgeReference& edge);
     void vertexPicked(int id, const geometry::Point3& point);
     void edgeSetFinished();

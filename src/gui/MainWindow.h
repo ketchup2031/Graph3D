@@ -55,7 +55,7 @@ private:
     void openProject();
     void importStep();
     void exportModel(io::ExchangeFormat format);
-    enum class Machining { Hole, Chamfer, Fillet, SketchFace, ChamferSet, FilletSet, MeasureVertices };
+    enum class Machining { Hole, Chamfer, Fillet, SketchFace, ChamferSet, FilletSet, MeasureVertices, MoveFace, RemoveBlend };
     void startMachining(Machining operation);
     void makeHole(int id, const geometry::FaceReference& face);
     void makeEdgeTreatment(int id, const geometry::EdgeReference& edge);
@@ -75,6 +75,10 @@ private:
     void showDrawing();
     void createModelTree();
     void refreshDocument(int selection);
+    void editVariables();
+    void configureHole(int body, const geometry::FaceReference& face, geometry::HoleSize size, int editing = 0);
+    void configureFeaturePattern(int seed);
+    void configureEdgeTreatment(document::EdgeTreatment treatment, int editing = 0);
     void updateSelection();
     void updateActions();
     void beginSketch(geometry::Plane plane);
@@ -134,6 +138,8 @@ private:
     std::optional<Machining> pendingMachining_;
     QAction* finishEdgeSet_ = nullptr;
     QAction* editAdvanced_ = nullptr;
+    QAction* variables_ = nullptr;
+    QAction* featurePattern_ = nullptr;
     QAction* sweep_ = nullptr;
     QAction* loft_ = nullptr;
     QAction* shell_ = nullptr;

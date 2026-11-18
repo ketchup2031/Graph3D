@@ -2204,8 +2204,9 @@ private slots:
             QVERIFY(rim < center.y() - 10);
             for (const int offset : {-1, 0, -2, 1, -3, 2, -4, 3}) {
                 QTimer::singleShot(0, [] {
-                    if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
-                        dialog->setDoubleValue(3);
+                    if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                            dialog && dialog->objectName() == "edgeTreatmentDialog") {
+                        dialog->findChild<QDoubleSpinBox*>("edgeStartRadius")->setValue(3);
                         dialog->accept();
                     }
                 });
@@ -2228,6 +2229,51 @@ private slots:
             QCOMPARE(cube->childCount(), 0);
             QCOMPARE(cube->checkState(0), Qt::Checked);
         }
+    }
+
+    void configureVariablesFromModelMenu()
+    {
+        graph3d::MainWindow window;
+        window.resize(960, 680);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.initializeScene());
+        auto* action = window.findChild<QAction*>("modelVariables");
+        QVERIFY(action);
+        QString diagnostic;
+        QString selected;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != "modelConfigurationDialog") { if (dialog) { dialog->reject(); } return; }
+            auto* vars = dialog->findChild<QTableWidget*>("modelVariablesTable");
+            auto* variants = dialog->findChild<QTableWidget*>("modelVariantsTable");
+            auto* active = dialog->findChild<QComboBox*>("activeModelVariant");
+            auto* apply = dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+            const auto addRow = [](QTableWidget* table, const QStringList& values) {
+                const int index = table->rowCount();
+                table->insertRow(index);
+                for (int i = 0; i < values.size(); ++i) { table->setItem(index, i, new QTableWidgetItem(values[i])); }
+            };
+            addRow(vars, {"width", "width + 1"});
+            apply->click();
+            diagnostic = dialog->findChild<QLabel*>("formulaDiagnostic")->text();
+            vars->item(0, 1)->setText("30");
+            addRow(variants, {"Large", "width", "40"});
+            active->setCurrentText("Large");
+            apply->click();
+        });
+        action->trigger();
+        QVERIFY(diagnostic.contains("Cyclic variable dependency"));
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog) { return; }
+            if (const auto* active = dialog->findChild<QComboBox*>("activeModelVariant")) {
+                selected = active->currentText();
+            }
+            dialog->reject();
+        });
+        action->trigger();
+        QCOMPARE(selected, QStringLiteral("Large"));
     }
 
     void pickAndTreatMultipleEdges()
@@ -2289,8 +2335,9 @@ private slots:
         QVERIFY(click(bottom, 2));
         QVERIFY(action("finishEdgeSet")->isEnabled());
         QTimer::singleShot(0, [] {
-            if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
-                dialog->setDoubleValue(3);
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    dialog && dialog->objectName() == "edgeTreatmentDialog") {
+                dialog->findChild<QDoubleSpinBox*>("edgeStartRadius")->setValue(3);
                 dialog->accept();
             }
         });

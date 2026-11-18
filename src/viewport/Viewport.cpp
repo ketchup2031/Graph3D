@@ -316,6 +316,10 @@ void Viewport::pickSubshape(const QPoint& point)
     if (scene_->pickMode == SubshapePick::Vertex && shape.ShapeType() == TopAbs_VERTEX) {
         const auto p = BRep_Tool::Pnt(TopoDS::Vertex(shape));
         emit vertexPicked(id, {p.X(), p.Y(), p.Z()});
+    } else if (scene_->pickMode == SubshapePick::Blend && shape.ShapeType() == TopAbs_FACE) {
+        const auto reference = geometry::referenceBlend(TopoDS::Face(shape));
+        endSubshapePick();
+        emit blendPicked(id, reference);
     } else if ((scene_->pickMode == SubshapePick::Face || scene_->pickMode == SubshapePick::SketchFace)
                && shape.ShapeType() == TopAbs_FACE) {
         geometry::Point3 origin;

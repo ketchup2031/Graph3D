@@ -535,6 +535,20 @@ void paintModelViews(QPainter& painter, const ModelViews& model, bool eskd)
     paintViews(painter, model.geometry->views, model.layout, model.dimensions, model.hiddenLines,
                cut ? &*cut : nullptr, true, model.local ? &*model.local : nullptr, model.showBase);
     paintAdditionalViews(painter, model);
+    for (const auto& thread : model.threads) {
+        if (!model.showBase[thread.view]) { continue; }
+        const auto& place = model.layout[thread.view];
+        const auto center = place.center + QPointF(thread.center.x(), -thread.center.y()) * place.scale;
+        const auto radius = thread.diameter * place.scale / 2;
+        pen(painter, .18);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawArc(QRectF(center.x() - radius, center.y() - radius, 2*radius, 2*radius), 25*16, 270*16);
+        const auto tip = center + QPointF(.7 * radius, -.7 * radius);
+        const auto elbow = tip + QPointF(7, -7);
+        painter.drawLine(tip, elbow);
+        painter.drawLine(elbow, elbow + QPointF(30, 0));
+        text(painter, {elbow.x(), elbow.y() - 5, 43, 5}, thread.designation, 3, Qt::AlignLeft, false);
+    }
     if (model.detail) {
         const auto& detail = *model.detail;
         const auto& views = model.geometry->views;

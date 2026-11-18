@@ -1,5 +1,7 @@
 #pragma once
 
+#include "document/Formula.h"
+
 #include "geometry/AdvancedModeling.h"
 #include "geometry/Assembly.h"
 #include "geometry/BodyTransform.h"
@@ -32,6 +34,28 @@ struct EdgeTreatment {
     geometry::EdgeTreatmentKind kind;
     double size;
     std::vector<geometry::EdgeReference> additionalEdges;
+    bool followTangency = false;
+    std::optional<double> endRadius;
+    bool operator==(const EdgeTreatment&) const = default;
+};
+struct FeaturePattern {
+    ObjectId seed;
+    int count;
+    geometry::Point3 step{};
+    ObjectId path = 0;
+    bool reverse = false;
+    bool operator==(const FeaturePattern&) const = default;
+};
+struct MoveFace {
+    ObjectId body;
+    geometry::FaceReference face;
+    double distance;
+    bool operator==(const MoveFace&) const = default;
+};
+struct RemoveBlend {
+    ObjectId body;
+    geometry::BlendReference face;
+    bool operator==(const RemoveBlend&) const = default;
 };
 struct Sweep {
     ObjectId profile;
@@ -83,10 +107,12 @@ struct Component {
 struct Assembly { std::vector<Component> components; std::vector<geometry::Mate> mates; };
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
-                                Sweep, Loft, Shell, DraftAngle, LinkedComponent>;
+                                Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend>;
 
 bool isBody(const Parameters& parameters);
 bool isAdvanced(const Parameters& parameters);
+std::vector<std::string> formulaFields(const Parameters& parameters);
+ObjectId featureBase(const Parameters& parameters);
 
 struct Definition {
     Parameters parameters;
@@ -129,7 +155,11 @@ public:
     bool setPartProperties(ObjectId id, PartProperties properties);
     ComponentRecord componentRecord(ObjectId id) const;
     geometry::AssemblySolution assemblySolution(const Assembly& assembly) const;
-    static Document fromDefinitions(std::vector<Definition> definitions);
+    static Document fromDefinitions(std::vector<Definition> definitions, Configuration configuration = {});
+    const Configuration& configuration() const { return configuration_; }
+    bool setConfiguration(Configuration configuration);
+    bool selectVariant(std::string name);
+    Parameters effectiveParameters(ObjectId id) const;
     bool editSketch(ObjectId id, geometry::Sketch sketch);
     geometry::SketchContext sketchContext(const geometry::Sketch& sketch) const;
     bool editExtrude(ObjectId id, double distance);
@@ -137,6 +167,8 @@ public:
                      std::optional<ObjectId> datumAxis = {});
     bool editHole(ObjectId id, geometry::HoleSize size);
     bool editEdgeTreatment(ObjectId id, double size);
+    bool editEdgeTreatment(ObjectId id, EdgeTreatment treatment);
+    ObjectId addEdgeTreatment(EdgeTreatment treatment);
     bool editTransform(ObjectId id, geometry::BodyTransform parameters);
     bool editAssembly(ObjectId id, Assembly assembly);
     bool setVisible(ObjectId id, bool visible);
@@ -155,10 +187,12 @@ private:
     using State = std::vector<Object>;
     ObjectId append(Parameters parameters);
     void commit(State next);
-    static void rebuild(State& state, std::size_t first, bool all = false);
+    void rebuild(State& state, std::size_t first, bool all = false) const;
+    static void rebuildConfigured(State&, std::size_t first, bool all, const Configuration&);
 
-    struct Snapshot { State objects; std::uint64_t revision; };
+    struct Snapshot { State objects; std::uint64_t revision; Configuration configuration; };
     State objects_;
+    Configuration configuration_;
     std::vector<Snapshot> undo_;
     std::vector<Snapshot> redo_;
     std::uint64_t revision_ = 0;

@@ -312,6 +312,9 @@ drawing::Draft decodeSheet(const QJsonObject& root, int version, const QString& 
         if (version < 6 && model.contains("assembly")) {
             fileError(QStringLiteral("This assembly drawing requires drawing format version 6."));
         }
+        if (version < 8 && (model.contains("variant") || model.contains("threads"))) {
+            fileError(QStringLiteral("Model variants and thread callouts require drawing format version 8."));
+        }
         draft.modelViews = readModelViews(model, path);
     }
     return draft;
@@ -459,6 +462,10 @@ QJsonObject encodeSheet(const QString& path, const drawing::Draft& draft, int ve
 
 int draftVersion(const drawing::Draft& draft)
 {
+    const auto variant = [](const auto& sheet) {
+        return sheet.modelViews && (sheet.modelViews->variant.has_value() || !sheet.modelViews->threads.empty());
+    };
+    if (variant(draft) || std::ranges::any_of(draft.additionalSheets, variant)) { return 8; }
     const auto needsCurrentVersion = [](const auto& sheet) {
         const auto model = [](const auto& anchor) { return anchor && drawing::isModelReference(*anchor); };
         if (sheet.paper.modelTitle || sheet.paper.titleBlock
@@ -504,7 +511,7 @@ drawing::Draft openDraft(const QString& path)
 {
     const auto root = QJsonDocument::fromJson(readFile(path)).object();
     const int version = root.value("version").toInt();
-    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 7
+    if (root.value("format") != QJsonValue("Graph3D Drawing") || version < 1 || version > 8
         || root.value("unit") != QJsonValue("mm")) {
         fileError(QStringLiteral("This is not a supported Graph3D drawing."));
     }

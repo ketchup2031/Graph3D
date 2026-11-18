@@ -18,6 +18,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/SketchCurves.cpp
     src/geometry/SketchConstraints.cpp
     src/geometry/PartFeatures.cpp
+    src/geometry/DirectFeatures.cpp
     src/geometry/AdvancedModeling.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp src/geometry/AssemblyMates.cpp)
@@ -29,9 +30,9 @@ if(WIN32)
 endif()
 target_include_directories(graph3d_geometry PUBLIC src)
 target_include_directories(graph3d_geometry SYSTEM PUBLIC "${OpenCASCADE_INCLUDE_DIR}")
-target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset)
+target_link_libraries(graph3d_geometry PUBLIC TKBRep TKMath TKernel PRIVATE TKPrim TKTopAlgo TKBO TKFillet TKShHealing TKG3d TKOffset TKGeomBase)
 
-add_library(graph3d_document STATIC src/document/Document.cpp)
+add_library(graph3d_document STATIC src/document/Document.cpp src/document/Formula.cpp src/document/Configuration.cpp)
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
@@ -61,7 +62,7 @@ add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.
     src/gui/AssemblyDialog.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
-    src/gui/LineInput.cpp src/gui/LineInput.h
+    src/gui/LineInput.cpp src/gui/LineInput.h src/gui/ConfigurationDialog.cpp
     src/gui/DraftCanvas.cpp src/gui/DraftCanvas.h src/gui/DraftWindow.cpp src/gui/DraftWindow.h src/gui/DraftAssembly.cpp src/gui/DraftViews.cpp src/gui/DraftTools.cpp
     src/viewport/Viewport.cpp
     src/viewport/Viewport.h)
@@ -120,6 +121,12 @@ if(BUILD_TESTING)
     target_link_libraries(drawing_test PRIVATE graph3d_drawing graph3d_io TKTopAlgo)
     add_test(NAME drawing COMMAND drawing_test "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     set_tests_properties(drawing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(family_machining_test tests/document/FamilyMachiningTest.cpp)
+    set_target_properties(family_machining_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(family_machining_test PRIVATE graph3d_io graph3d_drawing TKTopAlgo TKPrim)
+    add_test(NAME family_machining COMMAND family_machining_test "${CMAKE_CURRENT_SOURCE_DIR}/examples/bushing-family.graph3d")
+    set_tests_properties(family_machining PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)

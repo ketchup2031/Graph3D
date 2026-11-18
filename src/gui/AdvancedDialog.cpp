@@ -309,6 +309,48 @@ std::optional<document::Parameters> advancedParameters(QWidget* parent, const QS
     if (const auto* p = std::get_if<document::Shell>(&initial)) {
         return dialog.run(facesEditor(dialog, document.find(p->body)->shape, p->body, p->openings, {}, p->thickness));
     }
+    if (const auto* p = std::get_if<document::FeaturePattern>(&initial)) {
+        auto* source = new QComboBox(&dialog);
+        source->addItem(tr("Linear step"), 0);
+        for (const auto& object : document.objects()) {
+            const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
+            if (sketch && sketch->trajectory && (!editing || object.id < editing)) {
+                source->addItem(tr("Path sketch #%1").arg(object.id), object.id);
+            }
+        }
+        source->setCurrentIndex(std::max(0, source->findData(p->path)));
+        dialog.form->addRow(tr("Path source"), source);
+        auto* count = dialog.number(tr("Instances (including seed)"), p->count, 2, geometry::maxArrayInstances);
+        count->setDecimals(0);
+        const auto step = dialog.triple(tr("Step (mm)"), p->step);
+        auto* reverse = new QCheckBox(tr("Reverse path direction"), &dialog);
+        reverse->setChecked(p->reverse);
+        dialog.form->addRow(reverse);
+        return dialog.run([=]() -> document::Parameters {
+            const int path = source->currentData().toInt();
+            return document::FeaturePattern{p->seed, static_cast<int>(count->value()),
+                path ? geometry::Point3{} : step(), path, path && reverse->isChecked()};
+        });
+    }
+    if (const auto* p = std::get_if<document::MoveFace>(&initial)) {
+        auto* distance = dialog.number(tr("Outward displacement (mm)"), p->distance, -1.e6, 1.e6);
+        return dialog.run([=]() -> document::Parameters { return document::MoveFace{p->body, p->face, distance->value()}; });
+    }
+    if (const auto* p = std::get_if<document::RemoveBlend>(&initial)) {
+        const auto faces = geometry::blendFaces(document.find(p->body)->shape);
+        auto* choice = new QComboBox(&dialog);
+        for (const auto& face : faces) {
+            choice->addItem(tr("Face near %1").arg(xyz(face.center)));
+        }
+        if (const auto prior = std::ranges::find(faces, p->face); prior != faces.end()) {
+            choice->setCurrentIndex(static_cast<int>(prior - faces.begin()));
+        }
+        dialog.form->addRow(tr("Blend face"), choice);
+        return dialog.run([&]() -> document::Parameters {
+            if (choice->currentIndex() < 0) { throw std::invalid_argument("Select a curved blend face."); }
+            return document::RemoveBlend{p->body, faces.at(choice->currentIndex())};
+        });
+    }
     const auto& p = std::get<document::DraftAngle>(initial);
     return dialog.run(facesEditor(dialog, document.find(p.body)->shape, p.body, p.walls, p.neutral, p.degrees));
 }

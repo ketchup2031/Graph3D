@@ -80,6 +80,14 @@ QString localizedDiagnostic(const char* source)
     if (!russianInterface()) {
         return translated;
     }
+    for (const auto* prefix : {"Cyclic variable dependency: ", "Unknown variable: "}) {
+        if (const auto position = translated.indexOf(QString::fromLatin1(prefix)); position >= 0) {
+            const auto start = QString::fromLatin1(prefix);
+            const auto key = (start + "%1").toUtf8();
+            return translated.left(position) + QCoreApplication::translate("Diagnostic", key.constData())
+                .arg(translated.mid(position + start.size()));
+        }
+    }
     static const QRegularExpression dependency(QStringLiteral(
         R"(^Input #(\d+) has an error\. Fix it to rebuild this operation\.$)"));
     if (const auto error = dependency.match(translated); error.hasMatch()) {

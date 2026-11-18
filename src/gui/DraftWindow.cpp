@@ -829,7 +829,28 @@ void DraftWindow::chooseModel()
         return;
     }
     try {
-        const auto source = io::openModelSource(path);
+        auto source = io::openModelSource(path);
+        std::optional<QString> variant;
+        if (!source.document.configuration().variants.empty()) {
+            QStringList choices{tr("Use the model's active variant"), tr("Base values")};
+            std::vector<std::optional<QString>> values{std::nullopt, QString{}};
+            for (const auto& [name, overrides] : source.document.configuration().variants) {
+                const auto label = QString::fromStdString(name);
+                choices.append(tr("Variant: %1").arg(label));
+                values.emplace_back(label);
+            }
+            int index = 0;
+            if (current && current->sourcePath == source.path) {
+                const auto prior = std::ranges::find(values, current->variant);
+                if (prior != values.end()) { index = static_cast<int>(prior - values.begin()); }
+            }
+            bool accepted = false;
+            const auto choice = QInputDialog::getItem(this, tr("Select model variant"), tr("Variant"),
+                                                        choices, index, false, &accepted);
+            if (!accepted) { return; }
+            variant = values.at(choices.indexOf(choice));
+            if (variant) { source.document.selectVariant(variant->toStdString()); }
+        }
         QStringList labels;
         std::vector<int> ids;
         int selected = 0;
@@ -864,7 +885,10 @@ void DraftWindow::chooseModel()
             selected = labels.indexOf(body);
         }
         const auto cut = current ? drawing::sectionSettings(*current) : std::nullopt;
-        setModelViews(io::buildModelViews(source, ids.at(selected), cut, drawing::draftSize(draft_), current),
+        auto linked = io::buildModelViews(source, ids.at(selected), cut, drawing::draftSize(draft_), current,
+            variant ? variant : std::optional<QString>(QString::fromStdString(source.document.configuration().activeVariant)));
+        linked.variant = variant;
+        setModelViews(std::move(linked),
                       tr("Link model views"));
     } catch (const std::exception& error) {
         const auto details = localizedDiagnostic(error.what());
@@ -939,7 +963,10 @@ void DraftWindow::updateModelStatus(const QString& failure)
             problem = tr("The source model cannot be read. Select it again to restore the link.");
         }
     }
-    const auto label = tr("Model: %1 · body #%2").arg(source.fileName()).arg(model.bodyId);
+    auto label = tr("Model: %1 · body #%2").arg(source.fileName()).arg(model.bodyId);
+    if (model.variant) {
+        label += QStringLiteral(" · ") + (model.variant->isEmpty() ? tr("Base values") : tr("Variant: %1").arg(*model.variant));
+    }
     modelStatus_->setToolTip(QDir::toNativeSeparators(path));
     modelStatus_->setText(problem.isEmpty() ? label : tr("%1 — stale views. %2").arg(label, problem));
 }

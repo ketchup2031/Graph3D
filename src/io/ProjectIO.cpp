@@ -33,6 +33,8 @@ constexpr int sketchVersion = 5;
 constexpr int advancedVersion = 6;
 constexpr int linkedVersion = 7;
 constexpr int curveSketchVersion = 8;
+constexpr int configurationVersion = 9;
+constexpr int machiningVersion = 10;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -42,6 +44,7 @@ constexpr std::array modelAxes{"X", "Y", "Z"};
 constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
+constexpr std::array holeStyles{"straight", "counterbore", "countersink"};
 constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection",
     "tangent", "parallel", "equal", "symmetric", "angle", "fix-point"};
 
@@ -518,9 +521,19 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
             return {{"type", "boolean"}, {"first", item.first}, {"second", item.second},
                     {"operation", name(item.operation, operations)}};
         } else if constexpr (std::is_same_v<Type, document::Hole>) {
-            return {{"type", "hole"}, {"body", item.body}, {"center", encodePoint3(item.face.center)},
+            QJsonObject result{{"type", "hole"}, {"body", item.body}, {"center", encodePoint3(item.face.center)},
                     {"outward", encodePoint3(item.face.outward)}, {"diameter", encodeNumber(item.size.diameter)},
                     {"depth", encodeNumber(item.size.depth)}, {"through", item.size.through}};
+            if (item.size.style != geometry::HoleStyle::Straight) {
+                result.insert("style", name(item.size.style, holeStyles));
+                result.insert("headDiameter", encodeNumber(item.size.headDiameter));
+                result.insert("seat", encodeNumber(item.size.seat));
+            }
+            if (const auto& t = item.size.thread) {
+                result.insert("thread", QJsonObject{{"diameter", encodeNumber(t->diameter)}, {"pitch", encodeNumber(t->pitch)},
+                    {"length", encodeNumber(t->length)}, {"left", t->leftHanded}});
+            }
+            return result;
         } else if constexpr (std::is_same_v<Type, document::EdgeTreatment>) {
             auto result = encodeEdge(item.edge);
             result.insert("type", "edge-treatment");
@@ -530,7 +543,20 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
             if (!item.additionalEdges.empty()) {
                 result.insert("additionalEdges", encodeList(item.additionalEdges, encodeEdge));
             }
+            if (item.followTangency) { result.insert("tangentChain", true); }
+            if (item.endRadius) { result.insert("endRadius", encodeNumber(*item.endRadius)); }
             return result;
+        } else if constexpr (std::is_same_v<Type, document::FeaturePattern>) {
+            QJsonObject result{{"type", "feature-pattern"}, {"seed", item.seed}, {"count", item.count}};
+            if (item.path) { result.insert("path", item.path); result.insert("reverse", item.reverse); }
+            else { result.insert("step", encodePoint3(item.step)); }
+            return result;
+        } else if constexpr (std::is_same_v<Type, document::MoveFace>) {
+            return {{"type", "move-face"}, {"body", item.body}, {"face", encodeFace(item.face)},
+                    {"distance", encodeNumber(item.distance)}};
+        } else if constexpr (std::is_same_v<Type, document::RemoveBlend>) {
+            return {{"type", "remove-blend"}, {"body", item.body}, {"center", encodePoint3(item.face.center)},
+                    {"area", encodeNumber(item.face.area)}, {"surface", item.face.surface}};
         } else if constexpr (std::is_same_v<Type, geometry::DatumPlane>) {
             return {{"type", "datum-plane"}, {"origin", encodePoint3(item.origin)}, {"normal", encodePoint3(item.normal)}};
         } else if constexpr (std::is_same_v<Type, geometry::DatumAxis>) {
@@ -720,10 +746,23 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         if (!object.value("through").isBool()) {
             fileError(QStringLiteral("Missing the hole through flag."));
         }
-        return document::Hole{integer(object.value("body"), "body"),
+        auto result = document::Hole{integer(object.value("body"), "body"),
             {decodePoint3(object.value("center")), decodePoint3(object.value("outward"))},
             {number(object.value("diameter"), "diameter"), number(object.value("depth"), "depth"),
              object.value("through").toBool()}};
+        if (object.contains("style")) {
+            if (version < machiningVersion) { fileError(QStringLiteral("Unsupported hole style.")); }
+            result.size.style = parseName<geometry::HoleStyle>(object.value("style"), holeStyles, "style");
+            result.size.headDiameter = number(object.value("headDiameter"), "headDiameter");
+            result.size.seat = number(object.value("seat"), "seat");
+        }
+        if (object.contains("thread")) {
+            const auto t = object.value("thread").toObject();
+            if (version < machiningVersion || !t.value("left").isBool()) { fileError(QStringLiteral("Invalid hole thread.")); }
+            result.size.thread = geometry::ThreadSize{number(t.value("diameter"), "diameter"),
+                number(t.value("pitch"), "pitch"), number(t.value("length"), "length"), t.value("left").toBool()};
+        }
+        return result;
     }
     if (type == "edge-treatment" && version >= featureVersion) {
         auto result = document::EdgeTreatment{integer(object.value("body"), "body"), decodeEdge(object),
@@ -732,7 +771,34 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         if (object.contains("additionalEdges")) {
             result.additionalEdges = decodeList(object.value("additionalEdges"), 1, 63, decodeEdge);
         }
+        if (object.contains("tangentChain")) {
+            if (version < machiningVersion || !object.value("tangentChain").isBool()) { fileError(QStringLiteral("Invalid tangent chain flag.")); }
+            result.followTangency = object.value("tangentChain").toBool();
+        }
+        if (object.contains("endRadius")) {
+            if (version < machiningVersion) { fileError(QStringLiteral("Unsupported variable radius.")); }
+            result.endRadius = number(object.value("endRadius"), "endRadius");
+        }
         return result;
+    }
+    if (version >= machiningVersion && type == "feature-pattern") {
+        document::FeaturePattern result{integer(object.value("seed"), "seed"),
+            signedInteger(object.value("count"), "count")};
+        if (object.contains("path")) {
+            if (object.contains("step") || !object.value("reverse").isBool()) { fileError(QStringLiteral("Invalid feature pattern path.")); }
+            result.path = integer(object.value("path"), "path");
+            result.reverse = object.value("reverse").toBool();
+        } else { result.step = decodePoint3(object.value("step")); }
+        return result;
+    }
+    if (version >= machiningVersion && type == "move-face") {
+        return document::MoveFace{integer(object.value("body"), "body"), decodeFace(object.value("face")),
+            number(object.value("distance"), "distance")};
+    }
+    if (version >= machiningVersion && type == "remove-blend") {
+        return document::RemoveBlend{integer(object.value("body"), "body"),
+            {decodePoint3(object.value("center")), number(object.value("area"), "area"),
+             signedInteger(object.value("surface"), "surface")}};
     }
     if (version >= transformVersion && (type == "linear-array" || type == "polar-array")) {
         const auto body = integer(object.value("body"), "body");
@@ -792,6 +858,7 @@ void saveProject(const QString& path, const document::Document& document)
             const auto* edges = std::get_if<document::EdgeTreatment>(&object.parameters);
             const auto* assembly = std::get_if<document::Assembly>(&object.parameters);
             const auto* sweep = std::get_if<document::Sweep>(&object.parameters);
+            const auto* hole = std::get_if<document::Hole>(&object.parameters);
             const bool curvedSketch = sketch && (sketch->trajectory || !sketch->construction.empty()
                 || std::ranges::any_of(sketch->entities, [](const auto& e) {
                     return std::holds_alternative<geometry::Arc>(e) || std::holds_alternative<geometry::Spline>(e);
@@ -799,8 +866,14 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::ranges::any_of(sketch->constraints, [](const auto& c) {
                     return c.kind > geometry::ConstraintKind::OnProjection;
                 }));
-            if (curvedSketch || (sweep && sweep->pathSketch)) {
-                version = curveSketchVersion;
+            if ((hole && (hole->size.thread || hole->size.style != geometry::HoleStyle::Straight))
+                || (edges && (edges->followTangency || edges->endRadius))
+                || std::holds_alternative<document::FeaturePattern>(object.parameters)
+                || std::holds_alternative<document::MoveFace>(object.parameters)
+                || std::holds_alternative<document::RemoveBlend>(object.parameters)) {
+                version = machiningVersion;
+            } else if (curvedSketch || (sweep && sweep->pathSketch)) {
+                version = std::max(version, curveSketchVersion);
             } else if (std::holds_alternative<document::LinkedComponent>(object.parameters) || object.properties != document::PartProperties{}
                 || (assembly && (!assembly->mates.empty() || std::ranges::any_of(assembly->components, &document::Component::fixed)))) {
                 version = std::max(version, linkedVersion);
@@ -823,8 +896,29 @@ void saveProject(const QString& path, const document::Document& document)
     } catch (const Standard_Failure& error) {
         fileError(QCoreApplication::translate("Diagnostic", "Cannot encode project geometry: %1").arg(QString::fromUtf8(error.GetMessageString())));
     }
-    const auto data = QJsonDocument(QJsonObject{{"format", format}, {"version", version},
-                                              {"unit", "mm"}, {"objects", encoded}}).toJson();
+    QJsonObject root{{"format", format}, {"unit", "mm"}, {"objects", encoded}};
+    const auto& configuration = document.configuration();
+    if (configuration != document::Configuration{}) {
+        version = std::max(version, configurationVersion);
+        const auto encodeExpressions = [](const document::Expressions& items) {
+            QJsonObject output;
+            for (const auto& [name, formula] : items) {
+                output.insert(QString::fromStdString(name), QString::fromStdString(formula));
+            }
+            return output;
+        };
+        QJsonObject variants, bindings;
+        for (const auto& [name, values] : configuration.variants) {
+            variants.insert(QString::fromStdString(name), encodeExpressions(values));
+        }
+        for (const auto& [id, values] : configuration.bindings) {
+            bindings.insert(QString::number(id), encodeExpressions(values));
+        }
+        root.insert("configuration", QJsonObject{{"variables", encodeExpressions(configuration.variables)},
+            {"variants", variants}, {"active", QString::fromStdString(configuration.activeVariant)}, {"bindings", bindings}});
+    }
+    root.insert("version", version);
+    const auto data = QJsonDocument(root).toJson();
     if (data.size() > fileLimit) {
         fileError(QStringLiteral("Project exceeds the 64 MiB format limit."));
     }
@@ -850,7 +944,8 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
     const auto parsedVersion = root.value("version").toDouble();
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
-         && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion)
+         && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion
+         && parsedVersion != configurationVersion && parsedVersion != machiningVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }
@@ -874,7 +969,39 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
                                                                   : document::PartProperties{};
             definitions.push_back({decodeObject(object, version, path), object.value("visible").toBool(), density, properties});
         }
-        return document::Document::fromDefinitions(std::move(definitions));
+        document::Configuration configuration;
+        if (root.contains("configuration")) {
+            const auto cfg = root.value("configuration").toObject();
+            if (version < configurationVersion || !cfg.value("variables").isObject() || !cfg.value("variants").isObject()
+                || !cfg.value("bindings").isObject() || !cfg.value("active").isString()) {
+                fileError(QStringLiteral("Invalid model configuration."));
+            }
+            const auto decodeExpressions = [](const QJsonValue& item) {
+                const auto object = item.toObject();
+                if (!item.isObject() || object.size() > 10000) { fileError(QStringLiteral("Invalid formula table.")); }
+                document::Expressions result;
+                for (auto it = object.begin(); it != object.end(); ++it) {
+                    const auto formula = it.value().toString();
+                    if (formula.isEmpty() || formula.size() > 512) { fileError(QStringLiteral("Invalid formula.")); }
+                    result.emplace(it.key().toStdString(), formula.toStdString());
+                }
+                return result;
+            };
+            configuration.variables = decodeExpressions(cfg.value("variables"));
+            configuration.activeVariant = cfg.value("active").toString().toStdString();
+            const auto variants = cfg.value("variants").toObject();
+            for (auto it = variants.begin(); it != variants.end(); ++it) {
+                configuration.variants.emplace(it.key().toStdString(), decodeExpressions(it.value()));
+            }
+            const auto bindings = cfg.value("bindings").toObject();
+            for (auto it = bindings.begin(); it != bindings.end(); ++it) {
+                bool ok = false;
+                const int id = it.key().toInt(&ok);
+                if (!ok || it.key() != QString::number(id)) { fileError(QStringLiteral("Invalid formula target ID.")); }
+                configuration.bindings.emplace(id, decodeExpressions(it.value()));
+            }
+        }
+        return document::Document::fromDefinitions(std::move(definitions), std::move(configuration));
     } catch (const Standard_Failure& failure) {
         fileError(QCoreApplication::translate("Diagnostic", "Cannot read project geometry: %1").arg(QString::fromUtf8(failure.GetMessageString())));
     }

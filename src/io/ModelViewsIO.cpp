@@ -5,6 +5,8 @@
 #include "io/FileIO.h"
 #include "io/ProjectIO.h"
 
+#include <TopoDS.hxx>
+#include <TopoDS_Wire.hxx>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -383,9 +385,16 @@ bool canProjectBody(const document::Object& item)
 }
 
 ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<SectionSettings> cut,
-                           QSizeF paper, const ModelViews* previous)
+                           QSizeF paper, const ModelViews* previous, std::optional<QString> variant)
 {
-    const auto* item = source.document.find(bodyId);
+    if (!variant && previous) { variant = previous->variant; }
+    std::optional<ModelSource> configured;
+    if (variant && variant->toStdString() != source.document.configuration().activeVariant) {
+        configured = source;
+        configured->document.selectVariant(variant->toStdString());
+    }
+    const auto& selected = configured ? *configured : source;
+    const auto* item = selected.document.find(bodyId);
     if (!item || !canProjectBody(*item)) {
         fileError(QCoreApplication::translate("ModelViews", "Body #%1 is unavailable in the source model.").arg(bodyId));
     }
@@ -417,6 +426,7 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
         preserveId(snapshot->views.top, old.top);
     }
     auto model = previous ? *previous : ModelViews{};
+    model.variant = variant;
     model.sourcePath = source.path;
     model.bodyId = bodyId;
     model.sourceDigest = source.digest;
@@ -428,13 +438,52 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
         model.layout = defaultViewLayout(snapshot->views, paper);
     }
     model.geometry = snapshot;
+    model.threads.clear();
+    const auto addThread = [&](const document::Hole& hole, const geometry::Point3& offset) {
+        if (!hole.size.thread) { return; }
+        const auto& thread = *hole.size.thread;
+        const auto& c = hole.face.center;
+        const auto& n = hole.face.outward;
+        const std::array align{-n[1], n[0], n[2]};
+        const auto best = std::ranges::max_element(align, {}, [](double value) { return std::abs(value); });
+        const int index = static_cast<int>(best - align.begin());
+        const auto& view = baseModelView(model, index);
+        const auto x = c[0] + offset[0], y = c[1] + offset[1], z = c[2] + offset[2];
+        const auto center = index == 0 ? QPointF(x, z) : index == 1 ? QPointF(y, z) : QPointF(x, y);
+        if (model.threads.size() >= 256) { fileError(QStringLiteral("Too many drawing thread callouts.")); }
+        model.threads.push_back({index, center - QPointF(view.origin.x, view.origin.y), thread.diameter,
+            QStringLiteral("M%1×%2%3 / %4 mm").arg(thread.diameter, 0, 'g', 6).arg(thread.pitch, 0, 'g', 6)
+                .arg(thread.leftHanded ? QStringLiteral(" LH") : QString{}).arg(thread.length, 0, 'g', 6)});
+    };
+    for (int id = bodyId; id > 0;) {
+        const auto params = selected.document.effectiveParameters(id);
+        if (const auto* pattern = std::get_if<document::FeaturePattern>(&params)) {
+            const auto seed = selected.document.effectiveParameters(pattern->seed);
+            if (const auto* hole = std::get_if<document::Hole>(&seed)) {
+                if (pattern->path) {
+                    const auto* path = selected.document.find(pattern->path);
+                    for (const auto& offset : geometry::pathArrayOffsets(TopoDS::Wire(path->shape), pattern->count, pattern->reverse)) {
+                        addThread(*hole, offset);
+                    }
+                } else {
+                    for (int i = 1; i < pattern->count; ++i) {
+                        addThread(*hole, {i*pattern->step[0], i*pattern->step[1], i*pattern->step[2]});
+                    }
+                }
+            }
+            id = pattern->seed;
+        } else {
+            if (const auto* hole = std::get_if<document::Hole>(&params)) { addThread(*hole, {}); }
+            id = document::featureBase(params);
+        }
+    }
     const bool sameSource = previous && previous->bodyId == bodyId
         && (previous->sourcePath == source.path || previous->sourceDigest == source.digest);
     rebuildDrawingViews(model, item->shape, sameSource ? previous : nullptr);
     validateSnapshot(*snapshot, model.additional);
     const auto prior = previous && previous->bodyId == bodyId && previous->sourcePath == source.path
         ? previous->assembly.get() : nullptr;
-    model.assembly = buildAssemblyDrawing(source, *item, prior);
+    model.assembly = buildAssemblyDrawing(selected, *item, prior);
     return model;
 }
 
@@ -453,6 +502,13 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
     result.sourcePath = QDir::cleanPath(QFileInfo(draftPath).absoluteDir().absoluteFilePath(path));
     result.sourceDigest = QByteArray::fromHex(hash);
     result.bodyId = static_cast<int>(bodyId);
+    if (object.contains("variant")) {
+        const auto variant = object.value("variant");
+        if (!variant.isString() || variant.toString().toUtf8().size() > 128 || variant.toString().contains(QChar::Null)) {
+            invalid();
+        }
+        result.variant = variant.toString();
+    }
     result.dimensions = object.value("dimensions").toBool();
     result.hiddenLines = object.value("hiddenLines").toBool();
     for (int i = 0; i < 3; ++i) {
@@ -516,6 +572,18 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
     if (object.contains("assembly")) {
         result.assembly = std::make_shared<AssemblyDrawing>(readAssemblyDrawing(object.value("assembly")));
     }
+    if (object.contains("threads")) {
+        const auto entries = array(object.value("threads"));
+        if (entries.size() > 256) { invalid(); }
+        for (const auto& value : entries) {
+            const auto entry = value.toObject();
+            const int view = entry.value("view").toInt(-1);
+            const auto center = readPoint(entry.value("center"));
+            const auto designation = entry.value("designation").toString();
+            if (view < 0 || view > 2 || designation.isEmpty() || designation.size() > 100) { invalid(); }
+            result.threads.push_back({view, {center.x, center.y}, positive(entry.value("diameter"), maxCoordinate), designation});
+        }
+    }
     return result;
 }
 
@@ -541,6 +609,15 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath, b
                        {"dimensions", model.dimensions}, {"hiddenLines", model.hiddenLines}, {"layout", layout},
                        {"front", writeView(views.front, references)}, {"top", writeView(views.top, references)},
                        {"right", writeView(views.right, references)}};
+    if (model.variant) { result.insert("variant", *model.variant); }
+    if (!model.threads.empty()) {
+        QJsonArray entries;
+        for (const auto& thread : model.threads) {
+            entries.append(QJsonObject{{"view", thread.view}, {"center", writePoint({thread.center.x(), thread.center.y()})},
+                {"diameter", thread.diameter}, {"designation", thread.designation}});
+        }
+        result.insert("threads", entries);
+    }
     if (model.geometry->section) {
         result.insert("section", writeSection(*model.geometry->section, references));
     }
