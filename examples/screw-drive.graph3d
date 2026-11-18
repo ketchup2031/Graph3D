@@ -1,0 +1,46 @@
+{
+  "format": "Graph3D",
+  "version": 11,
+  "unit": "mm",
+  "objects": [
+    {"id": 1, "type": "sketch", "visible": false, "plane": "XY", "entities": [
+      {"type": "circle", "center": [0, 0], "radius": 14},
+      {"type": "circle", "center": [0, 0], "radius": 4.5}
+    ]},
+    {"id": 2, "type": "extrude", "visible": false, "profile": 1, "distance": 8},
+    {"id": 3, "type": "sketch", "visible": false, "plane": "XY", "entities": [
+      {"type": "circle", "center": [0, 0], "radius": 4}
+    ]},
+    {"id": 4, "type": "extrude", "visible": false, "profile": 3, "distance": 60},
+    {"id": 5, "type": "datum-plane", "visible": false, "origin": [0, 0, 12], "normal": [0, 0, 1]},
+    {"id": 6, "type": "sketch", "visible": false, "plane": "XY", "datumPlane": 5, "entities": [
+      {"type": "circle", "center": [0, 0], "radius": 8},
+      {"type": "circle", "center": [0, 0], "radius": 4.25}
+    ]},
+    {"id": 7, "type": "extrude", "visible": false, "profile": 6, "distance": 8},
+    {"id": 8, "type": "sketch", "visible": false, "plane": "XY", "entities": [
+      {"type": "rectangle", "a": [0, 0], "b": [5, 3]}
+    ]},
+    {"id": 9, "type": "extrude", "visible": false, "profile": 8, "distance": 4},
+    {
+      "id": 10, "type": "assembly", "visible": true,
+      "components": [
+        {"body": 2, "fixed": true, "anchor": 0, "offset": [0, 0, 0], "angles": [0, 0, 0]},
+        {"body": 4, "anchor": 0, "offset": [0, 0, 0], "angles": [0, 0, 0]},
+        {"body": 7, "anchor": 0, "offset": [0, 0, 0], "angles": [0, 0, 0]},
+        {"body": 9, "fixed": true, "anchor": 0, "offset": [5, 0, 27], "angles": [0, 0, 0]}
+      ],
+      "mates": [
+        {"component": 2, "target": 1, "opposite": false,
+         "moving": {"kind": "cylinder", "point": [0, 0, 0], "direction": [0, 0, 1], "radius": 4},
+         "reference": {"kind": "cylinder", "point": [0, 0, 0], "direction": [0, 0, 1], "radius": 4.5}},
+        {"component": 2, "target": 1, "opposite": false,
+         "moving": {"kind": "plane", "point": [0, 0, 0], "direction": [0, 0, -1], "radius": 0},
+         "reference": {"kind": "plane", "point": [0, 0, 0], "direction": [0, 0, -1], "radius": 0}},
+        {"component": 3, "target": 2, "opposite": false, "mode": "screw", "value": 10, "minimum": 0, "maximum": 20,
+         "moving": {"kind": "cylinder", "point": [0, 0, 0], "direction": [0, 0, 1], "radius": 4.25},
+         "reference": {"kind": "cylinder", "point": [0, 0, 0], "direction": [0, 0, 1], "radius": 4}}
+      ]
+    }
+  ]
+}

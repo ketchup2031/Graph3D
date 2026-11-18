@@ -59,7 +59,7 @@ endif()
 add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.h src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp src/gui/AdvancedDialog.cpp
-    src/gui/AssemblyDialog.cpp
+    src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
     src/gui/LineInput.cpp src/gui/LineInput.h src/gui/ConfigurationDialog.cpp
@@ -132,6 +132,7 @@ if(BUILD_TESTING)
     if(GRAPH3D_GUI_TESTS)
         find_package(Qt6 REQUIRED COMPONENTS Test)
         add_executable(viewport_test tests/viewport/ViewportTest.cpp)
+        qt_add_resources(viewport_test motion_example PREFIX "/" FILES examples/screw-drive.graph3d)
         set_target_properties(viewport_test PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
         target_link_libraries(viewport_test PRIVATE graph3d_ui Qt6::Test)
         add_test(NAME viewport COMMAND viewport_test)

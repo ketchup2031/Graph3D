@@ -102,9 +102,21 @@ struct Component {
     ObjectId body;
     geometry::Placement placement;
     bool fixed = false;
+    bool simplified = false;
+    std::optional<geometry::ContextFaceEdit> context;
     bool operator==(const Component&) const = default;
 };
-struct Assembly { std::vector<Component> components; std::vector<geometry::Mate> mates; };
+struct Assembly {
+    std::vector<Component> components;
+    std::vector<geometry::Mate> mates;
+    double driveAngle = 0;
+};
+struct MotionInterference {
+    double requestedAngle;
+    double solvedAngle;
+    double travel;
+    std::vector<geometry::Interference> pairs;
+};
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
                                 Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend>;
@@ -132,6 +144,7 @@ struct Object {
     bool visible = true;
     std::optional<double> densityKgM3;
     PartProperties properties;
+    TopoDS_Shape preview;
 };
 
 class Document {
@@ -155,6 +168,7 @@ public:
     bool setPartProperties(ObjectId id, PartProperties properties);
     ComponentRecord componentRecord(ObjectId id) const;
     geometry::AssemblySolution assemblySolution(const Assembly& assembly) const;
+    std::vector<MotionInterference> scanAssembly(const Assembly& assembly, double start, double end, int samples) const;
     static Document fromDefinitions(std::vector<Definition> definitions, Configuration configuration = {});
     const Configuration& configuration() const { return configuration_; }
     bool setConfiguration(Configuration configuration);

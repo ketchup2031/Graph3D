@@ -63,6 +63,7 @@ struct Viewport::Scene {
     Handle(AIS_InteractiveContext) context;
     Handle(V3d_View) view;
     std::vector<Handle(AIS_Shape)> objects;
+    std::vector<bool> simplified;
     QPoint previousMouse;
     int pickId = 0;
     SubshapePick pickMode = SubshapePick::Face;
@@ -153,8 +154,10 @@ void Viewport::syncDocument(const document::Document& document)
             scene_->objects.pop_back();
         }
         scene_->objects.resize(records.size());
+        scene_->simplified.resize(records.size());
         for (std::size_t i = 0; i < records.size(); ++i) {
             const auto& record = records[i];
+            scene_->simplified[i] = !record.preview.IsNull();
             auto& object = scene_->objects[i];
             if (record.shape.IsNull()) {
                 if (!object.IsNull()) {
@@ -164,16 +167,17 @@ void Viewport::syncDocument(const document::Document& document)
                 continue;
             }
             const bool wire = !document::isBody(record.parameters);
+            const auto& displayShape = record.preview.IsNull() ? record.shape : record.preview;
             const auto color = std::holds_alternative<geometry::Sketch>(record.parameters)
                 ? Quantity_Color(0.35, 0.83, 1.00, Quantity_TOC_sRGB)
                 : wire ? Quantity_Color(0.87, 0.65, 0.23, Quantity_TOC_sRGB)
                        : Quantity_Color(0.39, 0.67, 0.82, Quantity_TOC_sRGB);
             if (object.IsNull()) {
-                object = new AIS_Shape(record.shape);
+                object = new AIS_Shape(displayShape);
                 object->SetColor(color);
                 object->SetWidth(wire ? 2.0 : 1.0);
-            } else if (!object->Shape().IsSame(record.shape)) {
-                object->SetShape(record.shape);
+            } else if (!object->Shape().IsSame(displayShape)) {
+                object->SetShape(displayShape);
                 object->SetColor(color);
                 object->SetWidth(wire ? 2.0 : 1.0);
                 scene_->context->Redisplay(object, false);
@@ -253,6 +257,9 @@ bool Viewport::beginSubshapePick(int id, SubshapePick mode)
             throw std::invalid_argument("Select a visible body.");
         }
         const auto& object = scene_->objects[id - 1];
+        if (scene_->simplified[id - 1]) {
+            throw std::invalid_argument("Turn off simplified display to select a face, edge or vertex.");
+        }
         scene_->context->ClearSelected(false);
         scene_->context->Deactivate(object);
         scene_->pickId = id;

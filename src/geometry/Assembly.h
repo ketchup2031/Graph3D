@@ -23,6 +23,7 @@ struct Placement {
 };
 
 enum class MateKind { Plane, Cylinder };
+enum class MateMode { Align, Distance, Angle, Travel, Screw };
 
 struct MateSurface {
     MateKind kind = MateKind::Plane;
@@ -38,19 +39,35 @@ struct Mate {
     MateSurface moving;
     MateSurface reference;
     bool opposite = true;
+    MateMode mode = MateMode::Align;
+    double value = 0; // Distance (mm), angle (degrees) or signed screw lead (mm/turn).
+    double minimum = 0;
+    double maximum = 0;
     bool operator==(const Mate&) const = default;
+};
+
+struct ContextFaceEdit {
+    int reference = 0;
+    FaceReference face;        // The face to move, in the component's local coordinates.
+    FaceReference targetFace;  // The plane to follow, in the reference component's local coordinates.
+    double clearance = 0;      // Distance beyond the reference plane along the moving face normal.
+    bool operator==(const ContextFaceEdit&) const = default;
 };
 
 struct AssemblyComponentState {
     gp_Trsf transform;
     int translations = 3;
     int rotations = 3;
+    Point3 freeRotationAxis{};
 };
 
 struct AssemblySolution {
     std::vector<AssemblyComponentState> components;
     int failedMate = -1;
     std::string error;
+    double driveAngle = 0;
+    double screwTravel = 0;
+    std::vector<TopoDS_Shape> contextualShapes;
 };
 
 struct Interference {
@@ -63,12 +80,15 @@ struct PlacedBody {
     const TopoDS_Shape& shape;
     Placement placement;
     bool fixed = false;
+    bool simplified = false;
+    std::optional<ContextFaceEdit> context;
 };
 
 gp_Trsf assemblyPlacement(const Placement& placement);
 std::vector<MateSurface> assemblySurfaces(const TopoDS_Shape& shape);
-AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates = {});
-TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates = {});
+AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates = {}, double driveAngle = 0);
+TopoDS_Shape makeAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates = {},
+                         double driveAngle = 0, TopoDS_Shape* preview = nullptr);
 std::vector<Interference> checkInterference(const TopoDS_Shape& assembly);
 
 }  // namespace graph3d::geometry

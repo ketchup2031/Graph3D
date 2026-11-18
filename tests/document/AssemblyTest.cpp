@@ -8,6 +8,7 @@
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <gp_Pnt.hxx>
 
 #include <QCoreApplication>
@@ -292,6 +293,139 @@ void coincidentComponents()
     verifySolids(io::readStep(step), {{{10, 5, 4}, 1600}, {{10, 5, 4}, 1600}});
 }
 
+bool closeTo(double a, double b)
+{
+    return std::abs(a - b) < 1.e-5;
+}
+
+void motionConstraints()
+{
+    using enum geom::MateKind;
+    using enum geom::MateMode;
+    doc::Document model;
+    const auto base = block(model, 18, 12, 8);
+    const auto moving = block(model, 10, 8, 4);
+    const auto& ground = model.find(base)->shape;
+    const auto& part = model.find(moving)->shape;
+    const auto up = findSurface(ground, Plane, 1);
+    const auto down = findSurface(part, Plane, -1);
+    const auto movingUp = findSurface(part, Plane, 1);
+    const auto side = [](const auto& shape) {
+        const auto options = geom::assemblySurfaces(shape);
+        return *std::ranges::find_if(options, [](const auto& p) { return p.kind == Plane && p.direction[0] > .999; });
+    };
+    doc::Assembly move{{{base, {}, true}, {moving, {0, {3, 2, 27}, {}}}},
+        {{2, 1, down, up, true, Distance, 5}}};
+    auto solved = model.assemblySolution(move);
+    check(solved.error.empty() && solved.components[1].translations == 2
+        && closeTo(solved.components[1].transform.TranslationPart().Z(), 13)
+        && closeTo(solved.components[1].transform.TranslationPart().X(), 3), "Distance mate or free movement is incorrect");
+    move.mates = {{2, 1, down, up, true, Travel, 2, 1, 7}};
+    solved = model.assemblySolution(move);
+    check(solved.error.empty() && closeTo(solved.components[1].transform.TranslationPart().Z(), 15)
+        && closeTo(solved.components[1].transform.TranslationPart().Y(), 2), "Travel limit did not clamp a free coordinate");
+    move.mates = {{2, 1, movingUp, up, false, Angle, 30}};
+    solved = model.assemblySolution(move);
+    const auto tilted = gp_Vec(0, 0, 1).Transformed(solved.components.at(1).transform);
+    check(solved.error.empty() && solved.components[1].rotations == 2
+        && closeTo(tilted.Angle(gp_Vec(0, 0, 1)), std::numbers::pi / 6), "Angle mate did not set the requested tilt");
+    move.mates = {{2, 1, movingUp, up, false}, {2, 1, side(part), side(ground), false, Angle, 60}};
+    solved = model.assemblySolution(move);
+    check(solved.error.empty() && solved.components[1].rotations == 0
+        && closeTo(gp_Vec(1, 0, 0).Transformed(solved.components[1].transform).Angle(gp_Vec(1, 0, 0)),
+                   std::numbers::pi / 3), "Angle mate did not keep the prior planar alignment");
+}
+
+void screwDrive(const QDir& folder)
+{
+    using enum geom::MateKind;
+    using enum geom::MateMode;
+    doc::Document model;
+    const auto tube = [&](double radius, double bore, double z, double length) {
+        geom::Sketch sketch{geom::Plane::XY, {geom::Circle{{0, 0}, radius}}};
+        if (bore > 0) { sketch.entities.push_back(geom::Circle{{0, 0}, bore}); }
+        if (z != 0) { sketch.datumPlane = model.addAdvanced(geom::DatumPlane{{0, 0, z}, {0, 0, 1}}); }
+        return model.addExtrude(model.addSketch(sketch), length);
+    };
+    const auto bearing = tube(14, 4.5, 0, 8);
+    const auto screw = tube(4, 0, 0, 60);
+    const auto carriage = tube(8, 4.25, 12, 8);
+    const auto stop = block(model, 5, 3, 4);
+    const auto bearingAxis = findSurface(model.find(bearing)->shape, Cylinder, 4.5);
+    const auto screwAxis = findSurface(model.find(screw)->shape, Cylinder, 4);
+    const auto carriageAxis = findSurface(model.find(carriage)->shape, Cylinder, 4.25);
+    doc::Assembly setup{{{bearing, {}, true}, {screw, {}}, {carriage, {}}, {stop, {0, {5, 0, 27}, {}}, true}},
+        {{2, 1, screwAxis, bearingAxis, false},
+         {2, 1, findSurface(model.find(screw)->shape, Plane, -1), findSurface(model.find(bearing)->shape, Plane, -1), false},
+         {3, 2, carriageAxis, screwAxis, false, Screw, 10, 0, 20}}};
+    setup.driveAngle = 450;
+    const auto state = model.assemblySolution(setup);
+    check(state.error.empty() && closeTo(state.screwTravel, 12.5) && closeTo(state.components.at(2).transform.TranslationPart().Z(), 12.5),
+          "The carriage travel did not equal the screw lead per turn");
+    const auto arm = gp_Vec(1, 0, 0).Transformed(state.components[1].transform);
+    check(closeTo(arm.X(), 0) && closeTo(arm.Y(), 1), "The screw did not actually rotate");
+    const auto guide = gp_Vec(1, 0, 0).Transformed(state.components[2].transform);
+    check(closeTo(guide.X(), 1) && closeTo(guide.Y(), 0), "The carriage inherited screw rotation");
+    setup.driveAngle = 1080;
+    const auto end = model.assemblySolution(setup);
+    check(end.error.empty() && closeTo(end.driveAngle, 720) && closeTo(end.screwTravel, 20)
+        && closeTo(end.components.at(2).transform.TranslationPart().Z(), 20), "Screw end stop did not clamp both components");
+    setup.driveAngle = -360;
+    check(closeTo(model.assemblySolution(setup).screwTravel, 0), "Screw lower stop failed");
+    const auto stations = model.scanAssembly(setup, 0, 720, 3);
+    check(stations.size() == 3 && stations.front().pairs.empty() && stations.back().pairs.empty()
+        && stations[1].pairs.size() == 1 && stations[1].pairs.front().first == std::vector<int>{3}
+        && stations[1].pairs.front().second == std::vector<int>{4}, "Collision scan missed the obstacle mid-travel");
+    setup.driveAngle = 360;
+    auto reversed = setup;
+    reversed.mates.back().value = -10;
+    reversed.driveAngle = -360;
+    check(closeTo(model.assemblySolution(reversed).screwTravel, 10), "Left-hand screw did not reverse travel");
+    setup.components[2].simplified = true;
+    const auto object = model.addAssembly(setup);
+    check(!model.find(object)->preview.IsNull()
+        && geom::checkInterference(model.find(object)->shape).size() == 1, "The simplified view altered precise collision geometry");
+    TopoDS_Iterator exact(model.find(object)->shape), preview(model.find(object)->preview);
+    exact.Next(); exact.Next();
+    preview.Next(); preview.Next();
+    GProp_GProps precise, proxy;
+    BRepGProp::VolumeProperties(exact.Value(), precise);
+    BRepGProp::VolumeProperties(preview.Value(), proxy);
+    check(proxy.Mass() > precise.Mass() && proxy.CentreOfMass().Distance(precise.CentreOfMass()) < 1.e-5,
+        "Simplified component did not keep its position");
+    const auto file = folder.filePath("screw-drive.graph3d");
+    io::saveProject(file, model);
+    const auto restored = io::openProject(file);
+    const auto& persisted = std::get<doc::Assembly>(restored.find(object)->parameters);
+    check(persisted.components == setup.components && persisted.mates == setup.mates && persisted.driveAngle == 360
+        && !restored.find(object)->preview.IsNull(), "Screw drive or simplified instance was lost on save");
+}
+
+void contextualAssembly(const QDir& folder)
+{
+    doc::Document model;
+    const auto top = block(model, 32, 20, 14);
+    const auto component = block(model, 10, 8, 5);
+    doc::Assembly assembly{{{top, {}, true}, {component, {0, {40, 0, 0}, {}}, false, true,
+        geom::ContextFaceEdit{1, {{5, 4, 5}, {0, 0, 1}}, {{16, 10, 14}, {0, 0, 1}}, -2}}}};
+    const auto id = model.addAssembly(assembly);
+    verifySolids(model.find(id)->shape, {{{16, 10, 7}, 8960}, {{45, 4, 6}, 960}});
+    verifySolids(model.find(component)->shape, {{{5, 4, 2.5}, 400}});
+    check(model.editExtrude(top, 18), "Could not modify contextual reference");
+    verifySolids(model.find(id)->shape, {{{16, 10, 9}, 11520}, {{45, 4, 8}, 1280}});
+    const auto file = folder.filePath("context.graph3d");
+    io::saveProject(file, model);
+    auto reopened = io::openProject(file);
+    check(std::get<doc::Assembly>(reopened.find(id)->parameters).components == assembly.components,
+        "Contextual relationship or identity did not survive reopening");
+    verifySolids(reopened.find(id)->shape, {{{16, 10, 9}, 11520}, {{45, 4, 8}, 1280}});
+    const auto profile = std::get<doc::Extrude>(reopened.find(top)->parameters).profile;
+    check(reopened.editSketch(profile, {geom::Plane::XY, {geom::Rectangle{{0, 0}, {8, 8}}}})
+        && reopened.find(id)->status == doc::Status::Failed
+        && reopened.find(id)->error.find("Contextual reference") != std::string::npos, "Lost contextual surface was not diagnosed");
+    check(reopened.undo() && reopened.find(id)->status == doc::Status::Ready, "Undo did not restore contextual geometry");
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -309,6 +443,9 @@ int main(int argc, char** argv)
         const QDir folder(args.size() == 2 ? args.at(1) : output.path());
         check(folder.exists(), "Assembly test output directory is unavailable");
         linkedAndMatedAssembly(folder);
+        motionConstraints();
+        screwDrive(folder);
+        contextualAssembly(folder);
     } catch (const Standard_Failure& error) {
         std::cerr << error.GetMessageString() << '\n';
         return 1;

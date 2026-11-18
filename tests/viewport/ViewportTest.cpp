@@ -1892,6 +1892,51 @@ private slots:
         QVERIFY(source->text(2).isEmpty());
     }
 
+    void moveScrewAndScanThroughMenus()
+    {
+        graph3d::DocumentWindow window;
+        window.resize(1100, 760);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.openDocument(QStringLiteral(":/examples/screw-drive.graph3d"), true));
+        auto* tree = window.findChild<QTreeWidget*>("modelTree");
+        auto* move = window.findChild<QAction*>("assemblyMotion");
+        QVERIFY(tree && move);
+        QTreeWidgetItem* assembly = nullptr;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            if (tree->topLevelItem(i)->text(0) == QStringLiteral("Assembly 10")) { assembly = tree->topLevelItem(i); break; }
+        }
+        QVERIFY(assembly);
+        tree->setCurrentItem(assembly);
+        QVERIFY(move->isEnabled());
+        QString pose, scan;
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != "assemblyMotionDialog") { if (dialog) { dialog->reject(); } return; }
+            dialog->findChild<QDoubleSpinBox*>("assemblyDriveAngle")->setValue(1080);
+            dialog->findChild<QPushButton*>("previewAssemblyPosition")->click();
+            pose = dialog->findChild<QLabel*>("assemblyMotionPosition")->text();
+            dialog->findChild<QDoubleSpinBox*>("assemblyScanEnd")->setValue(720);
+            dialog->findChild<QSpinBox*>("assemblyScanPositions")->setValue(3);
+            dialog->findChild<QPushButton*>("runAssemblyMotionScan")->click();
+            scan = dialog->findChild<QPlainTextEdit*>("assemblyMotionScan")->toPlainText();
+            dialog->reject();
+        });
+        move->trigger();
+        QVERIFY2(pose.contains("720°") && pose.contains("20 mm"), qPrintable(pose));
+        QVERIFY2(scan.contains("360° requested → 360° solved, 10 mm: 1 overlapping pairs")
+            && scan.contains("Components 3 and 4"), qPrintable(scan));
+        double saved = -1;
+        QTimer::singleShot(0, &window, [&] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                if (auto* angle = dialog->findChild<QDoubleSpinBox*>("assemblyDriveAngle")) { saved = angle->value(); }
+                dialog->reject();
+            }
+        });
+        move->trigger();
+        QCOMPARE(saved, 0.);
+    }
+
     void linkedAssemblyThroughMenus()
     {
         using namespace graph3d;

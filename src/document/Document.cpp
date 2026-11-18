@@ -166,12 +166,13 @@ std::vector<geometry::PlacedBody> placedBodies(const std::vector<Object>& state,
     std::vector<geometry::PlacedBody> bodies;
     bodies.reserve(assembly.components.size());
     for (const auto& component : assembly.components) {
-        bodies.push_back({objectAt(state, component.body).shape, component.placement, component.fixed});
+        bodies.push_back({objectAt(state, component.body).shape, component.placement, component.fixed,
+            component.simplified, component.context});
     }
     return bodies;
 }
 
-TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters)
+TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parameters, TopoDS_Shape& preview)
 {
     return std::visit(Visit{
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
@@ -230,7 +231,9 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [&state](const Transform& p) {
             return geometry::transformBody(objectAt(state, p.body).shape, p.parameters);
         },
-        [&state](const Assembly& p) { return geometry::makeAssembly(placedBodies(state, p), p.mates); },
+        [&state, &preview](const Assembly& p) {
+            return geometry::makeAssembly(placedBodies(state, p), p.mates, p.driveAngle, &preview);
+        },
         [](const LinkedComponent& p) {
             if (p.snapshot.IsNull() || !TopExp_Explorer(p.snapshot, TopAbs_SOLID).More()
                 || !BRepCheck_Analyzer(p.snapshot).IsValid()) {
@@ -569,7 +572,31 @@ ComponentRecord Document::componentRecord(ObjectId id) const
 
 geometry::AssemblySolution Document::assemblySolution(const Assembly& assembly) const
 {
-    return geometry::solveAssembly(placedBodies(objects_, assembly), assembly.mates);
+    return geometry::solveAssembly(placedBodies(objects_, assembly), assembly.mates, assembly.driveAngle);
+}
+
+std::vector<MotionInterference> Document::scanAssembly(const Assembly& assembly, double start, double end, int samples) const
+{
+    if (samples < 2 || samples > 50 || !std::isfinite(start) || !std::isfinite(end)
+        || std::abs(start) > geometry::maxComponentOffset || std::abs(end) > geometry::maxComponentOffset) {
+        throw std::invalid_argument("Use 2 to 50 positions and finite angles within ±1,000,000 degrees.");
+    }
+    if (std::ranges::none_of(assembly.mates, [](const auto& mate) { return mate.mode == geometry::MateMode::Screw; })) {
+        throw std::invalid_argument("Add a screw drive before checking motion.");
+    }
+    const auto bodies = placedBodies(objects_, assembly);
+    std::vector<MotionInterference> result;
+    result.reserve(samples);
+    for (int i = 0; i < samples; ++i) {
+        const auto requested = std::lerp(start, end, static_cast<double>(i) / (samples - 1));
+        const auto state = geometry::solveAssembly(bodies, assembly.mates, requested);
+        if (!state.error.empty()) { throw std::invalid_argument(state.error); }
+        auto collisions = result.empty() || result.back().solvedAngle != state.driveAngle
+            ? geometry::checkInterference(geometry::makeAssembly(bodies, assembly.mates, requested))
+            : result.back().pairs;
+        result.push_back({requested, state.driveAngle, state.screwTravel, std::move(collisions)});
+    }
+    return result;
 }
 
 Document Document::fromDefinitions(std::vector<Definition> definitions, Configuration configuration)
@@ -761,7 +788,7 @@ bool Document::editAssembly(ObjectId id, Assembly assembly)
         }
         requireBody(objectAt(objects_, component.body));
     }
-    if (existing->components == assembly.components && existing->mates == assembly.mates) {
+    if (existing->components == assembly.components && existing->mates == assembly.mates && existing->driveAngle == assembly.driveAngle) {
         return false;
     }
     auto next = objects_;
@@ -802,6 +829,7 @@ void Document::rebuildConfigured(State& state, std::size_t first, bool all, cons
             continue;
         }
         object.shape.Nullify();
+        object.preview.Nullify();
         object.status = Status::Ready;
         object.error.clear();
         for (const auto id : source) {
@@ -816,9 +844,9 @@ void Document::rebuildConfigured(State& state, std::size_t first, bool all, cons
         }
         try {
             if (const auto binding = config.bindings.find(object.id); binding != config.bindings.end()) {
-                object.shape = evaluate(state, applyBindings(object.parameters, binding->second, formulaValues));
+                object.shape = evaluate(state, applyBindings(object.parameters, binding->second, formulaValues), object.preview);
             } else {
-                object.shape = evaluate(state, object.parameters);
+                object.shape = evaluate(state, object.parameters, object.preview);
             }
         } catch (const Standard_Failure& error) {
             object.status = Status::Failed;

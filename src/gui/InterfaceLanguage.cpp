@@ -100,6 +100,18 @@ QString localizedDiagnostic(const char* source)
         return QCoreApplication::translate("Diagnostic", "Mate #%1: %2")
             .arg(error.captured(1), QCoreApplication::translate("Diagnostic", details.constData()));
     }
+    static const QRegularExpression component(QStringLiteral(R"(^Component #(\d+): (.+)$)"));
+    if (const auto match = component.match(translated); match.hasMatch()) {
+        const auto details = match.captured(2).toUtf8();
+        return QCoreApplication::translate("Diagnostic", "Component #%1: %2")
+            .arg(match.captured(1), localizedDiagnostic(details.constData()));
+    }
+    const auto contextPrefix = QStringLiteral("Contextual reference or edit failed: ");
+    if (translated.startsWith(contextPrefix)) {
+        const auto details = translated.mid(contextPrefix.size()).toUtf8();
+        return QCoreApplication::translate("Diagnostic", "Contextual reference or edit failed: %1")
+            .arg(QCoreApplication::translate("Diagnostic", details.constData()));
+    }
     static const QRegularExpression object(QStringLiteral(R"(^Object #(\d+): (.+)$)"));
     if (const auto error = object.match(translated); error.hasMatch()) {
         const auto details = error.captured(2).toUtf8();

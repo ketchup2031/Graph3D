@@ -35,6 +35,7 @@ constexpr int linkedVersion = 7;
 constexpr int curveSketchVersion = 8;
 constexpr int configurationVersion = 9;
 constexpr int machiningVersion = 10;
+constexpr int motionVersion = 11;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -45,6 +46,7 @@ constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
 constexpr std::array holeStyles{"straight", "counterbore", "countersink"};
+constexpr std::array mateModes{"align", "distance", "angle", "travel", "screw"};
 constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection",
     "tangent", "parallel", "equal", "symmetric", "angle", "fix-point"};
 
@@ -454,18 +456,33 @@ geometry::MateSurface decodeSurface(const QJsonValue& value)
 
 QJsonObject encodeMate(const geometry::Mate& mate)
 {
-    return {{"component", mate.component}, {"target", mate.target}, {"moving", encodeSurface(mate.moving)},
+    QJsonObject value{{"component", mate.component}, {"target", mate.target}, {"moving", encodeSurface(mate.moving)},
             {"reference", encodeSurface(mate.reference)}, {"opposite", mate.opposite}};
+    if (mate.mode != geometry::MateMode::Align) {
+        value.insert("mode", name(mate.mode, mateModes));
+        value.insert("value", encodeNumber(mate.value));
+        value.insert("minimum", encodeNumber(mate.minimum));
+        value.insert("maximum", encodeNumber(mate.maximum));
+    }
+    return value;
 }
 
-geometry::Mate decodeMate(const QJsonValue& value)
+geometry::Mate decodeMate(const QJsonValue& value, int version)
 {
     const auto object = value.toObject();
     if (!object.value("opposite").isBool()) {
         fileError(QStringLiteral("Invalid assembly mate."));
     }
-    return {integer(object.value("component"), "component"), integer(object.value("target"), "target"),
+    geometry::Mate mate{integer(object.value("component"), "component"), integer(object.value("target"), "target"),
             decodeSurface(object.value("moving")), decodeSurface(object.value("reference")), object.value("opposite").toBool()};
+    if (object.contains("mode")) {
+        if (version < motionVersion) { fileError(QStringLiteral("This mate requires project format version 11.")); }
+        mate.mode = parseName<geometry::MateMode>(object.value("mode"), mateModes, "mode");
+        mate.value = number(object.value("value"), "value");
+        mate.minimum = number(object.value("minimum"), "minimum");
+        mate.maximum = number(object.value("maximum"), "maximum");
+    }
+    return mate;
 }
 
 QJsonObject encodeObject(const document::Object& object, const QString& path)
@@ -585,12 +602,18 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
                 if (component.fixed) {
                     value.insert("fixed", true);
                 }
+                if (component.simplified) { value.insert("simplified", true); }
+                if (const auto& context = component.context) {
+                    value.insert("context", QJsonObject{{"reference", context->reference}, {"face", encodeFace(context->face)},
+                        {"targetFace", encodeFace(context->targetFace)}, {"clearance", encodeNumber(context->clearance)}});
+                }
                 components.append(value);
             }
             QJsonObject result{{"type", "assembly"}, {"components", components}};
             if (!item.mates.empty()) {
                 result.insert("mates", encodeList(item.mates, encodeMate));
             }
+            if (item.driveAngle != 0) { result.insert("driveAngle", encodeNumber(item.driveAngle)); }
             return result;
         } else if constexpr (std::is_same_v<Type, document::LinkedComponent>) {
             const QFileInfo owner(path), source(QString::fromStdString(item.sourcePath));
@@ -827,12 +850,28 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
             if (component.contains("fixed") && (version < linkedVersion || !component.value("fixed").isBool())) {
                 fileError(QStringLiteral("Invalid component grounding flag."));
             }
-            assembly.components.push_back({integer(component.value("body"), "body"),
+            if (component.contains("simplified") && (version < motionVersion || !component.value("simplified").isBool())) {
+                fileError(QStringLiteral("Invalid simplified component flag."));
+            }
+            document::Component instance{integer(component.value("body"), "body"),
                 {signedInteger(component.value("anchor"), "anchor"), decodePoint3(component.value("offset")),
-                 decodePoint3(component.value("angles"))}, component.value("fixed").toBool()});
+                 decodePoint3(component.value("angles"))}, component.value("fixed").toBool(), component.value("simplified").toBool()};
+            if (component.contains("context")) {
+                const auto context = component.value("context").toObject();
+                if (version < motionVersion || context.isEmpty()) { fileError(QStringLiteral("Invalid contextual component edit.")); }
+                const auto index = integer(context.value("reference"), "reference");
+                if (index > static_cast<int>(assembly.components.size())) { fileError(QStringLiteral("Invalid contextual component reference.")); }
+                instance.context = geometry::ContextFaceEdit{index, decodeFace(context.value("face")),
+                    decodeFace(context.value("targetFace")), number(context.value("clearance"), "clearance")};
+            }
+            assembly.components.push_back(std::move(instance));
         }
         if (object.contains("mates")) {
-            assembly.mates = decodeList(object.value("mates"), 0, 512, decodeMate);
+            assembly.mates = decodeList(object.value("mates"), 0, 512, [version](const auto& mate) { return decodeMate(mate, version); });
+        }
+        if (object.contains("driveAngle")) {
+            if (version < motionVersion) { fileError(QStringLiteral("This motion requires project format version 11.")); }
+            assembly.driveAngle = number(object.value("driveAngle"), "driveAngle");
         }
         return assembly;
     }
@@ -866,12 +905,16 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::ranges::any_of(sketch->constraints, [](const auto& c) {
                     return c.kind > geometry::ConstraintKind::OnProjection;
                 }));
-            if ((hole && (hole->size.thread || hole->size.style != geometry::HoleStyle::Straight))
+            if (assembly && (assembly->driveAngle != 0
+                || std::ranges::any_of(assembly->mates, [](const auto& mate) { return mate.mode != geometry::MateMode::Align; })
+                || std::ranges::any_of(assembly->components, [](const auto& c) { return c.simplified || c.context.has_value(); }))) {
+                version = motionVersion;
+            } else if ((hole && (hole->size.thread || hole->size.style != geometry::HoleStyle::Straight))
                 || (edges && (edges->followTangency || edges->endRadius))
                 || std::holds_alternative<document::FeaturePattern>(object.parameters)
                 || std::holds_alternative<document::MoveFace>(object.parameters)
                 || std::holds_alternative<document::RemoveBlend>(object.parameters)) {
-                version = machiningVersion;
+                version = std::max(version, machiningVersion);
             } else if (curvedSketch || (sweep && sweep->pathSketch)) {
                 version = std::max(version, curveSketchVersion);
             } else if (std::holds_alternative<document::LinkedComponent>(object.parameters) || object.properties != document::PartProperties{}
@@ -945,7 +988,7 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
          && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion
-         && parsedVersion != configurationVersion && parsedVersion != machiningVersion)
+         && parsedVersion != configurationVersion && parsedVersion != machiningVersion && parsedVersion != motionVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

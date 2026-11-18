@@ -10,6 +10,7 @@
 class QTableWidget;
 class QListWidget;
 class QLabel;
+class QDoubleSpinBox;
 
 namespace graph3d {
 
@@ -24,14 +25,17 @@ public:
 private:
     void appendComponent(const document::Component& component);
 
-    void addMate();
+    void addMate(int index = -1);
     void refreshMates();
+    void editContext();
     const document::Document& document_;
     Sources sources_;
     QListWidget* matesList_;
     QLabel* diagnosis_;
     std::vector<geometry::Mate> mates_;
     QTableWidget* table_;
+    QDoubleSpinBox* drive_ = nullptr;
+    std::vector<std::optional<geometry::ContextFaceEdit>> contexts_;
     bool editing_;
 };
 

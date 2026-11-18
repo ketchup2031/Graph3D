@@ -15,6 +15,7 @@
 #include <TopExp_Explorer.hxx>
 
 #include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Pln.hxx>
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 #include <optional>
 #include <stdexcept>
@@ -135,6 +137,10 @@ struct Resolved {
     MateSurface target;
     gp_Trsf targetTransform;
     bool opposite;
+    MateMode mode;
+    double value;
+    double minimum;
+    double maximum;
 };
 
 gp_Vec targetDirection(const Resolved& relation)
@@ -148,6 +154,7 @@ int orient(AssemblyComponentState& state, const std::vector<Resolved>& relations
     std::optional<gp_Vec> lockedAxis;
     const gp_Pnt pivot(state.transform.TranslationPart());
     for (const auto& relation : relations) {
+        if (relation.mode == MateMode::Angle || relation.mode == MateMode::Travel) { continue; }
         const auto source = vector(relation.source.direction).Transformed(state.transform);
         const auto target = targetDirection(relation);
         if (!fixed && state.rotations > 0) {
@@ -172,22 +179,94 @@ int orient(AssemblyComponentState& state, const std::vector<Resolved>& relations
             return relation.index;
         }
     }
+    if (state.rotations == 1 && lockedAxis) { state.freeRotationAxis = coords(lockedAxis->XYZ()); }
     return -1;
 }
 
-int translate(AssemblyComponentState& state, const std::vector<Resolved>& relations, bool fixed)
+int orientAngles(AssemblyComponentState& state, const std::vector<Resolved>& relations)
+{
+    const gp_Pnt pivot(state.transform.TranslationPart());
+    std::vector<const Resolved*> angles;
+    for (const auto& rel : relations) {
+        if (rel.mode == MateMode::Angle) { angles.push_back(&rel); }
+    }
+    if (angles.empty()) { return -1; }
+    const auto radians = [](double degrees) { return degrees * std::numbers::pi / 180; };
+    if (state.rotations == 1) {
+        const auto axis = vector(state.freeRotationAxis);
+        for (const auto* rel : angles) {
+            const auto from = vector(rel->source.direction).Transformed(state.transform);
+            const auto to = targetDirection(*rel);
+            const double want = radians(rel->value);
+            if (std::abs(from.Angle(to) - want) <= angularTolerance) { continue; }
+            const auto a = from - axis * from.Dot(axis);
+            const auto b = to - axis * to.Dot(axis);
+            const double norm = a.Magnitude() * b.Magnitude();
+            if (norm <= angularTolerance) { return rel->index; }
+            const double ratio = (std::cos(want) - from.Dot(axis)*to.Dot(axis)) / norm;
+            if (std::abs(ratio) > 1 + angularTolerance) { return rel->index; }
+            const double reference = std::atan2(axis.Dot(a.Crossed(b)), a.Dot(b));
+            const double delta = std::acos(std::clamp(ratio, -1., 1.));
+            const double a1 = std::remainder(reference - delta, 2*std::numbers::pi);
+            const double a2 = std::remainder(reference + delta, 2*std::numbers::pi);
+            rotate(state.transform, axis, std::abs(a1) < std::abs(a2) ? a1 : a2, pivot);
+            break;
+        }
+    } else if (state.rotations == 3) {
+        // Project onto the angular constraints iteratively in the current tangent space.
+        // Use a finite correction at antiparallel normals where the gradient vanishes.
+        for (int i = 0; i < 80; ++i) {
+            bool converged = true;
+            for (const auto* rel : angles) {
+                const auto from = vector(rel->source.direction).Transformed(state.transform);
+                const auto to = targetDirection(*rel);
+                const double difference = from.Angle(to) - radians(rel->value);
+                if (std::abs(difference) < angularTolerance / 4) { continue; }
+                const auto cross = from.Crossed(to);
+                rotate(state.transform, cross.Magnitude() > angularTolerance ? cross : crossBasis(from), difference, pivot);
+                converged = false;
+            }
+            if (converged) { break; }
+        }
+    }
+    Translation directions;
+    for (const auto* rel : angles) {
+        const auto from = vector(rel->source.direction).Transformed(state.transform);
+        const auto to = targetDirection(*rel);
+        if (std::abs(from.Angle(to) - radians(rel->value)) > angularTolerance) { return rel->index; }
+        const auto cross = from.Crossed(to);
+        if (cross.Magnitude() > angularTolerance) {
+            if (state.rotations == 1) {
+                if (std::abs(cross.Dot(vector(state.freeRotationAxis))) > angularTolerance) { directions.constrain(cross, 0); }
+            } else { directions.constrain(cross.Normalized(), 0); }
+        } else if (state.rotations == 3) {
+            const auto across = crossBasis(from);
+            directions.constrain(across, 0);
+            directions.constrain(from.Crossed(across), 0);
+        } else if (state.rotations == 1 && !parallel(from, vector(state.freeRotationAxis))) {
+            directions.constrain(vector(state.freeRotationAxis), 0);
+        }
+    }
+    state.rotations = std::max(0, state.rotations - static_cast<int>(directions.rows.size()));
+    if (state.rotations != 1) { state.freeRotationAxis = {}; }
+    return -1;
+}
+
+int translate(AssemblyComponentState& state, const std::vector<Resolved>& relations, bool fixed, double screwTravel)
 {
     Translation translation;
     for (const auto& relation : relations) {
+        if (relation.mode == MateMode::Angle || relation.mode == MateMode::Travel) { continue; }
         const auto target = targetDirection(relation);
         const gp_Vec delta(point(relation.source.point).Transformed(state.transform),
                            point(relation.target.point).Transformed(relation.targetTransform));
-        const auto apply = [&](const gp_Vec& direction) {
-            const auto amount = direction.Dot(delta);
+        const auto apply = [&](const gp_Vec& direction, double separation = 0) {
+            const auto amount = direction.Dot(delta) + separation;
             return fixed ? std::abs(amount) <= linearTolerance : translation.constrain(direction, amount);
         };
         if (relation.source.kind == MateKind::Plane) {
-            if (!apply(target)) {
+            const auto reference = vector(relation.target.direction).Transformed(relation.targetTransform);
+            if (!apply(reference, relation.mode == MateMode::Distance ? relation.value : 0)) {
                 return relation.index;
             }
         } else {
@@ -195,10 +274,46 @@ int translate(AssemblyComponentState& state, const std::vector<Resolved>& relati
             if (!apply(across) || !apply(target.Crossed(across))) {
                 return relation.index;
             }
+            if (relation.mode == MateMode::Screw && !apply(target, screwTravel)) { return relation.index; }
         }
     }
     state.translations = fixed ? 0 : 3 - static_cast<int>(translation.rows.size());
-    state.transform.SetTranslationPart(gp_Vec(state.transform.TranslationPart()) + translation.delta());
+    auto displacement = translation.delta();
+    const auto separation = [&](const Resolved& relation, const gp_Vec& along) {
+        return gp_Vec(point(relation.target.point).Transformed(relation.targetTransform),
+            point(relation.source.point).Transformed(state.transform)).Dot(along) + displacement.Dot(along);
+    };
+    for (const auto& relation : relations) {
+        if (relation.mode != MateMode::Travel || relation.maximum - relation.minimum > linearTolerance || fixed) { continue; }
+        const auto along = vector(relation.target.direction).Transformed(relation.targetTransform);
+        if (!translation.constrain(along, displacement.Dot(along) + relation.minimum - separation(relation, along))) {
+            return relation.index;
+        }
+        displacement = translation.delta();
+        state.translations = 3 - static_cast<int>(translation.rows.size());
+    }
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        bool changed = false;
+        for (const auto& relation : relations) {
+            if (relation.mode != MateMode::Travel) { continue; }
+            const auto along = vector(relation.target.direction).Transformed(relation.targetTransform);
+            const auto value = separation(relation, along);
+            const auto clipped = std::clamp(value, relation.minimum, relation.maximum);
+            if (std::abs(clipped - value) <= linearTolerance) { continue; }
+            auto direction = along;
+            for (const auto& equation : translation.rows) { direction -= equation.normal * direction.Dot(equation.normal); }
+            if (fixed || direction.SquareMagnitude() <= angularTolerance) { return relation.index; }
+            displacement += direction * ((clipped - value) / direction.SquareMagnitude());
+            changed = true;
+        }
+        if (!changed) { break; }
+    }
+    for (const auto& relation : relations) {
+        if (relation.mode != MateMode::Travel) { continue; }
+        const auto value = separation(relation, vector(relation.target.direction).Transformed(relation.targetTransform));
+        if (value < relation.minimum - linearTolerance || value > relation.maximum + linearTolerance) { return relation.index; }
+    }
+    state.transform.SetTranslationPart(gp_Vec(state.transform.TranslationPart()) + displacement);
     return -1;
 }
 
@@ -363,7 +478,7 @@ std::vector<MateSurface> assemblySurfaces(const TopoDS_Shape& shape)
 
 // Components are solved against earlier instances. This avoids hidden grounding
 // and lets the user's placement choose the pose in the degrees left free.
-AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates)
+static AssemblySolution solvePoses(std::span<const PlacedBody> bodies, std::span<const Mate> mates, double driveAngle)
 {
     AssemblySolution result;
     result.components.reserve(bodies.size());
@@ -380,6 +495,11 @@ AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<con
         result.error = "An assembly can contain at most 512 mates.";
         return result;
     }
+    int screw = -1;
+    if (!std::isfinite(driveAngle) || std::abs(driveAngle) > maxComponentOffset) {
+        result.error = "The drive angle must be within ±1,000,000 degrees.";
+        return result;
+    }
     for (int i = 0; i < static_cast<int>(mates.size()); ++i) {
         const auto& mate = mates[i];
         const auto valid = [](const MateSurface& surface) {
@@ -388,7 +508,18 @@ AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<con
                 && std::isfinite(surface.radius)
                 && (surface.kind == MateKind::Plane ? surface.radius == 0 : surface.radius > 0);
         };
-        if (!valid(mate.moving) || !valid(mate.reference)
+        const bool range = std::isfinite(mate.minimum) && std::isfinite(mate.maximum)
+            && mate.minimum <= mate.maximum && std::abs(mate.minimum) <= maxComponentOffset && std::abs(mate.maximum) <= maxComponentOffset;
+        const bool finiteValue = std::isfinite(mate.value);
+        const bool planes = mate.moving.kind == MateKind::Plane && mate.reference.kind == MateKind::Plane;
+        const bool cylinders = mate.moving.kind == MateKind::Cylinder && mate.reference.kind == MateKind::Cylinder;
+        const bool validMode = mate.mode == MateMode::Align
+            || (mate.mode == MateMode::Distance && planes && finiteValue && std::abs(mate.value) <= maxComponentOffset)
+            || (mate.mode == MateMode::Angle && finiteValue && mate.value >= 0 && mate.value <= 180)
+            || (mate.mode == MateMode::Travel && planes && range)
+            || (mate.mode == MateMode::Screw && cylinders && range && finiteValue && std::abs(mate.value) >= .001
+                && std::abs(mate.value) <= maxComponentOffset);
+        if (!valid(mate.moving) || !valid(mate.reference) || !validMode
             || mate.target < 1 || mate.component <= mate.target || mate.component > static_cast<int>(bodies.size())
             || mate.moving.kind != mate.reference.kind) {
             result.failedMate = i;
@@ -402,7 +533,27 @@ AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<con
             result.error = "A mated surface is missing or ambiguous after updating the component.";
             return result;
         }
-        resolved[mate.component - 1].push_back({i, *moving, *base, {}, mate.opposite});
+        if (mate.mode == MateMode::Screw) {
+            if (screw >= 0) {
+                result.failedMate = i;
+                result.error = "Use one screw drive per assembly.";
+                return result;
+            }
+            screw = i;
+            result.screwTravel = std::clamp(driveAngle * mate.value / 360, mate.minimum, mate.maximum);
+            result.driveAngle = result.screwTravel * 360 / mate.value;
+            if (std::abs(result.driveAngle) > maxComponentOffset) {
+                result.failedMate = i;
+                result.error = "The screw travel range is outside the available drive angle.";
+                return result;
+            }
+        }
+        resolved[mate.component - 1].push_back({i, *moving, *base, {}, mate.opposite,
+            mate.mode, mate.value, mate.minimum, mate.maximum});
+    }
+    if (screw < 0 && driveAngle != 0) {
+        result.error = "Add a screw drive before setting its rotation.";
+        return result;
     }
     for (int i = 0; i < static_cast<int>(bodies.size()); ++i) {
         const auto& component = bodies[i];
@@ -422,7 +573,24 @@ AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<con
         }
         result.failedMate = orient(state, relations, component.fixed);
         if (result.failedMate < 0) {
-            result.failedMate = translate(state, relations, component.fixed);
+            result.failedMate = orientAngles(state, relations);
+        }
+        if (result.failedMate < 0 && screw >= 0 && mates[screw].target == i + 1) {
+            const auto& cylinder = resolved[mates[screw].component - 1];
+            const auto it = std::ranges::find(cylinder, screw, &Resolved::index);
+            const auto axis = vector(it->target.direction).Transformed(state.transform);
+            if (state.rotations != 1 || !parallel(axis, vector(state.freeRotationAxis))) {
+                result.failedMate = screw;
+                result.error = "The screw driver needs one free rotation about its cylindrical axis.";
+                return result;
+            }
+            rotate(state.transform, axis, std::remainder(result.driveAngle, 360.) * std::numbers::pi / 180,
+                point(it->target.point).Transformed(state.transform));
+            state.rotations = 0;
+            state.freeRotationAxis = {};
+        }
+        if (result.failedMate < 0) {
+            result.failedMate = translate(state, relations, component.fixed, result.screwTravel);
         }
         if (result.failedMate >= 0) {
             result.error = "The mate conflicts with the component pose or another mate.";
@@ -430,6 +598,68 @@ AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<con
         }
         result.components.push_back(state);
     }
+    return result;
+}
+
+AssemblySolution solveAssembly(std::span<const PlacedBody> bodies, std::span<const Mate> mates, double driveAngle)
+{
+    auto result = solvePoses(bodies, mates, driveAngle);
+    if (!result.error.empty() || std::ranges::none_of(bodies, [](const auto& body) { return body.context.has_value(); })) {
+        return result;
+    }
+    std::vector<TopoDS_Shape> shapes;
+    shapes.reserve(bodies.size());
+    for (const auto& body : bodies) { shapes.push_back(body.shape); }
+    std::vector<PlacedBody> updating;
+    updating.reserve(bodies.size());
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        updating.push_back({shapes[i], bodies[i].placement, bodies[i].fixed});
+    }
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        if (!bodies[i].context) { continue; }
+        const auto& context = *bodies[i].context;
+        const auto prefix = "Component #" + std::to_string(i + 1) + ": ";
+        if (context.reference < 1 || static_cast<std::size_t>(context.reference) > i || !std::isfinite(context.clearance)
+            || std::abs(context.clearance) > maxComponentOffset) {
+            result.error = prefix + "Choose an earlier component and a finite contextual clearance.";
+            return result;
+        }
+        const auto ref = static_cast<std::size_t>(context.reference - 1);
+        try {
+            resolveExactPlanarFace(shapes[i], context.face);
+            const auto target = resolveSketchFace(shapes[ref], context.targetFace);
+            const auto plane = BRepAdaptor_Surface(target).Plane();
+            const auto pose = result.components[i].transform;
+            const auto other = result.components[ref].transform;
+            const auto along = vector(context.face.outward).Transformed(pose);
+            if (!parallel(along, gp_Vec(plane.Axis().Direction()).Transformed(other))) {
+                result.error = prefix + "The contextual planes are no longer parallel.";
+                return result;
+            }
+            const auto amount = gp_Vec(point(context.face.center).Transformed(pose),
+                plane.Location().Transformed(other)).Dot(along) + context.clearance;
+            if (std::abs(amount) <= linearTolerance) { continue; }
+            shapes[i] = movePlanarFace(shapes[i], context.face, amount);
+            result = solvePoses(updating, mates, driveAngle);
+            if (!result.error.empty()) { return result; }
+            const auto changed = point(context.face.center).Translated(vector(context.face.outward) * amount)
+                .Transformed(result.components[i].transform);
+            const auto newNormal = vector(context.face.outward).Transformed(result.components[i].transform);
+            if (!parallel(newNormal, gp_Vec(plane.Axis().Direction()).Transformed(other))
+                || std::abs(gp_Vec(plane.Location().Transformed(other), changed).Dot(newNormal) - context.clearance) > linearTolerance) {
+                result.error = prefix + "The contextual edit conflicts with the component mates.";
+                return result;
+            }
+        } catch (const std::exception& error) {
+            result.error = prefix + "Contextual reference or edit failed: " + error.what();
+            return result;
+        } catch (const Standard_Failure& error) {
+            result.error = prefix + "Contextual reference or edit failed: "
+                + (error.GetMessageString() ? std::string(error.GetMessageString()) : std::string("Open CASCADE failed."));
+            return result;
+        }
+    }
+    result.contextualShapes = std::move(shapes);
     return result;
 }
 

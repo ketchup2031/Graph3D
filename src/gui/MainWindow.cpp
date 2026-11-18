@@ -425,6 +425,7 @@ void MainWindow::createMenus()
     relink_ = menuAction(assemblies, tr("Change component source…"), "relinkComponent");
     partProperties_ = menuAction(assemblies, tr("Component properties…"), "componentProperties");
     interference_ = menuAction(assemblies, tr("Check component interference…"), "checkInterference");
+    motion_ = menuAction(assemblies, tr("Move and check assembly…"), "assemblyMotion");
     assemblyStructure_ = menuAction(assemblies, tr("Assembly structure…"), "assemblyStructure");
     connect(insertLinked_, &QAction::triggered, this, [this] { insertLinkedComponent(false); });
     connect(updateLinked_, &QAction::triggered, this, [this] { updateLinkedComponents(false); });
@@ -432,6 +433,7 @@ void MainWindow::createMenus()
     connect(relink_, &QAction::triggered, this, [this] { insertLinkedComponent(true); });
     connect(partProperties_, &QAction::triggered, this, &MainWindow::editPartProperties);
     connect(interference_, &QAction::triggered, this, &MainWindow::showAssemblyInterference);
+    connect(motion_, &QAction::triggered, this, &MainWindow::moveAssembly);
     connect(assemblyStructure_, &QAction::triggered, this, &MainWindow::showAssemblyStructure);
 
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
@@ -731,6 +733,8 @@ void MainWindow::updateActions()
     relink_->setEnabled(available && linked);
     partProperties_->setEnabled(available && object && document::isBody(object->parameters));
     interference_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
+    motion_->setEnabled(available && object && std::holds_alternative<document::Assembly>(object->parameters)
+        && object->status == document::Status::Ready);
     assemblyStructure_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
     drawing_->setEnabled(modeling && object && validBody(*object));
     for (auto* action : machiningActions_) {

@@ -71,6 +71,7 @@ private:
     void updateLinkedComponents(bool selected);
     void editPartProperties();
     void showAssemblyInterference();
+    void moveAssembly();
     void showAssemblyStructure();
     void showDrawing();
     void createModelTree();
@@ -133,6 +134,7 @@ private:
     QAction* relink_ = nullptr;
     QAction* partProperties_ = nullptr;
     QAction* interference_ = nullptr;
+    QAction* motion_ = nullptr;
     QAction* assemblyStructure_ = nullptr;
     QList<QAction*> machiningActions_;
     std::optional<Machining> pendingMachining_;
