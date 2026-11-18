@@ -6,6 +6,7 @@
 #include "geometry/Assembly.h"
 #include "geometry/BodyTransform.h"
 #include "geometry/PartFeatures.h"
+#include "geometry/Fastener.h"
 #include "geometry/Primitive.h"
 #include "geometry/SketchModeling.h"
 
@@ -87,6 +88,7 @@ struct ComponentRecord {
     std::optional<double> densityKgM3;
     std::vector<ComponentRecord> children;
     std::string identity;
+    bool standard = false;
     bool operator==(const ComponentRecord&) const = default;
 };
 
@@ -119,7 +121,8 @@ struct MotionInterference {
 };
 using Parameters = std::variant<Primitive, geometry::Sketch, Extrude, Revolve, Boolean, Imported,
                                 Hole, EdgeTreatment, Transform, Assembly, geometry::DatumPlane, geometry::DatumAxis,
-                                Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend>;
+                                Sweep, Loft, Shell, DraftAngle, LinkedComponent, FeaturePattern, MoveFace, RemoveBlend,
+                                geometry::Fastener>;
 
 bool isBody(const Parameters& parameters);
 bool isAdvanced(const Parameters& parameters);
@@ -163,6 +166,8 @@ public:
     bool setDensity(ObjectId id, std::optional<double> densityKgM3);
     ObjectId addTransform(ObjectId body, geometry::BodyTransform parameters);
     ObjectId addAssembly(Assembly assembly);
+    ObjectId addFastener(geometry::Fastener item);
+    bool editFastener(ObjectId id, geometry::Fastener item);
     ObjectId addLinkedComponent(LinkedComponent component);
     bool refreshLinkedComponents(std::vector<std::pair<ObjectId, LinkedComponent>> components);
     bool setPartProperties(ObjectId id, PartProperties properties);

@@ -19,6 +19,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/SketchConstraints.cpp
     src/geometry/PartFeatures.cpp
     src/geometry/DirectFeatures.cpp
+    src/geometry/Fastener.cpp
     src/geometry/AdvancedModeling.cpp
     src/geometry/BodyTransform.cpp
     src/geometry/Assembly.cpp src/geometry/AssemblyMates.cpp)
@@ -36,11 +37,11 @@ add_library(graph3d_document STATIC src/document/Document.cpp src/document/Formu
 set_target_properties(graph3d_document PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_document PUBLIC graph3d_geometry)
 
-add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/ProjectedEdges.cpp src/drawing/ModelReference.cpp src/drawing/ModelViews.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp src/drawing/DraftCurves.cpp src/drawing/Specification.cpp)
+add_library(graph3d_drawing STATIC src/drawing/Projection.cpp src/drawing/ProjectedEdges.cpp src/drawing/ModelReference.cpp src/drawing/ModelViews.cpp src/drawing/DrawingSheet.cpp src/drawing/Draft.cpp src/drawing/DraftCurves.cpp src/drawing/Specification.cpp src/drawing/SpecificationDocument.cpp)
 set_target_properties(graph3d_drawing PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_drawing PUBLIC graph3d_geometry Qt6::Gui PRIVATE TKHLR TKG3d TKTopAlgo TKGeomBase TKPrim TKBO)
 
-add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/LinkedComponents.cpp src/io/Exchange.cpp src/io/DraftIO.cpp src/io/DxfIO.cpp src/io/ModelViewsIO.cpp src/io/AssemblyDrawingIO.cpp)
+add_library(graph3d_io STATIC src/io/FileIO.cpp src/io/ProjectIO.cpp src/io/LinkedComponents.cpp src/io/Exchange.cpp src/io/DraftIO.cpp src/io/DxfIO.cpp src/io/ModelViewsIO.cpp src/io/AssemblyDrawingIO.cpp src/io/SpecificationIO.cpp)
 set_target_properties(graph3d_io PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core
     PRIVATE graph3d_drawing TKDESTEP TKXSBase TKMesh TKTopAlgo)
@@ -59,7 +60,8 @@ endif()
 add_library(graph3d_ui STATIC src/gui/DocumentWindow.cpp src/gui/DocumentWindow.h src/gui/MainWindow.cpp src/gui/SketchEditor.cpp
     src/gui/SketchEditor.h src/gui/PropertyPanel.cpp src/gui/PropertyPanel.h src/gui/DrawingDialog.cpp
     src/gui/TransformEditor.cpp src/gui/AdvancedDialog.cpp
-    src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp
+    src/gui/AssemblyDialog.cpp src/gui/AssemblyMotion.cpp src/gui/FastenerDialog.cpp src/gui/SpecificationWindow.cpp
+    src/gui/SpecificationWindow.h
     src/gui/StartPage.cpp src/gui/StartPage.h
     src/gui/UserPreferences.cpp src/gui/InterfaceLanguage.cpp
     src/gui/LineInput.cpp src/gui/LineInput.h src/gui/ConfigurationDialog.cpp
@@ -127,6 +129,12 @@ if(BUILD_TESTING)
     target_link_libraries(family_machining_test PRIVATE graph3d_io graph3d_drawing TKTopAlgo TKPrim)
     add_test(NAME family_machining COMMAND family_machining_test "${CMAKE_CURRENT_SOURCE_DIR}/examples/bushing-family.graph3d")
     set_tests_properties(family_machining PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(specification_test tests/drawing/SpecificationTest.cpp)
+    set_target_properties(specification_test PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(specification_test PRIVATE graph3d_io graph3d_drawing TKTopAlgo)
+    add_test(NAME specification COMMAND specification_test)
+    set_tests_properties(specification PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     option(GRAPH3D_GUI_TESTS "Run GUI tests on an interactive OpenGL desktop" OFF)
     if(GRAPH3D_GUI_TESTS)

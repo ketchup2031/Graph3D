@@ -67,6 +67,8 @@ private:
     void measureBodyDistance();
     void transformCurrent(const QString& title, const geometry::BodyTransform& defaults);
     void configureAssembly(int id);
+    void configureFastener(int id = 0);
+    void createAssemblySpecification();
     void insertLinkedComponent(bool replace);
     void updateLinkedComponents(bool selected);
     void editPartProperties();
@@ -135,6 +137,7 @@ private:
     QAction* partProperties_ = nullptr;
     QAction* interference_ = nullptr;
     QAction* motion_ = nullptr;
+    QAction* assemblySpecification_ = nullptr;
     QAction* assemblyStructure_ = nullptr;
     QList<QAction*> machiningActions_;
     std::optional<Machining> pendingMachining_;

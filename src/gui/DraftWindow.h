@@ -68,6 +68,8 @@ private:
     void placeLocalSection();
     void updateModelStatus(const QString& failure = {});
     void showSpecification();
+    void createSpecification();
+    void linkSpecification();
     void placePosition();
     void removePosition();
     void setSpecificationExport(bool enabled);
@@ -98,6 +100,9 @@ private:
     QAction* sectionLine_;
     QAction* localRegion_;
     QAction* specification_;
+    QAction* createSpecification_;
+    QAction* linkSpecification_;
+    QAction* unlinkSpecification_;
     QAction* placePosition_;
     QAction* removePosition_;
     QAction* specificationExport_;

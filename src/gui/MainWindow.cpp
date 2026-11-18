@@ -13,6 +13,7 @@
 #include "gui/UserPreferences.h"
 #include "io/Exchange.h"
 #include "io/LinkedComponents.h"
+#include "io/SpecificationIO.h"
 #include "io/ProjectIO.h"
 #include "viewport/Viewport.h"
 
@@ -419,6 +420,8 @@ void MainWindow::createMenus()
     auto* assemblies = model->addMenu(tr("Assemblies"));
     createAssembly_ = menuAction(assemblies, tr("Create assembly…"), "createAssembly");
     connect(createAssembly_, &QAction::triggered, this, [this] { configureAssembly(0); });
+    auto* standardParts = menuAction(assemblies, tr("Insert catalog fastener…"), "insertCatalogFastener");
+    connect(standardParts, &QAction::triggered, this, [this] { configureFastener(); });
     insertLinked_ = menuAction(assemblies, tr("Insert component from file…"), "insertLinkedComponent");
     updateLinked_ = menuAction(assemblies, tr("Update all linked components"), "updateLinkedComponents");
     updateSelectedLink_ = menuAction(assemblies, tr("Update selected component"), "updateSelectedLink");
@@ -426,6 +429,7 @@ void MainWindow::createMenus()
     partProperties_ = menuAction(assemblies, tr("Component properties…"), "componentProperties");
     interference_ = menuAction(assemblies, tr("Check component interference…"), "checkInterference");
     motion_ = menuAction(assemblies, tr("Move and check assembly…"), "assemblyMotion");
+    assemblySpecification_ = menuAction(assemblies, tr("Create specification document…"), "createAssemblySpecification");
     assemblyStructure_ = menuAction(assemblies, tr("Assembly structure…"), "assemblyStructure");
     connect(insertLinked_, &QAction::triggered, this, [this] { insertLinkedComponent(false); });
     connect(updateLinked_, &QAction::triggered, this, [this] { updateLinkedComponents(false); });
@@ -434,6 +438,7 @@ void MainWindow::createMenus()
     connect(partProperties_, &QAction::triggered, this, &MainWindow::editPartProperties);
     connect(interference_, &QAction::triggered, this, &MainWindow::showAssemblyInterference);
     connect(motion_, &QAction::triggered, this, &MainWindow::moveAssembly);
+    connect(assemblySpecification_, &QAction::triggered, this, &MainWindow::createAssemblySpecification);
     connect(assemblyStructure_, &QAction::triggered, this, &MainWindow::showAssemblyStructure);
 
     auto* drawingMenu = menuBar()->addMenu(tr("&Drawing"));
@@ -558,6 +563,8 @@ void MainWindow::createModelTree()
         const auto* object = document_.find(id);
         if (object && std::holds_alternative<document::Assembly>(object->parameters)) {
             configureAssembly(id);
+        } else if (object && std::holds_alternative<geometry::Fastener>(object->parameters)) {
+            configureFastener(id);
         } else if (object && std::holds_alternative<document::Hole>(object->parameters)) {
             const auto& hole = std::get<document::Hole>(object->parameters);
             configureHole(hole.body, hole.face, hole.size, id);
@@ -735,6 +742,7 @@ void MainWindow::updateActions()
     interference_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
     motion_->setEnabled(available && object && std::holds_alternative<document::Assembly>(object->parameters)
         && object->status == document::Status::Ready);
+    assemblySpecification_->setEnabled(host_ && available && assemblyObject && object->status == document::Status::Ready);
     assemblyStructure_->setEnabled(available && assemblyObject && object->status == document::Status::Ready);
     drawing_->setEnabled(modeling && object && validBody(*object));
     for (auto* action : machiningActions_) {
@@ -797,6 +805,9 @@ QString MainWindow::objectName(const document::Object& object) const
             return tr("Mirror");
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
             return tr("Assembly");
+        } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
+            return operation.kind == geometry::FastenerKind::Bolt ? tr("Hex bolt")
+                : operation.kind == geometry::FastenerKind::Nut ? tr("Hex nut") : tr("Flat washer");
         } else {
             switch (operation.operation) {
             case geometry::BooleanOperation::Union: return tr("Union");
@@ -874,6 +885,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
             return source(operation.body);
         } else if constexpr (std::is_same_v<Type, document::Assembly>) {
             return tr("Components: %1").arg(operation.components.size());
+        } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
+            return QString::fromStdString(geometry::fastenerDesignation(operation));
         }
         return {};
     }, parameters);
@@ -1375,6 +1388,21 @@ void MainWindow::configureAssembly(int id)
         } else {
             addFeature(tr("Create assembly"), [this, &assembly] { return document_.addAssembly(assembly); });
         }
+    }
+}
+
+void MainWindow::createAssemblySpecification()
+{
+    if (!host_ || !selectedId()) { return; }
+    if ((projectPath_.isEmpty() || isWindowModified()) && !saveProject(false)) { return; }
+    try {
+        drawing::SpecificationDocument spec;
+        spec.sourcePath = QFileInfo(projectPath_).absoluteFilePath();
+        spec.assemblyId = selectedId();
+        drawing::mergeSpecification(spec, *io::readSpecificationAssembly(spec));
+        host_->createSpecification(std::move(spec));
+    } catch (const std::exception& error) {
+        showSceneError(localizedDiagnostic(error.what()));
     }
 }
 

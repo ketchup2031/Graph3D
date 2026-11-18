@@ -11,6 +11,7 @@ using SpecificationCells = std::array<QString, 6>;
 struct SpecificationBand {
     std::array<QStringList, 6> cells;
     int lines;
+    bool section = false;
 };
 using SpecificationPage = std::vector<SpecificationBand>;
 

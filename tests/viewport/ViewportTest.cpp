@@ -1892,6 +1892,50 @@ private slots:
         QVERIFY(source->text(2).isEmpty());
     }
 
+    void editStandaloneSpecificationAndCatalog()
+    {
+        graph3d::DocumentWindow host;
+        host.resize(1000, 700);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        auto* create = host.findChild<QAction*>("newSpecification");
+        QVERIFY(create);
+        create->trigger();
+        auto* spec = host.findChild<QMainWindow*>("specificationDocument");
+        QVERIFY(spec);
+        auto* table = spec->findChild<QTableWidget*>("specificationDocumentRows");
+        auto* add = spec->findChild<QAction*>("addManualSpecRow");
+        QVERIFY(table && add);
+        add->trigger();
+        QCOMPARE(table->rowCount(), 1);
+        table->item(0, 1)->setText("Consumables");
+        table->item(0, 5)->setText("3");
+        QCoreApplication::processEvents();
+        QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Consumables"));
+        QCOMPARE(table->item(0, 5)->text(), QStringLiteral("3"));
+        QVERIFY(spec->isWindowModified());
+
+        graph3d::MainWindow model;
+        model.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&model));
+        QVERIFY(model.initializeScene());
+        auto* insert = model.findChild<QAction*>("insertCatalogFastener");
+        auto* tree = model.findChild<QTreeWidget*>("modelTree");
+        QVERIFY(insert && tree);
+        QTimer::singleShot(0, &model, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != "fastenerCatalogDialog") { if (dialog) { dialog->reject(); } return; }
+            dialog->findChild<QComboBox*>("catalogFastenerKind")->setCurrentIndex(2);
+            auto* diameter = dialog->findChild<QComboBox*>("catalogFastenerDiameter");
+            diameter->setCurrentIndex(diameter->findData(10));
+            dialog->accept();
+        });
+        insert->trigger();
+        QVERIFY(tree->currentItem());
+        QCOMPARE(tree->currentItem()->text(0), QStringLiteral("Flat washer 2"));
+        QCOMPARE(tree->currentItem()->text(1), QStringLiteral("G3D-W M10"));
+    }
+
     void moveScrewAndScanThroughMenus()
     {
         graph3d::DocumentWindow window;

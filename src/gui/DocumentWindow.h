@@ -12,9 +12,11 @@ class QTabWidget;
 
 namespace graph3d {
 
+namespace drawing { struct SpecificationDocument; }
 class DraftWindow;
 class MainWindow;
 class StartPage;
+class SpecificationWindow;
 
 class DocumentWindow final : public QMainWindow {
     Q_OBJECT
@@ -31,6 +33,7 @@ protected:
 private:
     friend class DraftWindow;
     friend class MainWindow;
+    friend class SpecificationWindow;
 
     struct Tab {
         QString id;
@@ -43,6 +46,8 @@ private:
     void browse();
     void newProject(bool cube = false, bool sketch = false);
     void newDrawing();
+    void newSpecification();
+    void createSpecification(drawing::SpecificationDocument spec);
     void closeCurrent();
     void addDocument(QWidget* document, const QString& label = {}, const QString& imported = {});
     bool canClose(QWidget* document);

@@ -1,0 +1,81 @@
+{
+    "assembly": 8,
+    "designation": "FL-100-A",
+    "drawing": "flange-fasteners.g3draw",
+    "format": "Graph3D Specification",
+    "history": {
+        "catalog:G3D-B M8x25": 2,
+        "catalog:G3D-B M8x35": 6,
+        "catalog:G3D-N M8": 3,
+        "catalog:G3D-W M8": 4,
+        "object:2": 1
+    },
+    "next": 7,
+    "rows": [
+        {
+            "designation": "FL-100",
+            "key": "object:2",
+            "material": "Steel",
+            "name": "Mounting flange",
+            "note": "Four clearance holes",
+            "position": 1,
+            "quantity": 1,
+            "section": "Parts"
+        },
+        {
+            "designation": "G3D-B M8x25",
+            "key": "catalog:G3D-B M8x25",
+            "material": "Steel",
+            "name": "Hex bolt",
+            "note": "Keep; \"finish\"",
+            "position": 2,
+            "quantity": 2,
+            "section": "Hardware"
+        },
+        {
+            "designation": "G3D-N M8",
+            "key": "catalog:G3D-N M8",
+            "material": "Steel",
+            "name": "Hex nut",
+            "note": "M8",
+            "position": 3,
+            "quantity": 1,
+            "section": "Standard items"
+        },
+        {
+            "designation": "G3D-W M8",
+            "key": "catalog:G3D-W M8",
+            "material": "Steel",
+            "name": "Flat washer",
+            "note": "",
+            "position": 4,
+            "quantity": 1,
+            "section": "Standard items"
+        },
+        {
+            "designation": "MAN-01",
+            "key": "",
+            "material": "",
+            "name": "Grease",
+            "note": "=manual",
+            "position": 5,
+            "quantity": 1,
+            "section": "Other items"
+        },
+        {
+            "designation": "G3D-B M8x35",
+            "key": "catalog:G3D-B M8x35",
+            "material": "Steel",
+            "name": "Hex bolt",
+            "note": "M8",
+            "position": 6,
+            "quantity": 2,
+            "section": "Standard items"
+        }
+    ],
+    "sheet": 0,
+    "source": "flange-fasteners.graph3d",
+    "title": "Flange and mounting hardware",
+    "variant": "Thick",
+    "version": 1
+}

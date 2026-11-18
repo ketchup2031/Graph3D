@@ -69,7 +69,7 @@ AssemblyDialog::AssemblyDialog(const document::Document& document, Sources sourc
     table_->setObjectName(QStringLiteral("assemblyComponents"));
     table_->setHorizontalHeaderLabels({tr("Source body"), tr("Relative to"), tr("X (mm)"), tr("Y (mm)"), tr("Z (mm)"),
                                        tr("X (°)"), tr("Y (°)"), tr("Z (°)"), tr("Fixed"), tr("Simplified")});
-    table_->setSelectionMode(QAbstractItemView::SingleSelection);
+    table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     auto* header = table_->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Stretch);
@@ -79,6 +79,27 @@ AssemblyDialog::AssemblyDialog(const document::Document& document, Sources sourc
     table_->setColumnWidth(Body, 185);
     table_->setColumnWidth(Anchor, 150);
     layout->addWidget(table_);
+    auto* replaceSelected = new QPushButton(tr("Replace selected instances…"), placement);
+    layout->addWidget(replaceSelected);
+    connect(replaceSelected, &QPushButton::clicked, this, [this] {
+        const auto rows = table_->selectionModel()->selectedRows();
+        if (rows.isEmpty()) { return; }
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Replace selected instances"));
+        QFormLayout form(&dialog);
+        QComboBox source;
+        for (const auto& [id, label] : sources_) { source.addItem(label, id); }
+        form.addRow(tr("Source body"), &source);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted) { return; }
+        for (const auto& row : rows) {
+            auto* combo = qobject_cast<QComboBox*>(table_->cellWidget(row.row(), Body));
+            if (combo) { combo->setCurrentIndex(combo->findData(source.currentData())); }
+        }
+    });
     if (editing_) {
         for (const auto& component : existing->components) {
             appendComponent(component);

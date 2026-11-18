@@ -1,0 +1,244 @@
+{
+    "configuration": {
+        "active": "",
+        "bindings": {
+            "2": {
+                "distance": "height"
+            }
+        },
+        "variables": {
+            "height": "12"
+        },
+        "variants": {
+            "Thick": {
+                "height": "15"
+            }
+        }
+    },
+    "format": "Graph3D",
+    "objects": [
+        {
+            "entities": [
+                {
+                    "center": [
+                        0,
+                        0
+                    ],
+                    "radius": 50,
+                    "type": "circle"
+                },
+                {
+                    "center": [
+                        0,
+                        0
+                    ],
+                    "radius": 14,
+                    "type": "circle"
+                },
+                {
+                    "center": [
+                        35,
+                        0
+                    ],
+                    "radius": 4.6,
+                    "type": "circle"
+                },
+                {
+                    "center": [
+                        0,
+                        35
+                    ],
+                    "radius": 4.6,
+                    "type": "circle"
+                },
+                {
+                    "center": [
+                        -35,
+                        0
+                    ],
+                    "radius": 4.6,
+                    "type": "circle"
+                },
+                {
+                    "center": [
+                        0,
+                        -35
+                    ],
+                    "radius": 4.6,
+                    "type": "circle"
+                }
+            ],
+            "id": 1,
+            "plane": "XY",
+            "type": "sketch",
+            "visible": false
+        },
+        {
+            "distance": 12,
+            "id": 2,
+            "profile": 1,
+            "properties": {
+                "designation": "FL-100",
+                "material": "Steel",
+                "name": "Mounting flange",
+                "note": "Four clearance holes"
+            },
+            "type": "extrude",
+            "visible": false
+        },
+        {
+            "diameter": 8,
+            "id": 3,
+            "kind": "bolt",
+            "length": 25,
+            "type": "fastener",
+            "visible": false
+        },
+        {
+            "diameter": 8,
+            "id": 4,
+            "kind": "bolt",
+            "length": 25,
+            "type": "fastener",
+            "visible": false
+        },
+        {
+            "diameter": 8,
+            "id": 5,
+            "kind": "bolt",
+            "length": 35,
+            "type": "fastener",
+            "visible": false
+        },
+        {
+            "diameter": 8,
+            "id": 6,
+            "kind": "nut",
+            "length": 0,
+            "type": "fastener",
+            "visible": false
+        },
+        {
+            "diameter": 8,
+            "id": 7,
+            "kind": "washer",
+            "length": 0,
+            "type": "fastener",
+            "visible": false
+        },
+        {
+            "components": [
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 2,
+                    "fixed": true,
+                    "offset": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 5,
+                    "offset": [
+                        35,
+                        0,
+                        -8
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 5,
+                    "offset": [
+                        0,
+                        35,
+                        -8
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 3,
+                    "offset": [
+                        -35,
+                        0,
+                        -8
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 4,
+                    "offset": [
+                        0,
+                        -35,
+                        -8
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 6,
+                    "offset": [
+                        35,
+                        0,
+                        -7
+                    ]
+                },
+                {
+                    "anchor": 0,
+                    "angles": [
+                        0,
+                        0,
+                        0
+                    ],
+                    "body": 7,
+                    "offset": [
+                        35,
+                        0,
+                        12
+                    ]
+                }
+            ],
+            "id": 8,
+            "properties": {
+                "designation": "FL-100-A",
+                "material": "",
+                "name": "Flange and mounting hardware",
+                "note": ""
+            },
+            "type": "assembly",
+            "visible": true
+        }
+    ],
+    "unit": "mm",
+    "version": 12
+}

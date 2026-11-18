@@ -2,10 +2,16 @@
 
 #include "drawing/Specification.h"
 #include "gui/DraftCanvas.h"
+#include "gui/DocumentWindow.h"
+#include "gui/InterfaceLanguage.h"
+#include "gui/UserPreferences.h"
+#include "io/SpecificationIO.h"
 
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFileDialog>
+#include <QMessageBox>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -16,9 +22,54 @@
 
 namespace graph3d {
 
+void DraftWindow::createSpecification()
+{
+    if (!host_ || !draft_.modelViews || !draft_.modelViews->assembly) { return; }
+    const auto& model = *draft_.modelViews;
+    try {
+        if (!model.specificationPath.isEmpty()) {
+            host_->openDocument(model.specificationPath);
+            return;
+        }
+        drawing::SpecificationDocument spec;
+        spec.sourcePath = model.sourcePath;
+        spec.assemblyId = model.bodyId;
+        spec.variant = model.variant;
+        spec.drawingPath = path_;
+        spec.drawingSheet = path_.isEmpty() ? 0 : activeSheet_;
+        spec.nextPosition = model.assembly->nextPosition;
+        spec.history = model.assembly->positionHistory;
+        for (const auto& row : model.assembly->rows) { spec.history[row.key] = row.position; }
+        drawing::mergeSpecification(spec, *io::readSpecificationAssembly(spec));
+        host_->createSpecification(std::move(spec));
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, tr("Create specification document"), localizedDiagnostic(error.what()));
+    }
+}
+
+void DraftWindow::linkSpecification()
+{
+    if (!draft_.modelViews || !draft_.modelViews->assembly) { return; }
+    const auto path = QFileDialog::getOpenFileName(this, tr("Link specification document"), draft_.modelViews->specificationPath,
+        tr("Graph3D specifications (*.g3spec)"), nullptr,
+        darkThemeEnabled() || russianInterface() ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
+    if (path.isEmpty()) { return; }
+    try {
+        auto model = *draft_.modelViews;
+        io::attachSpecification(model, path);
+        setModelViews(std::move(model), tr("Link specification document"));
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, tr("Link specification document"), localizedDiagnostic(error.what()));
+    }
+}
+
 void DraftWindow::showSpecification()
 {
     const auto& assembly = *draft_.modelViews->assembly;
+    if (host_ && !draft_.modelViews->specificationPath.isEmpty()) {
+        host_->openDocument(draft_.modelViews->specificationPath);
+        return;
+    }
     QDialog dialog(this);
     dialog.setObjectName(QStringLiteral("assemblySpecificationDialog"));
     dialog.setWindowTitle(tr("Assembly specification"));
@@ -97,6 +148,7 @@ void DraftWindow::placePosition()
     }
     const auto& row = assembly.rows[positions.currentIndex()];
     drawing::PositionCallout marker{row.position, instances.currentIndex(), views.currentIndex()};
+    if (!row.componentSlots.empty()) { marker.componentSlot = row.componentSlots[marker.instance]; }
     const auto origin = drawing::positionOrigin(model, row, marker.instance, marker.view);
     const auto placement = model.layout[marker.view];
     const auto& geometry = model.geometry->views;

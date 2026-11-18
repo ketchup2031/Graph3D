@@ -36,6 +36,7 @@ constexpr int curveSketchVersion = 8;
 constexpr int configurationVersion = 9;
 constexpr int machiningVersion = 10;
 constexpr int motionVersion = 11;
+constexpr int fastenerVersion = 12;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -47,6 +48,7 @@ constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
 constexpr std::array holeStyles{"straight", "counterbore", "countersink"};
 constexpr std::array mateModes{"align", "distance", "angle", "travel", "screw"};
+constexpr std::array fastenerKinds{"bolt", "nut", "washer"};
 constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection",
     "tangent", "parallel", "equal", "symmetric", "angle", "fix-point"};
 
@@ -392,6 +394,7 @@ QJsonObject encodeRecord(const document::ComponentRecord& record, int depth, int
         children.append(encodeRecord(child, depth + 1, remaining));
     }
     QJsonObject value{{"properties", encodeProperties(record.properties)}, {"children", children}};
+    if (record.standard) { value.insert("standard", true); }
     if (!record.identity.empty()) {
         value.insert("identity", QString::fromStdString(record.identity));
     }
@@ -408,6 +411,10 @@ document::ComponentRecord decodeRecord(const QJsonValue& value, int depth, int& 
     }
     const auto object = value.toObject();
     document::ComponentRecord result{decodeProperties(object.value("properties").toObject())};
+    if (object.contains("standard")) {
+        if (!object.value("standard").isBool()) { fileError(QStringLiteral("Invalid catalog component properties.")); }
+        result.standard = object.value("standard").toBool();
+    }
     if (object.contains("identity")) {
         const auto identity = object.value("identity");
         if (!identity.isString() || identity.toString().size() > 32780 || identity.toString().contains(QChar::Null)) {
@@ -491,6 +498,9 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
         using Type = std::decay_t<decltype(item)>;
         if constexpr (std::is_same_v<Type, document::Primitive>) {
             return {{"type", "primitive"}, {"kind", name(item.kind, primitives)}, {"x", encodeNumber(item.x)}, {"y", encodeNumber(item.y)}};
+        } else if constexpr (std::is_same_v<Type, geometry::Fastener>) {
+            return {{"type", "fastener"}, {"kind", name(item.kind, fastenerKinds)},
+                    {"diameter", item.diameter}, {"length", item.length}};
         } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
             if (item.entities.size() > maxEntities) {
                 fileError(QStringLiteral("Too many entities in a sketch."));
@@ -875,6 +885,12 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         }
         return assembly;
     }
+    if (type == "fastener" && version >= fastenerVersion) {
+        geometry::Fastener item{parseName<geometry::FastenerKind>(object.value("kind"), fastenerKinds, "kind"),
+            integer(object.value("diameter"), "diameter"), signedInteger(object.value("length"), "length")};
+        geometry::fastenerSize(item);
+        return item;
+    }
     if (type == "imported") {
         return document::Imported{string(object.value("name"), "name").toStdString(), decodeBrep(object.value("brep"))};
     }
@@ -905,10 +921,12 @@ void saveProject(const QString& path, const document::Document& document)
                 || std::ranges::any_of(sketch->constraints, [](const auto& c) {
                     return c.kind > geometry::ConstraintKind::OnProjection;
                 }));
-            if (assembly && (assembly->driveAngle != 0
+            if (std::holds_alternative<geometry::Fastener>(object.parameters)) {
+                version = fastenerVersion;
+            } else if (assembly && (assembly->driveAngle != 0
                 || std::ranges::any_of(assembly->mates, [](const auto& mate) { return mate.mode != geometry::MateMode::Align; })
                 || std::ranges::any_of(assembly->components, [](const auto& c) { return c.simplified || c.context.has_value(); }))) {
-                version = motionVersion;
+                version = std::max(version, motionVersion);
             } else if ((hole && (hole->size.thread || hole->size.style != geometry::HoleStyle::Straight))
                 || (edges && (edges->followTangency || edges->endRadius))
                 || std::holds_alternative<document::FeaturePattern>(object.parameters)
@@ -988,7 +1006,8 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
          && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion
-         && parsedVersion != configurationVersion && parsedVersion != machiningVersion && parsedVersion != motionVersion)
+         && parsedVersion != configurationVersion && parsedVersion != machiningVersion && parsedVersion != motionVersion
+         && parsedVersion != fastenerVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

@@ -132,6 +132,9 @@ document::LinkedComponent readLinkedComponent(const QString& source, int object,
 
 QString portableComponentIdentity(const document::Object& object, const QString& owner)
 {
+    if (const auto* standard = std::get_if<geometry::Fastener>(&object.parameters)) {
+        return QStringLiteral("catalog:") + QString::fromStdString(geometry::fastenerDesignation(*standard));
+    }
     const auto* external = std::get_if<document::LinkedComponent>(&object.parameters);
     if (!external) {
         return QStringLiteral("object:%1").arg(object.id);

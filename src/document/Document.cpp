@@ -176,6 +176,7 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
 {
     return std::visit(Visit{
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
+        [](const geometry::Fastener& p) { return geometry::makeFastener(p); },
         [&state](const geometry::Sketch& p) -> TopoDS_Shape {
             const auto context = resolveContext(state, p);
             if (p.trajectory) {
@@ -492,6 +493,25 @@ ObjectId Document::addAssembly(Assembly assembly)
     return append(std::move(assembly));
 }
 
+ObjectId Document::addFastener(geometry::Fastener item)
+{
+    return append(item);
+}
+
+bool Document::editFastener(ObjectId id, geometry::Fastener item)
+{
+    const auto* prior = std::get_if<geometry::Fastener>(&objectAt(objects_, id).parameters);
+    if (!prior) { throw std::invalid_argument("Select a catalog fastener."); }
+    if (*prior == item) { return false; }
+    geometry::fastenerSize(item);
+    auto next = objects_;
+    next[id - 1].parameters = item;
+    rebuild(next, id - 1);
+    if (next[id - 1].status != Status::Ready) { throw std::invalid_argument(next[id - 1].error); }
+    commit(std::move(next));
+    return true;
+}
+
 ObjectId Document::addLinkedComponent(LinkedComponent component)
 {
     return append(std::move(component));
@@ -551,6 +571,17 @@ ComponentRecord Document::componentRecord(ObjectId id) const
 {
     const auto& object = objectAt(objects_, id);
     ComponentRecord record;
+    if (const auto* standard = std::get_if<geometry::Fastener>(&object.parameters)) {
+        record.standard = true;
+        record.identity = "catalog:" + geometry::fastenerDesignation(*standard);
+        record.properties.designation = geometry::fastenerDesignation(*standard);
+        record.properties.name = standard->kind == geometry::FastenerKind::Bolt ? "Hex bolt"
+            : standard->kind == geometry::FastenerKind::Nut ? "Hex nut" : "Flat washer";
+        record.properties.material = "Steel";
+        if (standard->kind != geometry::FastenerKind::Washer) {
+            record.properties.note = "M" + std::to_string(standard->diameter);
+        }
+    }
     if (const auto* linked = std::get_if<LinkedComponent>(&object.parameters)) {
         record = linked->record;
     }

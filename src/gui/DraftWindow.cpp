@@ -8,6 +8,7 @@
 #include "gui/UserPreferences.h"
 #include "io/DraftIO.h"
 #include "io/ModelViewsIO.h"
+#include "io/SpecificationIO.h"
 
 #include <QActionGroup>
 #include <QApplication>
@@ -208,6 +209,16 @@ DraftWindow::DraftWindow(QWidget* parent, DocumentWindow* host)
     auto* assembly = menuBar()->addMenu(tr("Assembly &drawing"));
     specification_ = assembly->addAction(tr("View specification…"), this, &DraftWindow::showSpecification);
     specification_->setObjectName(QStringLiteral("viewSpecification"));
+    createSpecification_ = assembly->addAction(tr("Create specification document…"), this, &DraftWindow::createSpecification);
+    createSpecification_->setObjectName(QStringLiteral("createSpecificationDocument"));
+    linkSpecification_ = assembly->addAction(tr("Link specification document…"), this, &DraftWindow::linkSpecification);
+    linkSpecification_->setObjectName(QStringLiteral("linkSpecificationDocument"));
+    unlinkSpecification_ = assembly->addAction(tr("Unlink specification document"), this, [this] {
+        if (!draft_.modelViews || draft_.modelViews->specificationPath.isEmpty()) { return; }
+        auto model = *draft_.modelViews;
+        model.specificationPath.clear();
+        setModelViews(std::move(model), tr("Unlink specification document"));
+    });
     placePosition_ = assembly->addAction(tr("Place position number…"), this, &DraftWindow::placePosition);
     placePosition_->setObjectName(QStringLiteral("placeAssemblyPosition"));
     removePosition_ = assembly->addAction(tr("Remove position number…"), this, &DraftWindow::removePosition);
@@ -888,6 +899,10 @@ void DraftWindow::chooseModel()
         auto linked = io::buildModelViews(source, ids.at(selected), cut, drawing::draftSize(draft_), current,
             variant ? variant : std::optional<QString>(QString::fromStdString(source.document.configuration().activeVariant)));
         linked.variant = variant;
+        if (current && current->variant == variant && current->sourcePath == linked.sourcePath
+            && current->bodyId == linked.bodyId && !current->specificationPath.isEmpty()) {
+            io::attachSpecification(linked, current->specificationPath);
+        }
         setModelViews(std::move(linked),
                       tr("Link model views"));
     } catch (const std::exception& error) {
@@ -906,7 +921,7 @@ void DraftWindow::refreshModel()
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
         const auto source = io::openModelSource(current.sourcePath);
-        if (source.digest != current.sourceDigest) {
+        if (source.digest != current.sourceDigest || !current.specificationPath.isEmpty()) {
             setModelViews(io::buildModelViews(source, current.bodyId, drawing::sectionSettings(current),
                                              drawing::draftSize(draft_), &current), tr("Update from model"));
         } else {
@@ -927,6 +942,9 @@ void DraftWindow::updateModelStatus(const QString& failure)
     }
     const auto* assembly = linked ? draft_.modelViews->assembly.get() : nullptr;
     specification_->setEnabled(assembly != nullptr);
+    createSpecification_->setEnabled(host_ && assembly);
+    linkSpecification_->setEnabled(assembly != nullptr);
+    unlinkSpecification_->setEnabled(assembly && !draft_.modelViews->specificationPath.isEmpty());
     placePosition_->setEnabled(assembly && assembly->callouts.size() < 1000);
     removePosition_->setEnabled(assembly && !assembly->callouts.empty());
     specificationExport_->setEnabled(assembly != nullptr);
@@ -966,6 +984,12 @@ void DraftWindow::updateModelStatus(const QString& failure)
     auto label = tr("Model: %1 · body #%2").arg(source.fileName()).arg(model.bodyId);
     if (model.variant) {
         label += QStringLiteral(" · ") + (model.variant->isEmpty() ? tr("Base values") : tr("Variant: %1").arg(*model.variant));
+    }
+    if (!model.specificationPath.isEmpty()) {
+        label += QStringLiteral(" · ") + tr("Specification: %1").arg(QFileInfo(model.specificationPath).fileName());
+        if (problem.isEmpty() && !QFileInfo::exists(model.specificationPath)) {
+            problem = tr("The linked specification cannot be read.");
+        }
     }
     modelStatus_->setToolTip(QDir::toNativeSeparators(path));
     modelStatus_->setText(problem.isEmpty() ? label : tr("%1 — stale views. %2").arg(label, problem));

@@ -57,7 +57,7 @@ SpecificationCells specificationHeaders()
 SpecificationCells specificationCells(const SpecificationRow& row)
 {
     return {QString::number(row.position), row.designation, row.name, row.material,
-            QString::number(row.instances.size()), row.note};
+            QString::number(row.explicitQuantity.value_or(static_cast<int>(row.instances.size()))), row.note};
 }
 
 std::vector<SpecificationPage> paginateSpecification(const AssemblyDrawing& assembly)
@@ -65,6 +65,14 @@ std::vector<SpecificationPage> paginateSpecification(const AssemblyDrawing& asse
     std::vector<SpecificationPage> pages(1);
     double y = tableTop + headerHeight;
     for (const auto& row : assembly.rows) {
+        if (row.sectionTitle) {
+            if (y + height(2) > maxY) { pages.emplace_back(); y = tableTop + headerHeight; }
+            SpecificationBand heading{{}, 1, true};
+            heading.cells[2] << row.name;
+            pages.back().push_back(std::move(heading));
+            y += height(1);
+            continue;
+        }
         std::array<QStringList, 6> cells;
         const auto text = specificationCells(row);
         int lines = 1;
@@ -127,6 +135,19 @@ void paintSpecificationPage(QPainter& p, const AssemblyDrawing& assembly, const 
     y += headerHeight;
     p.setPen(QPen(Qt::black, .18));
     for (const auto& band : page) {
+        if (band.section) {
+            const QRectF cell(left, y, 185, height(band.lines));
+            p.fillRect(cell, QColor("#f1f4f8"));
+            p.drawRect(cell);
+            QFont bold = font(3);
+            bold.setBold(true);
+            p.setFont(bold);
+            p.drawText(cell.adjusted(2, 0, -2, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                QFontMetricsF(bold).elidedText(band.cells[2].value(0), Qt::ElideRight, 181));
+            p.setFont(font(3));
+            y += height(band.lines);
+            continue;
+        }
         x = left;
         for (std::size_t column = 0; column < widths.size(); ++column) {
             p.drawRect(QRectF(x, y, widths[column], height(band.lines)));
@@ -140,7 +161,8 @@ void paintSpecificationPage(QPainter& p, const AssemblyDrawing& assembly, const 
         y += height(band.lines);
     }
     p.drawText(QRectF(24, 282, 177, 8), Qt::AlignRight | Qt::AlignVCenter,
-        tr("Drawing sheet %1 · Specification %2/%3").arg(sheet).arg(index).arg(count));
+        sheet > 0 ? tr("Drawing sheet %1 · Specification %2/%3").arg(sheet).arg(index).arg(count)
+                  : tr("Specification %1/%2").arg(index).arg(count));
 }
 
 QPointF positionOrigin(const ModelViews& model, const SpecificationRow& row, int instance, int view)

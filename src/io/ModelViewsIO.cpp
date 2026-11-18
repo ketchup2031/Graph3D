@@ -4,6 +4,7 @@
 
 #include "io/FileIO.h"
 #include "io/ProjectIO.h"
+#include "io/SpecificationIO.h"
 
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
@@ -484,6 +485,9 @@ ModelViews buildModelViews(const ModelSource& source, int bodyId, std::optional<
     const auto prior = previous && previous->bodyId == bodyId && previous->sourcePath == source.path
         ? previous->assembly.get() : nullptr;
     model.assembly = buildAssemblyDrawing(selected, *item, prior);
+    if (!sameSource || !model.assembly) { model.specificationPath.clear(); }
+    if (!model.specificationPath.isEmpty() && previous->variant == model.variant) { attachSpecification(model, model.specificationPath); }
+    else { model.specificationPath.clear(); }
     return model;
 }
 
@@ -502,6 +506,11 @@ ModelViews readModelViews(const QJsonObject& object, const QString& draftPath)
     result.sourcePath = QDir::cleanPath(QFileInfo(draftPath).absoluteDir().absoluteFilePath(path));
     result.sourceDigest = QByteArray::fromHex(hash);
     result.bodyId = static_cast<int>(bodyId);
+    if (object.contains("specification")) {
+        const auto path = object.value("specification").toString();
+        if (path.isEmpty() || path.size() > 32768 || path.contains(QChar::Null)) { invalid(); }
+        result.specificationPath = QDir::cleanPath(QFileInfo(draftPath).absoluteDir().absoluteFilePath(path));
+    }
     if (object.contains("variant")) {
         const auto variant = object.value("variant");
         if (!variant.isString() || variant.toString().toUtf8().size() > 128 || variant.toString().contains(QChar::Null)) {
@@ -610,6 +619,9 @@ QJsonObject writeModelViews(const ModelViews& model, const QString& draftPath, b
                        {"front", writeView(views.front, references)}, {"top", writeView(views.top, references)},
                        {"right", writeView(views.right, references)}};
     if (model.variant) { result.insert("variant", *model.variant); }
+    if (!model.specificationPath.isEmpty()) {
+        result.insert("specification", QFileInfo(draftPath).absoluteDir().relativeFilePath(model.specificationPath));
+    }
     if (!model.threads.empty()) {
         QJsonArray entries;
         for (const auto& thread : model.threads) {

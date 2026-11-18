@@ -9,6 +9,7 @@
 
 #include <array>
 #include <memory>
+#include <map>
 #include <optional>
 
 class QPainter;
@@ -78,6 +79,10 @@ struct SpecificationRow {
     int position = 0;
     QString designation, name, material, note;
     std::vector<std::array<QPointF, 3>> instances;
+    std::vector<int> componentSlots;
+    bool standard = false;
+    std::optional<int> explicitQuantity;
+    bool sectionTitle = false;
     bool operator==(const SpecificationRow&) const = default;
 };
 
@@ -87,6 +92,7 @@ struct PositionCallout {
     int view = 0;
     QPointF offset;
     QPointF label;
+    int componentSlot = 0;
     bool operator==(const PositionCallout&) const = default;
 };
 
@@ -97,6 +103,7 @@ struct AssemblyDrawing {
     std::vector<PositionCallout> callouts;
     int nextPosition = 1;
     bool includeSpecification = true;
+    std::map<QString, int> positionHistory;
     bool operator==(const AssemblyDrawing&) const = default;
 };
 
@@ -128,6 +135,7 @@ struct ModelViews {
     ModelTitleData titleData;
     std::optional<QString> variant;
     std::vector<ThreadCallout> threads;
+    QString specificationPath;
 };
 
 struct LocatedView {

@@ -4,10 +4,12 @@
 #include "gui/InterfaceLanguage.h"
 #include "gui/MainWindow.h"
 #include "gui/StartPage.h"
+#include "gui/SpecificationWindow.h"
 #include "gui/UserPreferences.h"
 #include "io/DraftIO.h"
 #include "io/FileIO.h"
 #include "io/ProjectIO.h"
+#include "io/SpecificationIO.h"
 
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -116,6 +118,8 @@ DocumentWindow::DocumentWindow(QWidget* parent, const QString& recoveryRoot)
     auto* file = menuBar()->addMenu(tr("&File"));
     file->addAction(tr("New part"), this, [this] { newProject(); });
     file->addAction(tr("New drawing"), this, &DocumentWindow::newDrawing);
+    file->addAction(tr("New specification"), this, &DocumentWindow::newSpecification)
+        ->setObjectName(QStringLiteral("newSpecification"));
     file->addAction(tr("Open document…"), this, &DocumentWindow::browse);
     auto* recover = file->addAction(tr("Recover documents…"), this, &DocumentWindow::offerRecovery);
     recover->setObjectName(QStringLiteral("recoverDocuments"));
@@ -169,6 +173,7 @@ DocumentWindow::~DocumentWindow()
     for (auto* draft : findChildren<DraftWindow*>()) {
         draft->host_ = nullptr;
     }
+    for (auto* spec : findChildren<SpecificationWindow*>()) { spec->host_ = nullptr; }
     sessionLock_.reset();
     if (!session_.isEmpty()) {
         QDir().rmdir(session_);
@@ -204,7 +209,7 @@ void DocumentWindow::rememberProject(const QString& path)
 void DocumentWindow::browse()
 {
     const auto path = QFileDialog::getOpenFileName(this, tr("Open document"), pathOf(tabs_->currentWidget()),
-        tr("Supported files (*.graph3d *.g3draw *.dxf);;3D projects (*.graph3d);;2D drawings (*.g3draw);;DXF files (*.dxf)"),
+        tr("Supported files (*.graph3d *.g3draw *.g3spec *.dxf);;3D projects (*.graph3d);;2D drawings (*.g3draw);;Specifications (*.g3spec);;DXF files (*.dxf)"),
         nullptr, (darkThemeEnabled() || russianInterface()) ? QFileDialog::DontUseNativeDialog : QFileDialog::Options{});
     if (!path.isEmpty()) {
         openDocument(path);
@@ -241,6 +246,15 @@ void DocumentWindow::newDrawing()
     addDocument(new DraftWindow(this, this));
 }
 
+void DocumentWindow::newSpecification() { createSpecification({}); }
+
+void DocumentWindow::createSpecification(drawing::SpecificationDocument spec)
+{
+    auto* window = new SpecificationWindow(this);
+    addDocument(window);
+    window->setDocument(std::move(spec));
+}
+
 bool DocumentWindow::openDocument(const QString& path, bool example)
 {
     if (!example) {
@@ -253,7 +267,12 @@ bool DocumentWindow::openDocument(const QString& path, bool example)
     const bool dxf = hasExtension(path, QStringLiteral(".dxf"));
     QWidget* opened = nullptr;
     bool success = false;
-    if (dxf || hasExtension(path, QStringLiteral(".g3draw"))) {
+    if (hasExtension(path, QStringLiteral(".g3spec"))) {
+        auto* spec = new SpecificationWindow(this);
+        opened = spec;
+        addDocument(spec);
+        success = spec->open(path);
+    } else if (dxf || hasExtension(path, QStringLiteral(".g3draw"))) {
         auto* draft = new DraftWindow(this, this);
         opened = draft;
         addDocument(draft, dxf ? QFileInfo(path).completeBaseName() : QString{}, dxf ? path : QString{});
@@ -282,6 +301,7 @@ QString DocumentWindow::pathOf(const QWidget* document) const
     if (const auto* draft = qobject_cast<const DraftWindow*>(document)) {
         return draft->path_;
     }
+    if (const auto* spec = qobject_cast<const SpecificationWindow*>(document)) { return spec->path_; }
     return {};
 }
 
@@ -339,7 +359,8 @@ void DocumentWindow::documentChanged(QWidget* document)
     }
     const auto title = !path.isEmpty() ? QFileInfo(path).fileName()
         : !it->label.isEmpty() ? it->label
-        : qobject_cast<DraftWindow*>(document) ? tr("Untitled drawing") : tr("Untitled part");
+        : qobject_cast<DraftWindow*>(document) ? tr("Untitled drawing")
+        : qobject_cast<SpecificationWindow*>(document) ? tr("Untitled specification") : tr("Untitled part");
     const int index = tabs_->indexOf(document);
     const bool modified = document->isWindowModified();
     tabs_->setTabText(index, modified ? title + QStringLiteral(" *") : title);
@@ -360,6 +381,7 @@ bool DocumentWindow::canClose(QWidget* document)
     if (auto* model = qobject_cast<MainWindow*>(document)) {
         return model->canClose();
     }
+    if (auto* spec = qobject_cast<SpecificationWindow*>(document)) { return spec->confirmSave(); }
     return qobject_cast<DraftWindow*>(document)->confirmSave();
 }
 
@@ -409,7 +431,8 @@ QString DocumentWindow::snapshotPath(QWidget* document) const
     if (session_.isEmpty()) {
         return {};
     }
-    const auto extension = qobject_cast<DraftWindow*>(document) ? QStringLiteral(".g3draw") : QStringLiteral(".graph3d");
+    const auto extension = qobject_cast<DraftWindow*>(document) ? QStringLiteral(".g3draw")
+        : qobject_cast<SpecificationWindow*>(document) ? QStringLiteral(".g3spec") : QStringLiteral(".graph3d");
     return QDir(session_).filePath(documents_.value(document).id + extension);
 }
 
@@ -432,6 +455,8 @@ bool DocumentWindow::writeSnapshot(QWidget* document)
         const auto path = snapshotPath(document);
         if (auto* draft = qobject_cast<DraftWindow*>(document)) {
             io::saveDraft(path, draft->wholeDrawing());
+        } else if (auto* spec = qobject_cast<SpecificationWindow*>(document)) {
+            io::saveSpecification(path, spec->spec_, true);
         } else {
             io::saveProject(path, qobject_cast<MainWindow*>(document)->document_);
         }
@@ -480,7 +505,7 @@ QStringList DocumentWindow::pendingRecovery() const
         if (!lock.tryLock()) {
             continue;
         }
-        for (const auto& file : directory.entryInfoList({QStringLiteral("*.g3draw"), QStringLiteral("*.graph3d")},
+        for (const auto& file : directory.entryInfoList({QStringLiteral("*.g3draw"), QStringLiteral("*.graph3d"), QStringLiteral("*.g3spec")},
                                                        QDir::Files | QDir::NoSymLinks, QDir::Time)) {
             found.append(file.absoluteFilePath());
         }
@@ -494,7 +519,15 @@ bool DocumentWindow::restoreSnapshot(const QString& path)
     const auto recovered = label.isEmpty() ? tr("Recovered document")
                                           : tr("Recovered — %1").arg(QFileInfo(label).fileName());
     QWidget* document = nullptr;
-    if (hasExtension(path, QStringLiteral(".g3draw"))) {
+    if (hasExtension(path, QStringLiteral(".g3spec"))) {
+        auto restored = io::openSpecification(path);
+        auto* spec = new SpecificationWindow(this);
+        document = spec;
+        addDocument(spec, recovered);
+        spec->loadDocument(std::move(restored));
+        spec->undo_.resetClean();
+        spec->updateTitle();
+    } else if (hasExtension(path, QStringLiteral(".g3draw"))) {
         auto draft = io::openDraft(path);
         auto* window = new DraftWindow(this, this);
         document = window;

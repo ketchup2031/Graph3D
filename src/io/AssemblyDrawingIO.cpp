@@ -93,6 +93,11 @@ std::shared_ptr<const AssemblyDrawing> buildAssemblyDrawing(
         result->includeSpecification = previous->includeSpecification;
         for (const auto& row : previous->rows) {
             existing.insert(row.key, row.position);
+            result->positionHistory[row.key] = row.position;
+        }
+        for (const auto& [key, position] : previous->positionHistory) {
+            existing.insert(key, position);
+            result->positionHistory[key] = position;
         }
     }
     QHash<QString, std::size_t> indexes;
@@ -116,6 +121,8 @@ std::shared_ptr<const AssemblyDrawing> buildAssemblyDrawing(
             }
             result->rows.push_back({key, position, QString::fromStdString(p.designation), name,
                                     QString::fromStdString(p.material), QString::fromStdString(p.note), {}});
+            result->rows.back().standard = child.standard;
+            result->positionHistory[key] = position;
             found = indexes.insert(key, result->rows.size() - 1);
         }
         std::array<QPointF, 3> projected{};
@@ -123,10 +130,33 @@ std::shared_ptr<const AssemblyDrawing> buildAssemblyDrawing(
             projected[view] = {centers[i][view].x, centers[i][view].y};
         }
         result->rows[*found].instances.push_back(projected);
+        result->rows[*found].componentSlots.push_back(static_cast<int>(i) + 1);
     }
     std::ranges::sort(result->rows, {}, &SpecificationRow::position);
     if (previous) {
         for (const auto& callout : previous->callouts) {
+            int slot = callout.componentSlot;
+            const auto old = std::ranges::find(previous->rows, callout.position, &SpecificationRow::position);
+            if (!slot && old != previous->rows.end() && callout.instance >= 0
+                && callout.instance < static_cast<int>(old->componentSlots.size())) {
+                slot = old->componentSlots[callout.instance];
+            }
+            if (slot) {
+                for (const auto& row : result->rows) {
+                    const auto found = std::ranges::find(row.componentSlots, slot);
+                    if (found != row.componentSlots.end()) {
+                        if (old == previous->rows.end() || (old->key != row.key && !(old->standard && row.standard))) { break; }
+                        auto marker = callout;
+                        marker.position = row.position;
+                        marker.instance = static_cast<int>(found - row.componentSlots.begin());
+                        // Keep legacy equality and let the row supply the slot on the next refresh.
+                        if (callout.componentSlot) { marker.componentSlot = slot; }
+                        result->callouts.push_back(marker);
+                        break;
+                    }
+                }
+                continue;
+            }
             const auto row = std::ranges::find(result->rows, callout.position, &SpecificationRow::position);
             if (row != result->rows.end() && callout.instance >= 0
                 && static_cast<std::size_t>(callout.instance) < row->instances.size()) {
@@ -153,6 +183,7 @@ AssemblyDrawing readAssemblyDrawing(const QJsonValue& value)
     result.nextPosition = bounded(object.value("next"), 2, positionLimit);
     result.includeSpecification = object.value("include").toBool();
     QSet<QString> keys;
+    QSet<int> usedSlots;
     QHash<int, int> quantities;
     int instanceCount = 0;
     for (const auto value : rows) {
@@ -169,6 +200,8 @@ AssemblyDrawing readAssemblyDrawing(const QJsonValue& value)
         quantities.insert(position, static_cast<int>(instances.size()));
         SpecificationRow entry{key, position, string(row.value("designation")), string(row.value("name")),
             string(row.value("material")), string(row.value("note")), {}};
+        if (row.contains("standard") && !row.value("standard").isBool()) { invalid(); }
+        entry.standard = row.value("standard").toBool();
         for (const auto value : instances) {
             const auto views = value.toArray();
             if (views.size() != 3) {
@@ -176,14 +209,44 @@ AssemblyDrawing readAssemblyDrawing(const QJsonValue& value)
             }
             entry.instances.push_back({point(views[0]), point(views[1]), point(views[2])});
         }
+        if (row.contains("slots")) {
+            const auto values = row.value("slots").toArray();
+            if (values.size() != instances.size()) { invalid(); }
+            for (const auto item : values) {
+                const int slot = bounded(item, 1, geometry::maxAssemblyComponents);
+                if (usedSlots.contains(slot)) { invalid(); }
+                usedSlots.insert(slot);
+                entry.componentSlots.push_back(slot);
+            }
+        }
         result.rows.push_back(std::move(entry));
     }
     std::ranges::sort(result.rows, {}, &SpecificationRow::position);
+    if (object.contains("history")) {
+        const auto entries = object.value("history").toObject();
+        if (!object.value("history").isObject() || entries.size() > 10000) { invalid(); }
+        QSet<int> used;
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            const int pos = bounded(it.value(), 1, result.nextPosition - 1);
+            if (it.key().isEmpty() || it.key().size() > 32790 || used.contains(pos)) { invalid(); }
+            used.insert(pos);
+            result.positionHistory[it.key()] = pos;
+        }
+        for (const auto& row : result.rows) {
+            if (const auto it = result.positionHistory.find(row.key); it == result.positionHistory.end() || it->second != row.position) { invalid(); }
+        }
+    }
     for (const auto value : callouts) {
         const auto entry = value.toObject();
         const auto position = bounded(entry.value("position"), 1, result.nextPosition - 1);
-        result.callouts.push_back({position, bounded(entry.value("instance"), 0, quantities.value(position) - 1),
-            bounded(entry.value("view"), 0, 2), point(entry.value("offset")), point(entry.value("label"))});
+        const auto instance = bounded(entry.value("instance"), 0, quantities.value(position) - 1);
+        const auto slot = entry.contains("slot") ? bounded(entry.value("slot"), 1, geometry::maxAssemblyComponents) : 0;
+        if (slot) {
+            const auto row = std::ranges::find(result.rows, position, &SpecificationRow::position);
+            if (row == result.rows.end() || row->componentSlots.empty() || row->componentSlots[instance] != slot) { invalid(); }
+        }
+        result.callouts.push_back({position, instance, bounded(entry.value("view"), 0, 2),
+            point(entry.value("offset")), point(entry.value("label")), slot});
     }
     return result;
 }
@@ -196,16 +259,30 @@ QJsonObject writeAssemblyDrawing(const AssemblyDrawing& assembly)
         for (const auto& views : row.instances) {
             instances.append(QJsonArray{point(views[0]), point(views[1]), point(views[2])});
         }
-        rows.append(QJsonObject{{"key", row.key}, {"position", row.position}, {"designation", row.designation},
-            {"name", row.name}, {"material", row.material}, {"note", row.note}, {"instances", instances}});
+        QJsonObject value{{"key", row.key}, {"position", row.position}, {"designation", row.designation},
+            {"name", row.name}, {"material", row.material}, {"note", row.note}, {"instances", instances}};
+        if (row.standard) { value.insert("standard", true); }
+        if (!row.componentSlots.empty()) {
+            QJsonArray slotValues;
+            for (int slot : row.componentSlots) { slotValues.append(slot); }
+            value.insert("slots", slotValues);
+        }
+        rows.append(value);
     }
     QJsonArray callouts;
     for (const auto& marker : assembly.callouts) {
-        callouts.append(QJsonObject{{"position", marker.position}, {"instance", marker.instance}, {"view", marker.view},
-            {"offset", point(marker.offset)}, {"label", point(marker.label)}});
+        QJsonObject value{{"position", marker.position}, {"instance", marker.instance}, {"view", marker.view},
+            {"offset", point(marker.offset)}, {"label", point(marker.label)}};
+        if (marker.componentSlot) { value.insert("slot", marker.componentSlot); }
+        callouts.append(value);
     }
     QJsonObject result{{"name", assembly.name}, {"designation", assembly.designation}, {"next", assembly.nextPosition},
                        {"include", assembly.includeSpecification}, {"rows", rows}, {"callouts", callouts}};
+    if (!assembly.positionHistory.empty()) {
+        QJsonObject history;
+        for (const auto& [key, pos] : assembly.positionHistory) { history.insert(key, pos); }
+        result.insert("history", history);
+    }
     readAssemblyDrawing(result);
     return result;
 }
