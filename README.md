@@ -4,6 +4,16 @@ Graph3D — проект параметрической CAD-системы дл�
 Прототип показывает интерактивную 3D-сцену на базе Open CASCADE Technology (OCCT).
 План следующих этапов приведён в [дорожной карте](Graph3D_Development_Plan.md).
 
+## Скриншоты
+
+**Стартовая страница**
+
+![Стартовая страница Graph3D в тёмной теме](docs/screenshots/start-page.png)
+
+**3D-модель кронштейна**
+
+![Кронштейн в 3D-окне Graph3D и дерево построения](docs/screenshots/angle-bracket.png)
+
 ## Установка на Windows
 
 Откройте [последний релиз Graph3D](https://github.com/ketchup2031/Graph3D/releases/latest)
