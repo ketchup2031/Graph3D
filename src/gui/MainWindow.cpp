@@ -364,7 +364,8 @@ void MainWindow::createMenus()
     connect(loft_, &QAction::triggered, this, [this] {
         const auto* object = document_.find(selectedId());
         std::vector<int> first;
-        if (object && object->status == document::Status::Ready && std::holds_alternative<geometry::Sketch>(object->parameters)) {
+        const auto* profile = object ? std::get_if<geometry::Sketch>(&object->parameters) : nullptr;
+        if (profile && !profile->trajectory && object->status == document::Status::Ready) {
             first.push_back(object->id);
         }
         configureAdvanced(tr("Loft"), document::Loft{std::move(first), false});
@@ -647,14 +648,16 @@ void MainWindow::updateActions()
     const bool drawing = pages_->currentWidget() == sketchEditor_;
     const bool modeling = pages_->currentWidget() == viewport_;
     const auto* object = document_.find(selectedId());
-    const bool sketch = object && std::holds_alternative<geometry::Sketch>(object->parameters);
+    const auto* sketch = object ? std::get_if<geometry::Sketch>(&object->parameters) : nullptr;
+    const bool profile = sketch && !sketch->trajectory;
     const auto validBody = [](const document::Object& candidate) {
         return candidate.status == document::Status::Ready
             && document::isBody(candidate.parameters);
     };
     const auto bodies = std::count_if(document_.objects().begin(), document_.objects().end(), validBody);
     const auto sketches = std::ranges::count_if(document_.objects(), [](const auto& item) {
-        return item.status == document::Status::Ready && std::holds_alternative<geometry::Sketch>(item.parameters);
+        const auto* sketch = std::get_if<geometry::Sketch>(&item.parameters);
+        return item.status == document::Status::Ready && sketch && !sketch->trajectory;
     });
     startPageAction_->setEnabled(modeling);
     openAction_->setEnabled(!drawing);
@@ -675,7 +678,7 @@ void MainWindow::updateActions()
     const bool selectedBody = object && validBody(*object);
     newDatumSketch_->setEnabled(available && object && object->status == document::Status::Ready
         && std::holds_alternative<geometry::DatumPlane>(object->parameters));
-    sweep_->setEnabled(available && sketch && object->status == document::Status::Ready);
+    sweep_->setEnabled(available && profile && object->status == document::Status::Ready);
     loft_->setEnabled(available && sketches >= 2);
     shell_->setEnabled(available && selectedBody);
     draftAngle_->setEnabled(available && selectedBody);
@@ -685,8 +688,8 @@ void MainWindow::updateActions()
     finishEdgeSet_->setEnabled(modeling && !pickedEdges_.empty()
         && (pendingMachining_ == Machining::ChamferSet || pendingMachining_ == Machining::FilletSet));
     newFaceSketch_->setEnabled(modeling && !pendingMachining_ && object && object->visible && validBody(*object));
-    extrude_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
-    revolve_->setEnabled(modeling && sketch && object->status == document::Status::Ready);
+    extrude_->setEnabled(modeling && profile && object->status == document::Status::Ready);
+    revolve_->setEnabled(modeling && profile && object->status == document::Status::Ready);
     booleanMenu_->setEnabled(modeling && object && validBody(*object) && bodies >= 2);
     transformMenu_->setEnabled(modeling && !pendingMachining_ && object && validBody(*object));
     createAssembly_->setEnabled(available && bodies > 0);
@@ -720,7 +723,7 @@ QString MainWindow::objectName(const document::Object& object) const
             case geometry::Primitive::Sphere: return tr("Sphere");
             }
         } else if constexpr (std::is_same_v<Type, geometry::Sketch>) {
-            return tr("Sketch");
+            return operation.trajectory ? tr("Path sketch") : tr("Sketch");
         } else if constexpr (std::is_same_v<Type, geometry::DatumPlane>) {
             return tr("Construction plane");
         } else if constexpr (std::is_same_v<Type, geometry::DatumAxis>) {
@@ -811,7 +814,8 @@ QString MainWindow::objectDetails(const document::Object& object) const
                 ? tr("Distance %1 mm").arg(operation.size) : tr("Radius %1 mm").arg(operation.size);
             return tr("%1 · %2 · %3 edges").arg(source(operation.body), size).arg(operation.additionalEdges.size() + 1);
         } else if constexpr (std::is_same_v<Type, document::Sweep>) {
-            return tr("%1 · %2 path points").arg(source(operation.profile)).arg(operation.path.size());
+            return operation.pathSketch ? tr("%1 along %2").arg(source(operation.profile), source(operation.pathSketch))
+                : tr("%1 · %2 path points").arg(source(operation.profile)).arg(operation.path.size());
         } else if constexpr (std::is_same_v<Type, document::Loft>) {
             return tr("Sections: %1").arg(operation.profiles.size());
         } else if constexpr (std::is_same_v<Type, document::Shell>) {
@@ -1622,7 +1626,7 @@ void MainWindow::configureAdvanced(const QString& title, const document::Paramet
         return;
     }
     try {
-        const auto result = advancedParameters(this, title, document_, defaults, editing != 0);
+        const auto result = advancedParameters(this, title, document_, defaults, editing);
         if (!result) {
             return;
         }

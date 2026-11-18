@@ -1,5 +1,6 @@
 #include "geometry/Primitives.h"
 #include "geometry/SketchConstraints.h"
+#include "geometry/SketchCurves.h"
 #include "geometry/SketchModeling.h"
 
 #include <BRepGProp.hxx>
@@ -111,6 +112,38 @@ int main()
             && std::hypot(firstEdge.end.u - secondEdge.start.u, firstEdge.end.v - secondEdge.start.v) < 1.e-7
             && std::abs(secondEdge.start.u - secondEdge.end.u) < 1.e-7
             && std::abs(thirdEdge.start.u - thirdEdge.end.u) < 1.e-7, "A geometric relation was not satisfied");
+
+        Sketch freedom{Plane::XY, {Line{{0, 0}, {20, 0}}, Circle{{25, 8}, 4}}, {}};
+        expect(solveSketch(freedom).degreesOfFreedom == 7, "Free line and circle have seven degrees of freedom");
+        freedom.constraints = {{ConstraintKind::Horizontal, {0, 0}}, {ConstraintKind::Length, {0, 0}, {}, 20},
+                               {ConstraintKind::FixPoint, {0, 0}}};
+        const auto fixed = solveSketch(freedom);
+        expect(fixed.conflicts.empty() && fixed.degreesOfFreedom == 3 && fixed.fullyDefined[0]
+            && !fixed.fullyDefined[1], "The fully constrained line and the free circle were not distinguished");
+
+        Sketch relations{Plane::XY, {Line{{0, 0}, {8, 1}}, Line{{1, 10}, {11, 12}},
+                                     Line{{0, -20}, {0, 20}}, Circle{{-10, 8}, 3}, Circle{{12, 9}, 5}},
+            {{ConstraintKind::Parallel, {0, 0}, {1, 0}}, {ConstraintKind::Equal, {0, 0}, {1, 0}},
+             {ConstraintKind::Equal, {3, 0}, {4, 0}}, {ConstraintKind::Symmetric, {3, 0}, {4, 0}, 0, {}, {2, 0}},
+             {ConstraintKind::FixPoint, {2, 0}, {}, 0, {}, {}, {0, -20}},
+             {ConstraintKind::FixPoint, {2, 1}, {}, 0, {}, {}, {0, 20}}}, {}, 0, {2}};
+        const auto relation = solveSketch(relations);
+        expect(relation.conflicts.empty() && relation.degreesOfFreedom == 9 && relation.fullyDefined[2],
+            "Parallelism, equality and symmetry did not resolve");
+        const auto left = std::get<Circle>(relation.entities[3]);
+        const auto right = std::get<Circle>(relation.entities[4]);
+        expect(std::abs(left.center.u + right.center.u) < 1.e-6 && std::abs(left.center.v - right.center.v) < 1.e-6
+            && std::abs(left.radius - right.radius) < 1.e-6, "Symmetric circles did not retain equal radii");
+
+        const Sketch curved{Plane::XY, {Spline{{{0, 0}, {5, 12}, {15, 12}, {20, 0}}},
+                                      Line{{20, 0}, {0, 0}}, Line{{-45, -7}, {45, -7}}}, {}, {}, 0, {2}};
+        const auto splineBody = extrude(makeProfile(curved), curved.plane, 10);
+        GProp_GProps splineProperties;
+        BRepGProp::VolumeProperties(splineBody, splineProperties);
+        expect(splineProperties.Mass() > 1800, "A spline and a line did not form a profile");
+        const Sketch closedSpline{Plane::XY, {Spline{{{0, 0}, {20, 0}, {20, 20}, {0, 20}}, true}}};
+        BRepGProp::VolumeProperties(extrude(makeProfile(closedSpline), closedSpline.plane, 10), splineProperties);
+        expect(splineProperties.Mass() > 4000, "A closed spline did not form a profile");
 
         const Sketch radial{Plane::XZ, {Rectangle{{10, 0}, {20, 30}}}};
         const auto radialFace = makeProfile(radial);

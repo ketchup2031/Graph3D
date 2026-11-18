@@ -104,8 +104,25 @@ QListWidgetItem* checkable(QListWidget* list, const QString& text, bool checked)
     return item;
 }
 
-Read sweepEditor(OperationDialog& dialog, const document::Sweep& sweep)
+Read sweepEditor(OperationDialog& dialog, const document::Document& document, const document::Sweep& sweep, int editing)
 {
+    auto* source = new QComboBox(&dialog);
+    source->setObjectName(QStringLiteral("sweepPathSketch"));
+    source->addItem(tr("Enter path points"), 0);
+    for (const auto& object : document.objects()) {
+        const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
+        if (sketch && sketch->trajectory && (object.status == document::Status::Ready || object.id == sweep.pathSketch)
+            && (!editing || object.id < editing)) {
+            source->addItem(tr("Path sketch #%1").arg(object.id), object.id);
+        }
+    }
+    source->setCurrentIndex(std::max(0, source->findData(sweep.pathSketch)));
+    source->setEnabled(source->count() > 1);
+    dialog.form->addRow(tr("Path source"), source);
+    auto* reverse = new QCheckBox(tr("Reverse path direction"), &dialog);
+    reverse->setObjectName(QStringLiteral("sweepReversePath"));
+    reverse->setChecked(sweep.reversePath);
+    dialog.form->addRow(reverse);
     auto* edit = new QPlainTextEdit(&dialog);
     edit->setObjectName(QStringLiteral("sweepPath"));
     QStringList rows;
@@ -117,7 +134,18 @@ Read sweepEditor(OperationDialog& dialog, const document::Sweep& sweep)
     hint->setWordWrap(true);
     dialog.form->addRow(hint);
     dialog.form->addRow(tr("Path points"), edit);
-    return [edit, profile = sweep.profile]() -> document::Parameters {
+    const auto updateFields = [form = dialog.form, source, edit, hint, reverse] {
+        const bool linked = source->currentData().toInt() != 0;
+        form->setRowVisible(edit, !linked);
+        form->setRowVisible(hint, !linked);
+        form->setRowVisible(reverse, linked);
+    };
+    QObject::connect(source, &QComboBox::currentIndexChanged, &dialog, updateFields);
+    updateFields();
+    return [source, reverse, edit, profile = sweep.profile]() -> document::Parameters {
+        if (const int pathId = source->currentData().toInt()) {
+            return document::Sweep{profile, {}, pathId, reverse->isChecked()};
+        }
         const auto lines = edit->toPlainText().split(u'\n', Qt::SkipEmptyParts);
         const QRegularExpression spaces(QStringLiteral("\\s+"));
         std::vector<geometry::Point3> path;
@@ -166,7 +194,8 @@ Read loftEditor(OperationDialog& dialog, const document::Document& document, con
     }
     if (!editing) {
         for (const auto& object : document.objects()) {
-            if (object.status == document::Status::Ready && std::holds_alternative<geometry::Sketch>(object.parameters)
+            const auto* sketch = std::get_if<geometry::Sketch>(&object.parameters);
+            if (object.status == document::Status::Ready && sketch && !sketch->trajectory
                 && std::ranges::find(loft.profiles, object.id) == loft.profiles.end()) {
                 add(object.id, false);
             }
@@ -258,7 +287,7 @@ Read facesEditor(OperationDialog& dialog, const TopoDS_Shape& body, int id,
 }  // namespace
 
 std::optional<document::Parameters> advancedParameters(QWidget* parent, const QString& title,
-    const document::Document& document, const document::Parameters& initial, bool editing)
+    const document::Document& document, const document::Parameters& initial, int editing)
 {
     OperationDialog dialog(parent, title);
     if (const auto* p = std::get_if<geometry::DatumPlane>(&initial)) {
@@ -272,7 +301,7 @@ std::optional<document::Parameters> advancedParameters(QWidget* parent, const QS
         return dialog.run([=]() -> document::Parameters { return geometry::DatumAxis{origin(), direction()}; });
     }
     if (const auto* p = std::get_if<document::Sweep>(&initial)) {
-        return dialog.run(sweepEditor(dialog, *p));
+        return dialog.run(sweepEditor(dialog, document, *p, editing));
     }
     if (const auto* p = std::get_if<document::Loft>(&initial)) {
         return dialog.run(loftEditor(dialog, document, *p, editing));

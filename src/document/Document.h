@@ -33,7 +33,13 @@ struct EdgeTreatment {
     double size;
     std::vector<geometry::EdgeReference> additionalEdges;
 };
-struct Sweep { ObjectId profile; std::vector<geometry::Point3> path; bool operator==(const Sweep&) const = default; };
+struct Sweep {
+    ObjectId profile;
+    std::vector<geometry::Point3> path;
+    ObjectId pathSketch = 0;
+    bool reversePath = false;
+    bool operator==(const Sweep&) const = default;
+};
 struct Loft { std::vector<ObjectId> profiles; bool ruled; bool operator==(const Loft&) const = default; };
 struct Shell { ObjectId body; std::vector<geometry::FaceReference> openings; double thickness; bool operator==(const Shell&) const = default; };
 struct DraftAngle {

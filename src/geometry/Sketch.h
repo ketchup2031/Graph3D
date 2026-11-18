@@ -21,7 +21,13 @@ struct Point2 {
 struct Line { Point2 start, end; bool operator==(const Line&) const = default; };
 struct Rectangle { Point2 first, opposite; bool operator==(const Rectangle&) const = default; };
 struct Circle { Point2 center; double radius; bool operator==(const Circle&) const = default; };
-using SketchEntity = std::variant<Line, Rectangle, Circle>;
+struct Arc { Point2 start, through, end; bool operator==(const Arc&) const = default; };
+struct Spline {
+    std::vector<Point2> points;
+    bool closed = false;
+    bool operator==(const Spline&) const = default;
+};
+using SketchEntity = std::variant<Line, Rectangle, Circle, Arc, Spline>;
 
 // A vertex or edge of an entity, indexed separately from its position in the document.
 struct SketchRef {
@@ -30,7 +36,10 @@ struct SketchRef {
     bool operator==(const SketchRef&) const = default;
 };
 
-enum class ConstraintKind { Coincident, Horizontal, Vertical, Perpendicular, Length, Diameter, OnProjection };
+enum class ConstraintKind {
+    Coincident, Horizontal, Vertical, Perpendicular, Length, Diameter, OnProjection,
+    Tangent, Parallel, Equal, Symmetric, Angle, FixPoint
+};
 
 struct SketchConstraint {
     ConstraintKind kind = ConstraintKind::Coincident;
@@ -38,6 +47,8 @@ struct SketchConstraint {
     SketchRef second;
     double value = 0;
     std::optional<EdgeReference> edge;
+    SketchRef axis;
+    Point2 fixed{};
     bool operator==(const SketchConstraint&) const = default;
 };
 
@@ -58,6 +69,8 @@ struct Sketch {
     std::vector<SketchConstraint> constraints;
     std::optional<SketchSupport> support;
     int datumPlane = 0;
+    std::vector<int> construction;
+    bool trajectory = false;
     bool operator==(const Sketch&) const = default;
 };
 

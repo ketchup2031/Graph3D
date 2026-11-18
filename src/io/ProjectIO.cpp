@@ -32,6 +32,7 @@ constexpr int assemblyVersion = 4;
 constexpr int sketchVersion = 5;
 constexpr int advancedVersion = 6;
 constexpr int linkedVersion = 7;
+constexpr int curveSketchVersion = 8;
 constexpr int maxObjects = 10000;
 constexpr int maxEntities = 10000;
 constexpr auto format = "Graph3D";
@@ -41,7 +42,8 @@ constexpr std::array modelAxes{"X", "Y", "Z"};
 constexpr std::array primitives{"cube", "cylinder", "sphere"};
 constexpr std::array operations{"union", "difference", "intersection"};
 constexpr std::array treatments{"chamfer", "fillet"};
-constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection"};
+constexpr std::array constraints{"coincident", "horizontal", "vertical", "perpendicular", "length", "diameter", "projection",
+    "tangent", "parallel", "equal", "symmetric", "angle", "fix-point"};
 
 template<class Enum, std::size_t N>
 QString name(Enum value, const std::array<const char*, N>& names)
@@ -124,13 +126,22 @@ QJsonObject encodeEntity(const geometry::SketchEntity& entity)
             return {{"type", "line"}, {"a", encodePoint(item.start)}, {"b", encodePoint(item.end)}};
         } else if constexpr (std::is_same_v<Type, geometry::Rectangle>) {
             return {{"type", "rectangle"}, {"a", encodePoint(item.first)}, {"b", encodePoint(item.opposite)}};
-        } else {
+        } else if constexpr (std::is_same_v<Type, geometry::Circle>) {
             return {{"type", "circle"}, {"center", encodePoint(item.center)}, {"radius", encodeNumber(item.radius)}};
+        } else if constexpr (std::is_same_v<Type, geometry::Arc>) {
+            return {{"type", "arc"}, {"start", encodePoint(item.start)}, {"through", encodePoint(item.through)},
+                    {"end", encodePoint(item.end)}};
+        } else {
+            QJsonArray points;
+            for (const auto point : item.points) {
+                points.append(encodePoint(point));
+            }
+            return {{"type", "spline"}, {"points", points}, {"closed", item.closed}};
         }
     }, entity);
 }
 
-geometry::SketchEntity decodeEntity(const QJsonValue& value)
+geometry::SketchEntity decodeEntity(const QJsonValue& value, int version)
 {
     const auto entity = value.toObject();
     const auto type = entity.value("type").toString();
@@ -142,6 +153,20 @@ geometry::SketchEntity decodeEntity(const QJsonValue& value)
     }
     if (type == "circle") {
         return geometry::Circle{decodePoint(entity.value("center")), number(entity.value("radius"), "radius")};
+    }
+    if (version >= curveSketchVersion && type == "arc") {
+        return geometry::Arc{decodePoint(entity.value("start")), decodePoint(entity.value("through")), decodePoint(entity.value("end"))};
+    }
+    if (version >= curveSketchVersion && type == "spline") {
+        const auto points = entity.value("points").toArray();
+        if (points.size() < 2 || points.size() > 128 || !entity.value("closed").isBool()) {
+            fileError(QStringLiteral("Invalid sketch spline."));
+        }
+        geometry::Spline spline{{}, entity.value("closed").toBool()};
+        for (const auto point : points) {
+            spline.points.push_back(decodePoint(point));
+        }
+        return spline;
     }
     fileError(QStringLiteral("Unknown sketch entity type."));
 }
@@ -267,6 +292,12 @@ QJsonObject encodeConstraint(const geometry::SketchConstraint& constraint)
 {
     QJsonObject result{{"kind", name(constraint.kind, constraints)}, {"first", encodeSketchRef(constraint.first)},
         {"second", encodeSketchRef(constraint.second)}, {"value", encodeNumber(constraint.value)}};
+    if (constraint.kind == geometry::ConstraintKind::Symmetric) {
+        result.insert("axis", encodeSketchRef(constraint.axis));
+    }
+    if (constraint.kind == geometry::ConstraintKind::FixPoint) {
+        result.insert("fixed", encodePoint(constraint.fixed));
+    }
     if (constraint.edge) {
         QJsonArray samples;
         for (const auto& point : constraint.edge->samples) {
@@ -277,13 +308,22 @@ QJsonObject encodeConstraint(const geometry::SketchConstraint& constraint)
     return result;
 }
 
-geometry::SketchConstraint decodeConstraint(const QJsonValue& value)
+geometry::SketchConstraint decodeConstraint(const QJsonValue& value, int version)
 {
     const auto object = value.toObject();
     geometry::SketchConstraint result{
         parseName<geometry::ConstraintKind>(object.value("kind"), constraints, "constraint"),
         decodeSketchRef(object.value("first")), decodeSketchRef(object.value("second")),
         number(object.value("value"), "value")};
+    if (version < curveSketchVersion && result.kind > geometry::ConstraintKind::OnProjection) {
+        fileError(QStringLiteral("This sketch requires project format version 8."));
+    }
+    if (result.kind == geometry::ConstraintKind::Symmetric) {
+        result.axis = decodeSketchRef(object.value("axis"));
+    }
+    if (result.kind == geometry::ConstraintKind::FixPoint) {
+        result.fixed = decodePoint(object.value("fixed"));
+    }
     if (object.contains("edge")) {
         const auto encoded = object.value("edge").toObject();
         const auto samples = encoded.value("samples").toArray();
@@ -443,6 +483,16 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
             if (item.datumPlane) {
                 sketch.insert("datumPlane", item.datumPlane);
             }
+            if (item.trajectory) {
+                sketch.insert("trajectory", true);
+            }
+            if (!item.construction.empty()) {
+                QJsonArray indices;
+                for (int index : item.construction) {
+                    indices.append(index);
+                }
+                sketch.insert("construction", indices);
+            }
             if (item.support) {
                 sketch.insert("support", QJsonObject{{"body", item.support->body},
                     {"point", encodePoint3(item.support->face.center)}, {"normal", encodePoint3(item.support->face.outward)}});
@@ -486,6 +536,10 @@ QJsonObject encodeObject(const document::Object& object, const QString& path)
         } else if constexpr (std::is_same_v<Type, geometry::DatumAxis>) {
             return {{"type", "datum-axis"}, {"origin", encodePoint3(item.origin)}, {"direction", encodePoint3(item.direction)}};
         } else if constexpr (std::is_same_v<Type, document::Sweep>) {
+            if (item.pathSketch) {
+                return {{"type", "sweep"}, {"profile", item.profile}, {"pathSketch", item.pathSketch},
+                        {"reversePath", item.reversePath}};
+            }
             return {{"type", "sweep"}, {"profile", item.profile}, {"path", encodeList(item.path, encodePoint3)}};
         } else if constexpr (std::is_same_v<Type, document::Loft>) {
             return {{"type", "loft"}, {"profiles", encodeList(item.profiles, [](int id) { return id; })}, {"ruled", item.ruled}};
@@ -569,6 +623,13 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
             return geometry::DatumAxis{decodePoint3(object.value("origin")), decodePoint3(object.value("direction"))};
         }
         if (type == "sweep") {
+            if (object.contains("pathSketch")) {
+                if (version < curveSketchVersion || object.contains("path") || !object.value("reversePath").isBool()) {
+                    fileError(QStringLiteral("Invalid linked sweep path."));
+                }
+                return document::Sweep{integer(object.value("profile"), "profile"), {},
+                    integer(object.value("pathSketch"), "path sketch"), object.value("reversePath").toBool()};
+            }
             return document::Sweep{integer(object.value("profile"), "profile"),
                                    decodeList(object.value("path"), 2, 128, decodePoint3)};
         }
@@ -600,7 +661,7 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
         geometry::Sketch sketch{parseName<geometry::Plane>(object.value("plane"), planes, "plane"), {}};
         sketch.entities.reserve(static_cast<std::size_t>(entities.size()));
         for (const auto entry : entities) {
-            sketch.entities.push_back(decodeEntity(entry));
+            sketch.entities.push_back(decodeEntity(entry, version));
         }
         if (version < sketchVersion && (object.contains("support") || object.contains("constraints"))) {
             fileError(QStringLiteral("This sketch requires project format version 5."));
@@ -617,12 +678,27 @@ document::Parameters decodeObject(const QJsonObject& object, int version, const 
                     fileError(QStringLiteral("Invalid sketch constraints."));
                 }
                 for (const auto relation : relations) {
-                    sketch.constraints.push_back(decodeConstraint(relation));
+                    sketch.constraints.push_back(decodeConstraint(relation, version));
                 }
             }
         }
         if (object.contains("datumPlane")) {
             sketch.datumPlane = integer(object.value("datumPlane"), "datumPlane");
+        }
+        if (object.contains("construction") || object.contains("trajectory")) {
+            if (version < curveSketchVersion
+                || (object.contains("trajectory") && !object.value("trajectory").isBool())
+                || (object.contains("construction") && !object.value("construction").isArray())) {
+                fileError(QStringLiteral("Invalid sketch construction or trajectory settings."));
+            }
+            sketch.trajectory = object.value("trajectory").toBool();
+            const auto construction = object.value("construction").toArray();
+            if (construction.size() > entities.size()) {
+                fileError(QStringLiteral("Invalid sketch construction or trajectory settings."));
+            }
+            for (const auto index : construction) {
+                sketch.construction.push_back(signedInteger(index, "construction entity"));
+            }
         }
         return sketch;
     }
@@ -715,9 +791,19 @@ void saveProject(const QString& path, const document::Document& document)
             const auto* revolution = std::get_if<document::Revolve>(&object.parameters);
             const auto* edges = std::get_if<document::EdgeTreatment>(&object.parameters);
             const auto* assembly = std::get_if<document::Assembly>(&object.parameters);
-            if (std::holds_alternative<document::LinkedComponent>(object.parameters) || object.properties != document::PartProperties{}
+            const auto* sweep = std::get_if<document::Sweep>(&object.parameters);
+            const bool curvedSketch = sketch && (sketch->trajectory || !sketch->construction.empty()
+                || std::ranges::any_of(sketch->entities, [](const auto& e) {
+                    return std::holds_alternative<geometry::Arc>(e) || std::holds_alternative<geometry::Spline>(e);
+                })
+                || std::ranges::any_of(sketch->constraints, [](const auto& c) {
+                    return c.kind > geometry::ConstraintKind::OnProjection;
+                }));
+            if (curvedSketch || (sweep && sweep->pathSketch)) {
+                version = curveSketchVersion;
+            } else if (std::holds_alternative<document::LinkedComponent>(object.parameters) || object.properties != document::PartProperties{}
                 || (assembly && (!assembly->mates.empty() || std::ranges::any_of(assembly->components, &document::Component::fixed)))) {
-                version = linkedVersion;
+                version = std::max(version, linkedVersion);
             } else if (version < advancedVersion && (document::isAdvanced(object.parameters) || object.densityKgM3
                 || (sketch && sketch->datumPlane) || (revolution && revolution->datumAxis)
                 || (edges && !edges->additionalEdges.empty()))) {
@@ -764,7 +850,7 @@ document::Document decodeProject(const QByteArray& data, const QString& path)
     const auto parsedVersion = root.value("version").toDouble();
     if ((parsedVersion != legacyVersion && parsedVersion != featureVersion
          && parsedVersion != transformVersion && parsedVersion != assemblyVersion && parsedVersion != sketchVersion
-         && parsedVersion != advancedVersion && parsedVersion != linkedVersion)
+         && parsedVersion != advancedVersion && parsedVersion != linkedVersion && parsedVersion != curveSketchVersion)
         || root.value("unit").toString() != "mm") {
         fileError(QStringLiteral("Unsupported Graph3D project format version or unit."));
     }

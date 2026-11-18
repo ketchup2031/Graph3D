@@ -1,4 +1,5 @@
 #include "geometry/SketchConstraints.h"
+#include "geometry/SketchCurves.h"
 
 #include <GeomAbs_CurveType.hxx>
 
@@ -7,6 +8,9 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <limits>
+#include <ranges>
+#include <type_traits>
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
@@ -27,8 +31,7 @@ using Equation = std::function<double(const Values&)>;
 
 struct Row {
     int constraint;
-    std::array<int, 8> variables{};
-    int count = 0;
+    std::vector<int> variables;
     Equation error;
 };
 
@@ -37,12 +40,29 @@ double dot(const Values& a, const Values& b)
     return std::inner_product(a.begin(), a.end(), b.begin(), 0.0);
 }
 
+double derivative(const Row& row, Values& values, int column)
+{
+    auto& value = values[column];
+    const auto original = value;
+    const auto delta = std::max(1.e-5, 1.e-8 * std::abs(original));
+    value = original + delta;
+    const auto upper = row.error(values);
+    value = original - delta;
+    const auto lower = row.error(values);
+    value = original;
+    return (upper - lower) / (2 * delta);
+}
+
 void solveEquations(const std::vector<Row>& rows, Values& values)
 {
     // Solve the linearized constraints together. The damping chooses a small
     // change when a sketch has free coordinates and regularizes redundant rows.
     constexpr double damping = 1.e-8;
-    std::vector<std::array<double, 8>> derivatives(rows.size());
+    std::vector<Values> derivatives;
+    derivatives.reserve(rows.size());
+    for (const auto& row : rows) {
+        derivatives.emplace_back(row.variables.size());
+    }
     Values right(values.size()), diagonal(values.size()), direction(values.size()),
         step(values.size()), adjusted(values.size()), product(values.size());
     for (int iteration = 0; iteration < 48; ++iteration) {
@@ -63,17 +83,9 @@ void solveEquations(const std::vector<Row>& rows, Values& values)
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const auto& row = rows[i];
             const double error = row.error(values);
-            for (int k = 0; k < row.count; ++k) {
+            for (std::size_t k = 0; k < row.variables.size(); ++k) {
                 const int index = row.variables[k];
-                auto& x = values[index];
-                const double saved = x;
-                const double difference = std::max(1.e-5, 1.e-8 * std::abs(saved));
-                x = saved + difference;
-                const double high = row.error(values);
-                x = saved - difference;
-                const double low = row.error(values);
-                x = saved;
-                const double partial = (high - low) / (2 * difference);
+                const auto partial = derivative(row, values, index);
                 derivatives[i][k] = partial;
                 right[index] -= partial * error;
                 diagonal[index] += partial * partial;
@@ -94,10 +106,10 @@ void solveEquations(const std::vector<Row>& rows, Values& values)
             for (std::size_t i = 0; i < rows.size(); ++i) {
                 const auto& row = rows[i];
                 double component = 0;
-                for (int k = 0; k < row.count; ++k) {
+                for (std::size_t k = 0; k < row.variables.size(); ++k) {
                     component += derivatives[i][k] * direction[row.variables[k]];
                 }
-                for (int k = 0; k < row.count; ++k) {
+                for (std::size_t k = 0; k < row.variables.size(); ++k) {
                     product[row.variables[k]] += derivatives[i][k] * component;
                 }
             }
@@ -139,24 +151,6 @@ void solveEquations(const std::vector<Row>& rows, Values& values)
             return;
         }
     }
-}
-
-Point2 vertex(const Values& values, SketchRef ref, bool rectangle)
-{
-    const auto base = ref.entity * 4;
-    if (rectangle) {
-        return {values[base + (ref.part == 1 || ref.part == 2 ? 2 : 0)],
-                values[base + (ref.part == 2 || ref.part == 3 ? 3 : 1)]};
-    }
-    const auto slot = base + 2 * ref.part;
-    return {values[slot], values[slot + 1]};
-}
-
-Point2 segment(const Values& values, SketchRef ref, bool rectangle)
-{
-    const auto first = vertex(values, ref, rectangle);
-    ref.part = rectangle ? (ref.part + 1) % 4 : 1;
-    return difference(vertex(values, ref, rectangle), first);
 }
 
 double angle(Point2 first, Point2 second)
@@ -248,7 +242,14 @@ Point2 projectionPoint(const SketchConstraint& relation, std::span<const SketchP
 
 int sketchVertexCount(const SketchEntity& entity)
 {
-    return std::holds_alternative<Rectangle>(entity) ? 4 : std::holds_alternative<Line>(entity) ? 2 : 1;
+    return std::visit([](const auto& shape) -> int {
+        using Type = std::decay_t<decltype(shape)>;
+        if constexpr (std::is_same_v<Type, Line>) { return 2; }
+        else if constexpr (std::is_same_v<Type, Rectangle>) { return 4; }
+        else if constexpr (std::is_same_v<Type, Circle>) { return 1; }
+        else if constexpr (std::is_same_v<Type, Arc>) { return 3; }
+        else { return static_cast<int>(shape.points.size()); }
+    }, entity);
 }
 
 int sketchSegmentCount(const SketchEntity& entity)
@@ -256,19 +257,49 @@ int sketchSegmentCount(const SketchEntity& entity)
     return std::holds_alternative<Rectangle>(entity) ? 4 : std::holds_alternative<Line>(entity) ? 1 : 0;
 }
 
+std::vector<int> sketchEndpoints(const SketchEntity& entity)
+{
+    if (const auto* spline = std::get_if<Spline>(&entity)) {
+        return spline->closed || spline->points.size() < 2
+            ? std::vector<int>{} : std::vector{0, static_cast<int>(spline->points.size()) - 1};
+    }
+    if (std::holds_alternative<Arc>(entity)) { return {0, 2}; }
+    if (std::holds_alternative<Line>(entity)) { return {0, 1}; }
+    return {};
+}
+
+bool isConstruction(const Sketch& sketch, int entity)
+{
+    return std::ranges::binary_search(sketch.construction, entity);
+}
+
+bool usesSecondReference(ConstraintKind kind)
+{
+    using enum ConstraintKind;
+    return kind == Coincident || kind == Perpendicular || kind == Tangent || kind == Parallel
+        || kind == Equal || kind == Symmetric || kind == Angle;
+}
+
 Point2 sketchVertex(const SketchEntity& entity, int part)
 {
     if (part < 0 || part >= sketchVertexCount(entity)) {
         throw std::invalid_argument("Invalid sketch point reference.");
     }
-    if (const auto* line = std::get_if<Line>(&entity)) {
-        return part == 0 ? line->start : line->end;
-    }
-    if (const auto* rectangle = std::get_if<Rectangle>(&entity)) {
-        return {part == 1 || part == 2 ? rectangle->opposite.u : rectangle->first.u,
-                part == 2 || part == 3 ? rectangle->opposite.v : rectangle->first.v};
-    }
-    return std::get<Circle>(entity).center;
+    return std::visit([part](const auto& shape) -> Point2 {
+        using Type = std::decay_t<decltype(shape)>;
+        if constexpr (std::is_same_v<Type, Line>) {
+            return part == 0 ? shape.start : shape.end;
+        } else if constexpr (std::is_same_v<Type, Rectangle>) {
+            return {part == 1 || part == 2 ? shape.opposite.u : shape.first.u,
+                    part == 2 || part == 3 ? shape.opposite.v : shape.first.v};
+        } else if constexpr (std::is_same_v<Type, Circle>) {
+            return shape.center;
+        } else if constexpr (std::is_same_v<Type, Arc>) {
+            return std::array{shape.start, shape.through, shape.end}[part];
+        } else {
+            return shape.points[part];
+        }
+    }, entity);
 }
 
 Line sketchSegment(const SketchEntity& entity, int part)
@@ -279,10 +310,244 @@ Line sketchSegment(const SketchEntity& entity, int part)
     return {sketchVertex(entity, part), sketchVertex(entity, (part + 1) % sketchVertexCount(entity))};
 }
 
+namespace {
+
+bool roundEntity(const SketchEntity& entity)
+{
+    return std::holds_alternative<Circle>(entity) || std::holds_alternative<Arc>(entity);
+}
+
+bool finitePoint(Point2 p)
+{
+    return std::isfinite(p.u) && std::isfinite(p.v)
+        && std::abs(p.u) <= coordinateLimit && std::abs(p.v) <= coordinateLimit;
+}
+
+bool validGeometry(const SketchEntity& entity)
+{
+    const auto count = sketchVertexCount(entity);
+    if (const auto* spline = std::get_if<Spline>(&entity)) {
+        if (count < (spline->closed ? 3 : 2) || count > 128) {
+            return false;
+        }
+        if (std::adjacent_find(spline->points.begin(), spline->points.end(), [](Point2 a, Point2 b) {
+                return length(difference(a, b)) <= tolerance;
+            }) != spline->points.end() || (spline->closed && length(difference(spline->points.front(), spline->points.back())) <= tolerance)) {
+            return false;
+        }
+    }
+    for (int part = 0; part < count; ++part) {
+        if (!finitePoint(sketchVertex(entity, part))) {
+            return false;
+        }
+    }
+    if (const auto* line = std::get_if<Line>(&entity)) {
+        return length(difference(line->end, line->start)) > tolerance;
+    }
+    if (const auto* box = std::get_if<Rectangle>(&entity)) {
+        const auto delta = difference(box->opposite, box->first);
+        return std::abs(delta.u) > tolerance && std::abs(delta.v) > tolerance;
+    }
+    if (const auto* circle = std::get_if<Circle>(&entity)) {
+        return std::isfinite(circle->radius) && circle->radius > tolerance && circle->radius <= coordinateLimit;
+    }
+    if (const auto* arc = std::get_if<Arc>(&entity)) {
+        return sketchArc(*arc).has_value();
+    }
+    return true;
+}
+
+struct VariableLayout {
+    const Sketch& sketch;
+    std::vector<int> starts;
+    int count = 0;
+
+    explicit VariableLayout(const Sketch& source) : sketch(source)
+    {
+        starts.reserve(sketch.entities.size() + 1);
+        for (const auto& entity : sketch.entities) {
+            starts.push_back(count);
+            count += std::holds_alternative<Rectangle>(entity) ? 4 : std::holds_alternative<Circle>(entity) ? 3
+                                                               : sketchVertexCount(entity) * 2;
+        }
+        starts.push_back(count);
+    }
+
+    Point2 vertex(const Values& x, SketchRef ref) const
+    {
+        const int base = starts[ref.entity];
+        if (std::holds_alternative<Rectangle>(sketch.entities[ref.entity])) {
+            return {x[base + (ref.part == 1 || ref.part == 2 ? 2 : 0)],
+                    x[base + (ref.part == 2 || ref.part == 3 ? 3 : 1)]};
+        }
+        return {x[base + 2 * ref.part], x[base + 2 * ref.part + 1]};
+    }
+
+    Point2 vector(const Values& x, SketchRef ref) const
+    {
+        const auto start = vertex(x, ref);
+        ref.part = (ref.part + 1) % sketchVertexCount(sketch.entities[ref.entity]);
+        return difference(vertex(x, ref), start);
+    }
+
+    SketchEntity shape(const Values& x, int index) const
+    {
+        const auto get = [&](int part) { return vertex(x, {index, part}); };
+        return std::visit([&](const auto& entity) -> SketchEntity {
+            using Type = std::decay_t<decltype(entity)>;
+            if constexpr (std::is_same_v<Type, Line>) { return Line{get(0), get(1)}; }
+            else if constexpr (std::is_same_v<Type, Rectangle>) { return Rectangle{get(0), get(2)}; }
+            else if constexpr (std::is_same_v<Type, Circle>) { return Circle{get(0), x[starts[index] + 2]}; }
+            else if constexpr (std::is_same_v<Type, Arc>) { return Arc{get(0), get(1), get(2)}; }
+            else {
+                auto spline = entity;
+                for (int i = 0; i < static_cast<int>(spline.points.size()); ++i) {
+                    spline.points[i] = get(i);
+                }
+                return spline;
+            }
+        }, sketch.entities[index]);
+    }
+
+    std::optional<ArcGeometry> round(const Values& x, int index) const
+    {
+        if (std::holds_alternative<Circle>(sketch.entities[index])) {
+            const auto radius = x[starts[index] + 2];
+            return radius > 0 ? std::optional(ArcGeometry{vertex(x, {index, 0}), radius, 0, 2 * std::numbers::pi})
+                              : std::nullopt;
+        }
+        return sketchArc({vertex(x, {index, 0}), vertex(x, {index, 1}), vertex(x, {index, 2})});
+    }
+
+    Values pack() const
+    {
+        Values x;
+        x.reserve(count);
+        const auto append = [&](Point2 p) { x.push_back(p.u); x.push_back(p.v); };
+        for (const auto& entity : sketch.entities) {
+            if (const auto* rectangle = std::get_if<Rectangle>(&entity)) {
+                append(rectangle->first);
+                append(rectangle->opposite);
+            } else if (const auto* circle = std::get_if<Circle>(&entity)) {
+                append(circle->center);
+                x.push_back(circle->radius);
+            } else {
+                for (int part = 0; part < sketchVertexCount(entity); ++part) {
+                    append(sketchVertex(entity, part));
+                }
+            }
+        }
+        return x;
+    }
+};
+
+double cross(Point2 a, Point2 b) { return a.u * b.v - a.v * b.u; }
+double dot(Point2 a, Point2 b) { return a.u * b.u + a.v * b.v; }
+Point2 scaled(Point2 a, double s) { return {a.u * s, a.v * s}; }
+Point2 plus(Point2 a, Point2 b) { return {a.u + b.u, a.v + b.v}; }
+
+using SparseRow = std::map<int, double>;
+constexpr double rankTolerance = 1.e-6;
+
+void subtract(SparseRow& values, const SparseRow& pivot, double factor)
+{
+    for (const auto& [column, coefficient] : pivot) {
+        auto& value = values[column];
+        value -= coefficient * factor;
+        if (std::abs(value) < rankTolerance) {
+            values.erase(column);
+        }
+    }
+}
+
+void degreesOfFreedom(const std::vector<Row>& rows, Values& x, const VariableLayout& layout, SketchSolution& result)
+{
+    // Eliminate sparsely so unrelated geometry does not form a dense sketch-sized matrix.
+    struct Pivot { int column; SparseRow rest; };
+    std::vector<Pivot> pivots;
+    std::vector<int> indexOf(x.size(), -1);
+    for (const auto& equation : rows) {
+        SparseRow row;
+        double scale = 0;
+        for (const auto column : equation.variables) {
+            const double value = derivative(equation, x, column);
+            if (std::isfinite(value)) {
+                row[column] = value;
+                scale = std::max(scale, std::abs(value));
+            }
+        }
+        if (scale < rankTolerance) {
+            continue;
+        }
+        for (auto& [column, value] : row) {
+            value /= scale;
+        }
+        std::erase_if(row, [](const auto& entry) { return std::abs(entry.second) < rankTolerance; });
+        for (;;) {
+            // Pivot rows only contain later pivots. Eliminate in pivot order.
+            auto next = row.end();
+            for (auto i = row.begin(); i != row.end(); ++i) {
+                const int p = indexOf[i->first];
+                if (p >= 0 && (next == row.end() || p < indexOf[next->first])) {
+                    next = i;
+                }
+            }
+            if (next == row.end()) {
+                break;
+            }
+            const auto [column, factor] = *next;
+            row.erase(next);
+            subtract(row, pivots[indexOf[column]].rest, factor);
+        }
+        if (!row.empty()) {
+            const auto lead = std::ranges::max_element(row, {}, [](const auto& entry) { return std::abs(entry.second); });
+            const auto [column, factor] = *lead;
+            row.erase(lead);
+            for (auto& [other, value] : row) {
+                value /= factor;
+            }
+            indexOf[column] = static_cast<int>(pivots.size());
+            pivots.push_back({column, std::move(row)});
+        }
+    }
+    std::vector<bool> fixed(x.size());
+    for (auto pivot = pivots.rbegin(); pivot != pivots.rend(); ++pivot) {
+        auto& rest = pivot->rest;
+        for (auto it = rest.begin(); it != rest.end();) {
+            const auto [column, factor] = *it;
+            if (indexOf[column] < 0) {
+                ++it;
+            } else {
+                rest.erase(it);
+                subtract(rest, pivots[indexOf[column]].rest, factor);
+                it = rest.begin();
+            }
+        }
+        fixed[pivot->column] = rest.empty();
+    }
+    result.degreesOfFreedom = static_cast<int>(x.size() - pivots.size());
+    for (std::size_t i = 1; i < layout.starts.size(); ++i) {
+        result.fullyDefined.push_back(std::all_of(fixed.begin() + layout.starts[i - 1], fixed.begin() + layout.starts[i],
+                                                 [](bool value) { return value; }));
+    }
+}
+
+}  // namespace
+
 void validateSketchConstraints(const Sketch& sketch)
 {
+    using enum ConstraintKind;
     if (sketch.constraints.size() > maxConstraints) {
         throw std::invalid_argument("Too many sketch constraints.");
+    }
+    if (!std::ranges::is_sorted(sketch.construction)
+        || std::adjacent_find(sketch.construction.begin(), sketch.construction.end()) != sketch.construction.end()
+        || (!sketch.construction.empty() && (sketch.construction.front() < 0
+            || static_cast<std::size_t>(sketch.construction.back()) >= sketch.entities.size()))) {
+        throw std::invalid_argument("Invalid construction geometry references.");
+    }
+    if (!std::ranges::all_of(sketch.entities, validGeometry)) {
+        throw std::invalid_argument("The sketch contains invalid or degenerate geometry.");
     }
     const auto entity = [&](SketchRef ref) -> const SketchEntity& {
         if (ref.entity < 0 || static_cast<std::size_t>(ref.entity) >= sketch.entities.size()) {
@@ -290,103 +555,252 @@ void validateSketchConstraints(const Sketch& sketch)
         }
         return sketch.entities[ref.entity];
     };
-    for (const auto& relation : sketch.constraints) {
-        const auto& first = entity(relation.first);
-        const auto requireValue = [&] {
-            if (!std::isfinite(relation.value) || relation.value <= tolerance || relation.value > coordinateLimit) {
-                throw std::invalid_argument("Enter a positive sketch dimension.");
-            }
-        };
-        switch (relation.kind) {
-        case ConstraintKind::Coincident:
-            sketchVertex(first, relation.first.part);
-            sketchVertex(entity(relation.second), relation.second.part);
-            break;
-        case ConstraintKind::Perpendicular:
-            sketchSegment(entity(relation.second), relation.second.part);
-            [[fallthrough]];
-        case ConstraintKind::Horizontal:
-        case ConstraintKind::Vertical:
-        case ConstraintKind::Length:
-            sketchSegment(first, relation.first.part);
-            if (relation.kind == ConstraintKind::Length) {
-                requireValue();
+    const auto line = [&](SketchRef ref) { sketchSegment(entity(ref), ref.part); };
+    const auto point = [&](SketchRef ref) { sketchVertex(entity(ref), ref.part); };
+    const auto round = [&](SketchRef ref) { return roundEntity(entity(ref)) && ref.part == 0; };
+    for (const auto& item : sketch.constraints) {
+        const auto a = item.first;
+        const auto b = item.second;
+        if (!std::isfinite(item.value)) {
+            throw std::invalid_argument("Enter a finite sketch dimension.");
+        }
+        if (item.kind != Coincident && usesSecondReference(item.kind) && a == b) {
+            throw std::invalid_argument("Choose two different sketch references.");
+        }
+        switch (item.kind) {
+        case Coincident:
+        case Symmetric:
+            point(a);
+            point(b);
+            if (item.kind == Symmetric) {
+                line(item.axis);
             }
             break;
-        case ConstraintKind::Diameter:
-            if (!std::holds_alternative<Circle>(first) || relation.first.part != 0) {
-                throw std::invalid_argument("Select a circle for a diameter constraint.");
+        case FixPoint:
+            point(a);
+            if (!finitePoint(item.fixed)) {
+                throw std::invalid_argument("Enter a finite fixed point.");
             }
-            requireValue();
             break;
-        case ConstraintKind::OnProjection:
-            sketchVertex(first, relation.first.part);
-            if (!sketch.support || !relation.edge || !std::isfinite(relation.value)
-                || relation.value < 0 || relation.value > 1) {
+        case OnProjection:
+            point(a);
+            if (!sketch.support || !item.edge || item.value < 0 || item.value > 1) {
                 throw std::invalid_argument("Invalid projected sketch edge reference.");
             }
             break;
+        case Angle:
+        case Parallel:
+        case Perpendicular:
+            line(a);
+            line(b);
+            if (item.kind == Angle && (!(item.value > 0) || item.value > 180)) {
+                throw std::invalid_argument("Enter an angle greater than zero and at most 180°.");
+            }
+            break;
+        case Horizontal:
+        case Vertical:
+        case Length:
+            line(a);
+            break;
+        case Diameter:
+            if (!round(a)) {
+                throw std::invalid_argument("Select a circle or arc for a diameter constraint.");
+            }
+            break;
+        case Equal:
+            if (round(a) != round(b)) {
+                throw std::invalid_argument("Use two straight edges or two circular curves for equality.");
+            }
+            if (!round(a)) {
+                line(a);
+                line(b);
+            }
+            break;
+        case Tangent:
+            if (!round(a) && !round(b)) {
+                throw std::invalid_argument("Tangency requires a circular curve and a straight or circular edge.");
+            }
+            if (!round(a)) { line(a); }
+            if (!round(b)) { line(b); }
+            break;
+        }
+        if ((item.kind == Diameter || item.kind == Length) && (item.value <= tolerance || item.value > coordinateLimit)) {
+            throw std::invalid_argument("Enter a positive sketch dimension.");
         }
     }
 }
 
-SketchSolution solveSketch(const Sketch& sketch, std::span<const SketchProjection> projections)
+namespace {
+
+constexpr double turn = 2 * std::numbers::pi;
+constexpr double invalidEquation = std::numeric_limits<double>::quiet_NaN();
+
+bool onArc(const ArcGeometry& arc, Point2 point)
 {
-    validateSketchConstraints(sketch);
-    if (sketch.constraints.empty()) {
-        return {sketch.entities, {}};
-    }
-    Values values;
-    values.reserve(sketch.entities.size() * 4);
-    std::vector<bool> rectangle;
-    for (const auto& entity : sketch.entities) {
-        rectangle.push_back(std::holds_alternative<Rectangle>(entity));
-        const auto p = sketchVertex(entity, 0);
-        if (const auto* circle = std::get_if<Circle>(&entity)) {
-            values.insert(values.end(), {p.u, p.v, circle->radius, 0});
-        } else {
-            const auto other = sketchVertex(entity, rectangle.back() ? 2 : 1);
-            values.insert(values.end(), {p.u, p.v, other.u, other.v});
+    const auto radius = difference(point, arc.center);
+    const auto theta = std::atan2(radius.v, radius.u);
+    const auto relative = arc.sweep > 0 ? theta - arc.start : arc.start - theta;
+    const auto normalized = std::fmod(std::fmod(relative, turn) + turn, turn);
+    return normalized <= std::abs(arc.sweep) + 1.e-5 || normalized >= turn - 1.e-5;
+}
+
+struct Tangency {
+    SketchRef first;
+    SketchRef second;
+    std::optional<SketchRef> contact;
+    bool lines = false;
+    bool internal = false;
+    double side = 1;
+    double scale = 1;
+};
+
+std::optional<SketchRef> sharedContact(const Sketch& sketch, SketchRef curve, std::span<const SketchRef> ends)
+{
+    for (int part : sketchEndpoints(sketch.entities[curve.entity])) {
+        const SketchRef ref{curve.entity, part};
+        const auto p = sketchVertex(sketch.entities[curve.entity], part);
+        for (const auto end : ends) {
+            const auto joinable = sketchEndpoints(sketch.entities[end.entity]);
+            const bool implicit = !isConstruction(sketch, curve.entity) && !isConstruction(sketch, end.entity)
+                && std::ranges::find(joinable, end.part) != joinable.end()
+                && length(difference(p, sketchVertex(sketch.entities[end.entity], end.part))) <= tolerance;
+            if (implicit || std::ranges::any_of(sketch.constraints, [&](const auto& item) {
+                    return item.kind == ConstraintKind::Coincident
+                        && ((item.first == ref && item.second == end) || (item.second == ref && item.first == end));
+                })) {
+                return ref;
+            }
         }
     }
-    if (!std::ranges::all_of(values, [](double value) {
-        return std::isfinite(value) && std::abs(value) <= coordinateLimit;
-    })) {
-        throw std::invalid_argument("The profile has invalid coordinates.");
+    return {};
+}
+
+Tangency describeTangency(const VariableLayout& layout, const Values& x, SketchRef a, SketchRef b)
+{
+    const auto& sketch = layout.sketch;
+    if (roundEntity(sketch.entities[a.entity]) && !roundEntity(sketch.entities[b.entity])) {
+        std::swap(a, b);
     }
+    Tangency tangent{a, b, {}, !roundEntity(sketch.entities[a.entity])};
+    const auto second = layout.round(x, b.entity).value();
+    if (tangent.lines) {
+        const auto line = layout.vector(x, a);
+        const auto origin = layout.vertex(x, a);
+        tangent.side = std::copysign(1.0, cross(line, difference(second.center, origin)));
+        tangent.scale = std::max(second.radius, 1.0);
+        const int end = (a.part + 1) % sketchVertexCount(sketch.entities[a.entity]);
+        const std::array endpoints{a, SketchRef{a.entity, end}};
+        tangent.contact = sharedContact(sketch, b, endpoints);
+    } else {
+        const auto first = layout.round(x, a.entity).value();
+        const auto gap = length(difference(second.center, first.center));
+        tangent.internal = std::abs(gap - std::abs(first.radius - second.radius))
+            < std::abs(gap - first.radius - second.radius);
+        tangent.side = std::copysign(1.0, first.radius - second.radius);
+        std::vector<SketchRef> endpoints;
+        for (int part : sketchEndpoints(sketch.entities[a.entity])) {
+            endpoints.push_back({a.entity, part});
+        }
+        tangent.contact = sharedContact(sketch, b, endpoints);
+        tangent.scale = std::max(std::min(first.radius, second.radius), 1.0);
+    }
+    return tangent;
+}
+
+double tangentError(const VariableLayout& layout, const Values& x, const Tangency& tangent)
+{
+    const auto b = layout.round(x, tangent.second.entity);
+    if (!b) {
+        return invalidEquation;
+    }
+    if (tangent.lines) {
+        const auto v = layout.vector(x, tangent.first);
+        if (length(v) <= tolerance) { return invalidEquation; }
+        if (tangent.contact) {
+            return dot(v, difference(layout.vertex(x, *tangent.contact), b->center)) / length(v);
+        }
+        return cross(v, difference(b->center, layout.vertex(x, tangent.first))) / length(v) - tangent.side * b->radius;
+    }
+    const auto a = layout.round(x, tangent.first.entity);
+    if (!a) {
+        return invalidEquation;
+    }
+    if (tangent.contact) {
+        const auto point = layout.vertex(x, *tangent.contact);
+        const double delta = angle(difference(point, a->center), difference(point, b->center));
+        return std::remainder(delta - (tangent.internal ? 0 : std::numbers::pi), turn) * tangent.scale;
+    }
+    const auto target = tangent.internal ? tangent.side * (a->radius - b->radius) : a->radius + b->radius;
+    return length(difference(b->center, a->center)) - target;
+}
+
+bool actualContact(const VariableLayout& layout, const Values& x, const Tangency& tangent)
+{
+    const auto b = layout.round(x, tangent.second.entity);
+    if (!b) { return false; }
+    if (tangent.lines) {
+        const auto v = layout.vector(x, tangent.first);
+        if (length(v) <= tolerance) { return false; }
+        const auto origin = layout.vertex(x, tangent.first);
+        const double t = dot(difference(b->center, origin), v) / dot(v, v);
+        const auto contact = plus(origin, scaled(v, t));
+        return t >= -1.e-6 && t <= 1 + 1.e-6
+            && std::abs(length(difference(contact, b->center)) - b->radius) <= 1.e-5 && onArc(*b, contact);
+    }
+    const auto a = layout.round(x, tangent.first.entity);
+    if (!a) { return false; }
+    const auto v = difference(b->center, a->center);
+    if (length(v) <= tolerance) { return false; }
+    const auto contact = plus(a->center, scaled(v, a->radius / length(v) * (tangent.internal ? tangent.side : 1)));
+    return std::abs(length(difference(contact, b->center)) - b->radius) <= 1.e-5
+        && onArc(*a, contact) && onArc(*b, contact);
+}
+
+}  // namespace
+
+SketchSolution solveSketch(const Sketch& sketch, std::span<const SketchProjection> projections)
+{
+    using enum ConstraintKind;
+    validateSketchConstraints(sketch);
+    const VariableLayout layout(sketch);
+    auto values = layout.pack();
     std::vector<Row> rows;
-    const auto add = [&](int index, SketchRef a, SketchRef b, Equation error) {
-        Row row{index, {}, 0, std::move(error)};
-        for (int entity : {a.entity, b.entity}) {
-            if (entity < 0 || (row.count > 0 && entity == a.entity)) {
+    const auto add = [&](int index, std::initializer_list<SketchRef> refs, Equation error) {
+        Row row{index, {}, std::move(error)};
+        for (const auto ref : refs) {
+            if (ref.entity < 0) {
                 continue;
             }
-            for (int i = 0; i < 4; ++i) {
-                row.variables[row.count++] = entity * 4 + i;
+            const bool spline = std::holds_alternative<Spline>(sketch.entities[ref.entity]);
+            const int first = layout.starts[ref.entity] + (spline ? 2 * ref.part : 0);
+            const int end = spline ? first + 2 : layout.starts[ref.entity + 1];
+            for (int col = first; col < end; ++col) {
+                if (std::ranges::find(row.variables, col) == row.variables.end()) {
+                    row.variables.push_back(col);
+                }
             }
         }
         rows.push_back(std::move(row));
     };
+    const SketchRef none{-1, 0};
     const auto join = [&](int index, SketchRef a, SketchRef b, Point2 target = {}) {
-        const bool aRect = rectangle[a.entity];
-        const bool bRect = b.entity >= 0 && rectangle[b.entity];
         for (bool vertical : {false, true}) {
-            add(index, a, b, [=](const Values& x) {
-                const auto delta = difference(vertex(x, a, aRect), b.entity < 0 ? target : vertex(x, b, bRect));
+            add(index, {a, b}, [&layout, a, b, target, vertical](const Values& x) {
+                const auto delta = difference(layout.vertex(x, a), b.entity < 0 ? target : layout.vertex(x, b));
                 return vertical ? delta.v : delta.u;
             });
         }
     };
-    // Legacy polylines use individually stored lines. Preserve touching ends
-    // during updates, including when a length is applied to just one segment.
+
+    // Endpoints snapped together remain connected when a mixed contour is solved.
     std::map<std::pair<double, double>, SketchRef> ends;
     for (int i = 0; i < static_cast<int>(sketch.entities.size()); ++i) {
-        if (!std::holds_alternative<Line>(sketch.entities[i])) {
+        if (isConstruction(sketch, i)) {
             continue;
         }
-        for (int part : {0, 1}) {
+        for (const int part : sketchEndpoints(sketch.entities[i])) {
             const SketchRef ref{i, part};
-            const auto p = vertex(values, ref, false);
+            const auto p = layout.vertex(values, ref);
             const auto [at, inserted] = ends.emplace(std::pair{p.u, p.v}, ref);
             if (!inserted && at->second.entity != i) {
                 join(-1, at->second, ref);
@@ -395,20 +809,27 @@ SketchSolution solveSketch(const Sketch& sketch, std::span<const SketchProjectio
     }
 
     SketchSolution result;
+    std::vector<std::pair<int, Tangency>> tangencies;
+    const auto radius = [&layout](const Values& x, SketchRef ref) {
+        const auto round = layout.round(x, ref.entity);
+        return round ? round->radius : invalidEquation;
+    };
     for (int i = 0; i < static_cast<int>(sketch.constraints.size()); ++i) {
-        const auto& relation = sketch.constraints[i];
-        const auto a = relation.first;
-        const auto b = relation.second;
-        const SketchRef none{-1, 0};
-        const bool aRect = rectangle[a.entity];
-        const double size = relation.value;
-        switch (relation.kind) {
-        case ConstraintKind::Coincident:
+        const auto& item = sketch.constraints[i];
+        const auto a = item.first;
+        const auto b = item.second;
+        const double size = item.value;
+        const auto kind = item.kind;
+        switch (kind) {
+        case Coincident:
             join(i, a, b);
             break;
-        case ConstraintKind::OnProjection:
+        case FixPoint:
+            join(i, a, none, item.fixed);
+            break;
+        case OnProjection:
             try {
-                join(i, a, none, projectionPoint(relation, projections));
+                join(i, a, none, projectionPoint(item, projections));
             } catch (const std::invalid_argument& error) {
                 result.brokenProjections.push_back(i);
                 if (result.projectionError.empty()) {
@@ -416,31 +837,59 @@ SketchSolution solveSketch(const Sketch& sketch, std::span<const SketchProjectio
                 }
             }
             break;
-        case ConstraintKind::Diameter:
-            add(i, a, none, [=](const Values& x) { return x[a.entity * 4 + 2] * 2 - size; });
+        case Diameter:
+            add(i, {a}, [=](const Values& x) { return radius(x, a) * 2 - size; });
             break;
-        case ConstraintKind::Perpendicular: {
-            const bool bRect = rectangle[b.entity];
-            const auto first = segment(values, a, aRect);
-            const auto second = segment(values, b, bRect);
-            const double target = std::copysign(std::numbers::pi / 2, angle(first, second));
-            const double scale = std::max(1.0, std::min(length(first), length(second)));
-            add(i, a, b, [=](const Values& x) {
-                return std::remainder(angle(segment(x, a, aRect), segment(x, b, bRect)) - target,
-                                      2 * std::numbers::pi) * scale;
+        case Angle:
+        case Parallel:
+        case Perpendicular: {
+            const auto first = layout.vector(values, a);
+            const auto second = layout.vector(values, b);
+            const auto initial = angle(first, second);
+            const auto scale = std::max(1.0, std::min(length(first), length(second)));
+            const auto target = kind == Parallel ? (dot(first, second) < 0 ? std::numbers::pi : 0)
+                : std::copysign(kind == Angle ? size * std::numbers::pi / 180 : std::numbers::pi / 2, initial);
+            add(i, {a, b}, [&, a, b, target, scale](const Values& x) {
+                return std::remainder(angle(layout.vector(x, a), layout.vector(x, b)) - target, turn) * scale;
             });
             break;
         }
-        default:
-            add(i, a, none, [=](const Values& x) {
-                const auto vector = segment(x, a, aRect);
-                if (relation.kind == ConstraintKind::Horizontal) {
-                    return vector.v;
-                }
-                if (relation.kind == ConstraintKind::Vertical) {
-                    return vector.u;
-                }
-                return length(vector) - size;
+        case Equal:
+            if (roundEntity(sketch.entities[a.entity])) {
+                add(i, {a, b}, [=](const Values& x) { return radius(x, a) - radius(x, b); });
+            } else {
+                add(i, {a, b}, [&, a, b](const Values& x) {
+                    return length(layout.vector(x, a)) - length(layout.vector(x, b));
+                });
+            }
+            break;
+        case Symmetric: {
+            const auto axis = item.axis;
+            for (const bool midpoint : {false, true}) {
+                add(i, {a, b, axis}, [&, a, b, axis, midpoint](const Values& x) {
+                    const auto u = layout.vertex(x, a);
+                    const auto v = layout.vertex(x, b);
+                    const auto direction = layout.vector(x, axis);
+                    const auto norm = length(direction);
+                    if (norm <= tolerance) { return invalidEquation; }
+                    return midpoint ? cross(direction, difference(scaled(plus(u, v), .5), layout.vertex(x, axis))) / norm
+                                    : dot(direction, difference(u, v)) / norm;
+                });
+            }
+            break;
+        }
+        case Tangent: {
+            const auto tangent = describeTangency(layout, values, a, b);
+            tangencies.emplace_back(i, tangent);
+            add(i, {a, b}, [&layout, tangent](const Values& x) { return tangentError(layout, x, tangent); });
+            break;
+        }
+        case Horizontal:
+        case Vertical:
+        case Length:
+            add(i, {a}, [&, a, kind, size](const Values& x) {
+                const auto v = layout.vector(x, a);
+                return kind == Horizontal ? v.v : kind == Vertical ? v.u : length(v) - size;
             });
             break;
         }
@@ -452,30 +901,31 @@ SketchSolution solveSketch(const Sketch& sketch, std::span<const SketchProjectio
             result.conflicts.push_back(row.constraint);
         }
     }
-    for (int i = 0; i < static_cast<int>(sketch.constraints.size()); ++i) {
-        const auto& item = sketch.constraints[i];
-        const auto a = item.first;
-        const auto b = item.second;
-        const bool collapsed = (item.kind == ConstraintKind::Horizontal || item.kind == ConstraintKind::Vertical
-            || item.kind == ConstraintKind::Length || item.kind == ConstraintKind::Perpendicular)
-            && length(segment(values, a, rectangle[a.entity])) <= tolerance;
-        if (collapsed || (item.kind == ConstraintKind::Perpendicular
-            && length(segment(values, b, rectangle[b.entity])) <= tolerance)) {
-            result.conflicts.push_back(i);
+    for (const auto& [index, tangent] : tangencies) {
+        if (!actualContact(layout, values, tangent)) {
+            result.conflicts.push_back(index);
+        }
+    }
+    result.entities.reserve(sketch.entities.size());
+    for (int i = 0; i < static_cast<int>(sketch.entities.size()); ++i) {
+        result.entities.push_back(layout.shape(values, i));
+        if (!validGeometry(result.entities.back())) {
+            for (int j = 0; j < static_cast<int>(sketch.constraints.size()); ++j) {
+                const auto& item = sketch.constraints[j];
+                if (item.first.entity == i || (usesSecondReference(item.kind) && item.second.entity == i)
+                    || (item.kind == Symmetric && item.axis.entity == i)) {
+                    result.conflicts.push_back(j);
+                }
+            }
         }
     }
     std::ranges::sort(result.conflicts);
     result.conflicts.erase(std::unique(result.conflicts.begin(), result.conflicts.end()), result.conflicts.end());
-    result.entities.reserve(sketch.entities.size());
-    for (int i = 0; i < static_cast<int>(sketch.entities.size()); ++i) {
-        const auto p = vertex(values, {i, 0}, rectangle[i]);
-        if (rectangle[i]) {
-            result.entities.emplace_back(Rectangle{p, vertex(values, {i, 2}, true)});
-        } else if (std::holds_alternative<Line>(sketch.entities[i])) {
-            result.entities.emplace_back(Line{p, vertex(values, {i, 1}, false)});
-        } else {
-            result.entities.emplace_back(Circle{p, values[i * 4 + 2]});
-        }
+    if (result.conflicts.empty() && result.brokenProjections.empty()) {
+        degreesOfFreedom(rows, values, layout, result);
+    } else {
+        result.entities = sketch.entities;
+        result.fullyDefined.resize(sketch.entities.size());
     }
     return result;
 }

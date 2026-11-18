@@ -1,6 +1,9 @@
 #include "geometry/AdvancedModeling.h"
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -85,6 +88,19 @@ TopoDS_Wire sectionWire(const TopoDS_Face& face)
     return BRepTools::OuterWire(face);
 }
 
+TopoDS_Shape sweepWire(const TopoDS_Face& profile, const TopoDS_Wire& path, const TopoDS_Vertex& first)
+{
+    const char* failure = "Could not sweep the profile. Check the path bends and profile size.";
+    BRepOffsetAPI_MakePipeShell builder(path);
+    builder.SetTransitionMode(BRepBuilderAPI_RightCorner);
+    builder.Add(sectionWire(profile), first, false, false);
+    builder.Build();
+    if (!builder.IsDone() || !builder.MakeSolid()) {
+        throw std::invalid_argument(failure);
+    }
+    return validSolid(builder.Shape(), failure);
+}
+
 std::vector<TopoDS_Face> resolveFaces(const TopoDS_Shape& body, std::span<const FaceReference> references)
 {
     if (references.empty() || references.size() > 64) {
@@ -158,15 +174,30 @@ TopoDS_Shape sweepProfile(const TopoDS_Face& profile, const gp_Ax3& frame, std::
         spine.Add(next);
         last = next;
     }
-    const char* failure = "Could not sweep the profile. Check the path bends and profile size.";
-    BRepOffsetAPI_MakePipeShell builder(spine.Wire());
-    builder.SetTransitionMode(BRepBuilderAPI_RightCorner);
-    builder.Add(sectionWire(profile), spine.FirstVertex(), false, false);
-    builder.Build();
-    if (!builder.IsDone() || !builder.MakeSolid()) {
-        throw std::invalid_argument(failure);
+    return sweepWire(profile, spine.Wire(), spine.FirstVertex());
+}
+
+TopoDS_Shape sweepProfile(const TopoDS_Face& profile, const gp_Ax3& frame, const TopoDS_Wire& path, bool reverse)
+{
+    const auto wire = reverse ? TopoDS::Wire(path.Reversed()) : path;
+    BRepTools_WireExplorer first(wire);
+    if (!first.More() || BRep_Tool::IsClosed(wire)) {
+        throw std::invalid_argument("A path sketch needs one connected open chain.");
     }
-    return validSolid(builder.Shape(), failure);
+    const auto& edge = first.Current();
+    const BRepAdaptor_Curve curve(edge);
+    gp_Pnt start;
+    gp_Vec tangent;
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    curve.D1(reversed ? curve.LastParameter() : curve.FirstParameter(), start, tangent);
+    constexpr auto alignment = "Start the path in the profile plane with a tangent normal to that plane.";
+    const gp_Vec normal(frame.Direction());
+    if (std::abs(gp_Vec(frame.Location(), start).Dot(normal)) > 1.e-5
+        || tangent.Magnitude() <= Precision::Confusion()
+        || !tangent.IsParallel(normal, 1.e-5)) {
+        throw std::invalid_argument(alignment);
+    }
+    return sweepWire(profile, wire, first.CurrentVertex());
 }
 
 TopoDS_Shape loftProfiles(std::span<const TopoDS_Face> profiles, bool ruled)

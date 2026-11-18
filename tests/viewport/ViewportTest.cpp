@@ -1238,6 +1238,78 @@ private slots:
         QVERIFY(!diagnostic->isVisible());
     }
 
+    void curvedSketchEditor()
+    {
+        using namespace graph3d::geometry;
+        graph3d::SketchEditor editor;
+        editor.resize(820, 620);
+        editor.begin(Sketch{}, {});
+        editor.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        auto* canvas = editor.findChild<QWidget*>("sketchCanvas");
+        auto* constraints = editor.findChild<QListWidget*>("sketchConstraints");
+        auto* diagnostic = editor.findChild<QLabel*>("sketchConstraintDiagnostic");
+        auto* freedom = editor.findChild<QLabel*>("sketchDegreesOfFreedom");
+        auto* construction = editor.findChild<QCheckBox*>("sketchConstruction");
+        auto* trajectory = editor.findChild<QCheckBox*>("sketchTrajectory");
+        QVERIFY(canvas && constraints && diagnostic && freedom && construction && trajectory);
+        const auto click = [canvas](int u, int v) {
+            const QPoint origin(canvas->width() / 2, canvas->height() / 2);
+            QTest::mouseClick(canvas, Qt::LeftButton, {}, origin + QPoint(3 * u, -3 * v));
+        };
+        const auto action = [&editor](const char* name) { return editor.findChild<QAction*>(name); };
+        QVERIFY(action("sketchArc") && action("sketchSpline") && action("sketchDrivingAngle"));
+        trajectory->click();
+        action("sketchArc")->trigger();
+        click(0, 0);
+        click(5, 15);
+        click(20, 20);
+        QCOMPARE(editor.sketch().entities.size(), std::size_t(1));
+        QVERIFY(std::holds_alternative<Arc>(editor.sketch().entities[0]));
+        construction->click();
+        action("sketchSpline")->trigger();
+        click(-30, 5);
+        click(-20, 15);
+        click(-10, 5);
+        QTest::keyClick(canvas, Qt::Key_Return);
+        QCOMPARE(editor.sketch().entities.size(), std::size_t(2));
+        QVERIFY(std::holds_alternative<Spline>(editor.sketch().entities[1]));
+        QVERIFY(editor.sketch().trajectory);
+        QVERIFY(editor.sketch().construction == std::vector<int>{1});
+        QVERIFY(!freedom->text().isEmpty() && !diagnostic->isVisible());
+
+        Sketch wedge{Plane::XY,
+            {Line{{40, 0}, {15, 0}}, Arc{{15, 0}, {4.3933982822, 4.3933982822}, {0, 15}},
+             Line{{0, 15}, {0, 40}}, Line{{0, 40}, {40, 0}}},
+            {{ConstraintKind::Tangent, {0, 0}, {1, 0}}, {ConstraintKind::Tangent, {2, 0}, {1, 0}},
+             {ConstraintKind::Angle, {0, 0}, {2, 0}, 90}}};
+        editor.begin(wedge, {});
+        QVERIFY(!diagnostic->isVisible());
+        const auto setAngle = [](double angle) {
+            QTimer::singleShot(50, [angle] {
+                if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    dialog->setDoubleValue(angle);
+                    dialog->accept();
+                }
+            });
+        };
+        action("sketchDrivingAngle")->trigger();
+        click(30, 0);
+        setAngle(110);
+        click(0, 30);
+        QCOMPARE(constraints->count(), 4);
+        QVERIFY(diagnostic->isVisible());
+        QVERIFY(!constraints->item(3)->toolTip().isEmpty());
+        constraints->setCurrentRow(3);
+        editor.findChild<QPushButton*>("removeSketchConstraint")->click();
+        QVERIFY(editor.sketch() == wedge && !diagnostic->isVisible());
+        constraints->setCurrentRow(2);
+        setAngle(110);
+        editor.findChild<QPushButton*>("editSketchDimension")->click();
+        QCOMPARE(editor.sketch().constraints[2].value, 110.0);
+        QVERIFY(!diagnostic->isVisible());
+    }
+
     void sketchThroughModelTree()
     {
         graph3d::MainWindow window;
@@ -2007,6 +2079,34 @@ private slots:
         QCOMPARE(plane->child(0)->childCount(), 1);
         auto* sweep = plane->child(0)->child(0);
         QVERIFY(sweep->text(0).startsWith("Sweep") && sweep->text(2).isEmpty());
+
+        action("newSketchXZ")->trigger();
+        QVERIFY(editor->isVisible());
+        editor->findChild<QCheckBox*>("sketchTrajectory")->click();
+        editor->findChild<QAction*>("sketchArc")->trigger();
+        const QPoint pathOrigin(canvas->width() / 2, canvas->height() / 2);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, pathOrigin);
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, pathOrigin + QPoint(15, -45));
+        QTest::mouseClick(canvas, Qt::LeftButton, {}, pathOrigin + QPoint(75, -75));
+        editor->findChild<QPushButton*>("sketchFinish")->click();
+        QVERIFY(!editor->isVisible());
+        auto* route = tree->currentItem();
+        QVERIFY(route && route->text(0).startsWith("Path sketch"));
+        QVERIFY(!action("makeSweep")->isEnabled());
+        tree->setCurrentItem(plane->child(0));
+        bool pathListed = false;
+        nextDialog("advancedFeatureDialog", [&pathListed](QDialog* dialog) {
+            auto* path = dialog->findChild<QComboBox*>("sweepPathSketch");
+            pathListed = path && path->count() == 2;
+            if (pathListed) {
+                path->setCurrentIndex(1);
+            }
+        });
+        action("makeSweep")->trigger();
+        QVERIFY(pathListed);
+        QCOMPARE(plane->child(0)->childCount(), 2);
+        auto* curvedSweep = plane->child(0)->child(1);
+        QVERIFY(curvedSweep->text(0).startsWith("Sweep") && curvedSweep->text(2).isEmpty());
     }
 
     void machineSelectedFaceAndEdges()

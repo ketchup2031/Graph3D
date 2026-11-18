@@ -3,6 +3,7 @@
 #include "geometry/PartFeatures.h"
 
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
 #include <gp_Ax3.hxx>
 
 #include <span>
@@ -30,6 +31,7 @@ gp_Ax3 rotationFrame(const DatumAxis& axis, const gp_Ax3& profile);
 TopoDS_Shape datumOutline(const DatumPlane& plane);
 TopoDS_Shape datumOutline(const DatumAxis& axis);
 TopoDS_Shape sweepProfile(const TopoDS_Face& profile, const gp_Ax3& frame, std::span<const Point3> path);
+TopoDS_Shape sweepProfile(const TopoDS_Face& profile, const gp_Ax3& frame, const TopoDS_Wire& path, bool reverse);
 TopoDS_Shape loftProfiles(std::span<const TopoDS_Face> profiles, bool ruled);
 TopoDS_Shape shellBody(const TopoDS_Shape& body, std::span<const FaceReference> openings, double thickness);
 TopoDS_Shape draftBody(const TopoDS_Shape& body, const FaceReference& neutral,

@@ -1,5 +1,6 @@
 #include "geometry/SketchModeling.h"
 #include "geometry/SketchConstraints.h"
+#include "geometry/SketchCurves.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -26,6 +27,13 @@
 #include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <GProp_GProps.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <GeomConvert_CompCurveToBSplineCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -89,6 +97,85 @@ TopoDS_Edge lineEdge(const gp_Ax3& frame, Line line)
         throw std::invalid_argument("The profile has a zero-length edge.");
     }
     return BRepBuilderAPI_MakeEdge(start, end).Edge();
+}
+
+TopoDS_Edge arcEdge(const gp_Ax3& frame, const Arc& arc)
+{
+    GC_MakeArcOfCircle curve(point(frame, arc.start), point(frame, arc.through), point(frame, arc.end));
+    if (!curve.IsDone()) {
+        throw std::invalid_argument("A sketch arc needs three distinct noncollinear points.");
+    }
+    return BRepBuilderAPI_MakeEdge(curve.Value()).Edge();
+}
+
+TopoDS_Edge splineEdge(const gp_Ax3& frame, const Spline& spline)
+{
+    GeomConvert_CompCurveToBSplineCurve joined;
+    for (const auto& span : sketchSplineSpans(spline)) {
+        TColgp_Array1OfPnt poles(1, 4);
+        for (int i = 1; i <= 4; ++i) {
+            poles.SetValue(i, point(frame, span[i - 1]));
+        }
+        if (!joined.Add(new Geom_BezierCurve(poles), Precision::Confusion(), true)) {
+            throw std::invalid_argument("Could not connect the spline spans.");
+        }
+    }
+    const auto curve = joined.BSplineCurve();
+    if (curve.IsNull()) {
+        throw std::invalid_argument("A sketch spline needs distinct interpolation points.");
+    }
+    return BRepBuilderAPI_MakeEdge(curve).Edge();
+}
+
+Handle(TopTools_HSequenceOfShape) sketchWires(const Sketch& sketch, const SketchContext& context)
+{
+    const auto solved = solveSketch(sketch, context.projections);
+    if (!solved.projectionError.empty()) {
+        throw std::invalid_argument(solved.projectionError);
+    }
+    if (!solved.conflicts.empty()) {
+        throw std::invalid_argument("Sketch constraints conflict.");
+    }
+    const auto& frame = context.frame;
+    Handle(TopTools_HSequenceOfShape) segments = new TopTools_HSequenceOfShape;
+    Handle(TopTools_HSequenceOfShape) wires = new TopTools_HSequenceOfShape;
+    for (int i = 0; i < static_cast<int>(solved.entities.size()); ++i) {
+        if (isConstruction(sketch, i)) {
+            continue;
+        }
+        const auto& entity = solved.entities[i];
+        if (const auto* line = std::get_if<Line>(&entity)) {
+            segments->Append(lineEdge(frame, *line));
+        } else if (const auto* arc = std::get_if<Arc>(&entity)) {
+            segments->Append(arcEdge(frame, *arc));
+        } else if (const auto* spline = std::get_if<Spline>(&entity); spline && !spline->closed) {
+            segments->Append(splineEdge(frame, *spline));
+        } else {
+            BRepBuilderAPI_MakeWire wire;
+            if (const auto* circle = std::get_if<Circle>(&entity)) {
+                const gp_Ax2 axes(point(frame, circle->center), frame.Direction(), frame.XDirection());
+                wire.Add(BRepBuilderAPI_MakeEdge(gp_Circ(axes, circle->radius)).Edge());
+            } else if (const auto* spline = std::get_if<Spline>(&entity)) {
+                wire.Add(splineEdge(frame, *spline));
+            } else {
+                for (int side = 0; side < 4; ++side) {
+                    wire.Add(lineEdge(frame, sketchSegment(entity, side)));
+                }
+            }
+            if (!wire.IsDone()) {
+                throw std::invalid_argument("The profile is open. Connect the last point to the first.");
+            }
+            wires->Append(wire.Wire());
+        }
+    }
+    if (!segments->IsEmpty()) {
+        Handle(TopTools_HSequenceOfShape) connected = new TopTools_HSequenceOfShape;
+        ShapeAnalysis_FreeBounds::ConnectEdgesToWires(segments, Precision::Confusion(), false, connected);
+        for (int i = 1; i <= connected->Length(); ++i) {
+            wires->Append(connected->Value(i));
+        }
+    }
+    return wires;
 }
 
 TopoDS_Shape checkedSolid(const TopoDS_Shape& shape)
@@ -184,48 +271,8 @@ TopoDS_Face makeProfile(const Sketch& sketch)
 
 TopoDS_Face makeProfile(const Sketch& sketch, const SketchContext& context)
 {
-    if (sketch.entities.empty()) {
-        throw std::invalid_argument("Draw a closed profile before finishing the sketch.");
-    }
-    const auto solved = solveSketch(sketch, context.projections);
-    if (!solved.projectionError.empty()) {
-        throw std::invalid_argument(solved.projectionError);
-    }
-    if (!solved.conflicts.empty()) {
-        throw std::invalid_argument("Sketch constraints conflict.");
-    }
+    const auto wires = sketchWires(sketch, context);
     const auto& frame = context.frame;
-    Handle(TopTools_HSequenceOfShape) lineEdges = new TopTools_HSequenceOfShape;
-    Handle(TopTools_HSequenceOfShape) wires = new TopTools_HSequenceOfShape;
-    for (const auto& entity : solved.entities) {
-        if (const auto* line = std::get_if<Line>(&entity)) {
-            lineEdges->Append(lineEdge(frame, *line));
-            continue;
-        }
-        BRepBuilderAPI_MakeWire wire;
-        if (const auto* circle = std::get_if<Circle>(&entity)) {
-            if (!finite(circle->center) || !std::isfinite(circle->radius) || circle->radius <= Precision::Confusion()) {
-                throw std::invalid_argument("The profile has an invalid circle.");
-            }
-            const gp_Ax2 circleFrame(point(frame, circle->center), frame.Direction(), frame.XDirection());
-            wire.Add(BRepBuilderAPI_MakeEdge(gp_Circ(circleFrame, circle->radius)).Edge());
-        } else {
-            for (int i = 0; i < 4; ++i) {
-                wire.Add(lineEdge(frame, sketchSegment(entity, i)));
-            }
-        }
-        if (!wire.IsDone()) {
-            throw std::invalid_argument("The profile is open. Connect the last point to the first.");
-        }
-        wires->Append(wire.Wire());
-    }
-    if (!lineEdges->IsEmpty()) {
-        Handle(TopTools_HSequenceOfShape) connected = new TopTools_HSequenceOfShape;
-        ShapeAnalysis_FreeBounds::ConnectEdgesToWires(lineEdges, Precision::Confusion(), false, connected);
-        for (int i = 1; i <= connected->Length(); ++i) {
-            wires->Append(connected->Value(i));
-        }
-    }
 
     const gp_Pln plane(frame);
     struct Loop { TopoDS_Face area; TopoDS_Wire wire; double size; };
@@ -279,6 +326,29 @@ TopoDS_Face makeProfile(const Sketch& sketch, const SketchContext& context)
         throw std::invalid_argument("Use closed contours with no intersections or repeated edges.");
     }
     return face;
+}
+
+TopoDS_Wire makeTrajectory(const Sketch& sketch, const SketchContext& context)
+{
+    constexpr auto error = "A path sketch needs one connected open chain.";
+    const auto wires = sketchWires(sketch, context);
+    if (wires->Length() != 1) {
+        throw std::invalid_argument(error);
+    }
+    const auto wire = TopoDS::Wire(wires->Value(1));
+    if (BRep_Tool::IsClosed(wire) || !BRepCheck_Analyzer(wire, true).IsValid()) {
+        throw std::invalid_argument(error);
+    }
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(wire, TopAbs_EDGE, edges);
+    int connected = 0;
+    for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
+        ++connected;
+    }
+    if (connected != edges.Extent()) {
+        throw std::invalid_argument(error);
+    }
+    return wire;
 }
 
 TopoDS_Shape extrude(const TopoDS_Face& face, Plane plane, double distance)

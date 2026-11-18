@@ -37,7 +37,7 @@ std::vector<ObjectId> inputs(const Parameters& parameters)
         },
         [](const Extrude& p) { return std::vector{p.profile}; },
         [](const Revolve& p) { return p.datumAxis ? std::vector{p.profile, p.datumAxis} : std::vector{p.profile}; },
-        [](const Sweep& p) { return std::vector{p.profile}; },
+        [](const Sweep& p) { return p.pathSketch ? std::vector{p.profile, p.pathSketch} : std::vector{p.profile}; },
         [](const Loft& p) { return p.profiles; },
         [](const Shell& p) { return std::vector{p.body}; },
         [](const DraftAngle& p) { return std::vector{p.body}; },
@@ -120,14 +120,23 @@ void validateAdvancedInputs(const std::vector<Object>& state, const Parameters& 
             }
         },
         [&](const Revolve& p) { validateAxis(p.datumAxis); },
-        [&](const Sweep& p) { requireSketch(prior(p.profile)); },
+        [&](const Sweep& p) {
+            if (requireSketch(prior(p.profile)).trajectory) {
+                throw std::invalid_argument("Select a closed profile sketch.");
+            }
+            if (p.pathSketch && (!p.path.empty() || !requireSketch(prior(p.pathSketch)).trajectory)) {
+                throw std::invalid_argument("Select a finished path sketch.");
+            }
+        },
         [&](const Loft& p) {
             if (p.profiles.size() < 2 || p.profiles.size() > 32) {
                 throw std::invalid_argument("Select two to 32 ordered loft sections.");
             }
             std::set<ObjectId> ids;
             for (auto profile : p.profiles) {
-                requireSketch(prior(profile));
+                if (requireSketch(prior(profile)).trajectory) {
+                    throw std::invalid_argument("Select a closed profile sketch.");
+                }
                 if (!ids.insert(profile).second) {
                     throw std::invalid_argument("Select each loft section once.");
                 }
@@ -153,7 +162,13 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
 {
     return std::visit(Visit{
         [](const Primitive& p) -> TopoDS_Shape { return geometry::makePrimitive(p.kind, p.x, p.y); },
-        [&state](const geometry::Sketch& p) -> TopoDS_Shape { return geometry::makeProfile(p, resolveContext(state, p)); },
+        [&state](const geometry::Sketch& p) -> TopoDS_Shape {
+            const auto context = resolveContext(state, p);
+            if (p.trajectory) {
+                return geometry::makeTrajectory(p, context);
+            }
+            return geometry::makeProfile(p, context);
+        },
         [&state](const Extrude& p) {
             const auto& profile = objectAt(state, p.profile);
             return geometry::extrude(TopoDS::Face(profile.shape), resolveContext(state, requireSketch(profile)).frame, p.distance);
@@ -194,7 +209,12 @@ TopoDS_Shape evaluate(const std::vector<Object>& state, const Parameters& parame
         [](const geometry::DatumAxis& p) { return geometry::datumOutline(p); },
         [&state](const Sweep& p) {
             const auto& sketch = objectAt(state, p.profile);
-            return geometry::sweepProfile(TopoDS::Face(sketch.shape), resolveContext(state, requireSketch(sketch)).frame, p.path);
+            const auto frame = resolveContext(state, requireSketch(sketch)).frame;
+            if (p.pathSketch) {
+                const auto& route = objectAt(state, p.pathSketch);
+                return geometry::sweepProfile(TopoDS::Face(sketch.shape), frame, TopoDS::Wire(route.shape), p.reversePath);
+            }
+            return geometry::sweepProfile(TopoDS::Face(sketch.shape), frame, p.path);
         },
         [&state](const Loft& p) {
             std::vector<TopoDS_Face> sections;
@@ -278,13 +298,17 @@ bool Document::editSketch(ObjectId id, geometry::Sketch sketch)
 
 ObjectId Document::addExtrude(ObjectId profile, double distance)
 {
-    requireSketch(objectAt(objects_, profile));
+    if (requireSketch(objectAt(objects_, profile)).trajectory) {
+        throw std::invalid_argument("Select a closed profile sketch.");
+    }
     return append(Extrude{profile, distance});
 }
 
 ObjectId Document::addRevolve(ObjectId profile, geometry::Axis axis, double offset, double angle, ObjectId datumAxis)
 {
-    requireSketch(objectAt(objects_, profile));
+    if (requireSketch(objectAt(objects_, profile)).trajectory) {
+        throw std::invalid_argument("Select a closed profile sketch.");
+    }
     return append(Revolve{profile, axis, offset, angle, datumAxis});
 }
 

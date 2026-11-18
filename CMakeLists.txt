@@ -15,6 +15,7 @@ add_library(graph3d_geometry STATIC
     src/geometry/PreviewBox.cpp
     src/geometry/Primitives.cpp
     src/geometry/SketchModeling.cpp
+    src/geometry/SketchCurves.cpp
     src/geometry/SketchConstraints.cpp
     src/geometry/PartFeatures.cpp
     src/geometry/AdvancedModeling.cpp

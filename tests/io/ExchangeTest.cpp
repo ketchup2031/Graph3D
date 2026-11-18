@@ -1,4 +1,6 @@
 #include "geometry/Primitives.h"
+#include "geometry/SketchConstraints.h"
+#include "geometry/SketchCurves.h"
 #include "io/Exchange.h"
 #include "io/ProjectIO.h"
 
@@ -283,6 +285,82 @@ void checkOtherAdvancedFeatures(const QDir& folder)
         && restored.find(rounded)->status == doc::Status::Ready, "Advanced operations did not round trip");
 }
 
+void curvedSketches(const QDir& folder)
+{
+    using enum geom::ConstraintKind;
+    doc::Document model;
+    geom::Sketch wedge{geom::Plane::XY,
+        {geom::Line{{40, 0}, {15, 0}}, geom::Arc{{15, 0}, {4.3933982822, 4.3933982822}, {0, 15}},
+         geom::Line{{0, 15}, {0, 40}}, geom::Line{{0, 40}, {40, 0}}},
+        {{Tangent, {0, 0}, {1, 0}}, {Tangent, {2, 0}, {1, 0}}, {Angle, {0, 0}, {2, 0}, 90}}};
+    const auto sketch = model.addSketch(wedge);
+    const auto block = model.addExtrude(sketch, 10);
+    const double before = volume(model.find(block)->shape);
+    wedge.constraints[2].value = 110;
+    const auto solved = geom::solveSketch(wedge);
+    check(solved.conflicts.empty(), "Changing the angle did not preserve both tangent connections");
+    const auto arcEntity = std::get<geom::Arc>(solved.entities[1]);
+    const auto arc = geom::sketchArc(arcEntity);
+    check(arc.has_value(), "The solved arc disappeared");
+    const auto tangentError = [&](int index, geom::Point2 contact) {
+        const auto line = std::get<geom::Line>(solved.entities[index]);
+        return (contact.u - arc->center.u) * (line.end.u - line.start.u)
+             + (contact.v - arc->center.v) * (line.end.v - line.start.v);
+    };
+    check(std::abs(tangentError(0, arcEntity.start)) < 1.e-5 && std::abs(tangentError(2, arcEntity.end)) < 1.e-5,
+        "The resulting arc is not tangent to both lines");
+    check(model.editSketch(sketch, wedge) && model.find(block)->status == doc::Status::Ready,
+        "Changing the angle did not rebuild the existing extrusion");
+    const double after = volume(model.find(block)->shape);
+    check(after > 0 && std::abs(after - before) > 1, "The driving angle did not change the extrusion");
+    const auto revision = model.revision();
+    auto conflict = wedge;
+    conflict.constraints.push_back({Angle, {0, 0}, {2, 0}, 80});
+    const auto failed = geom::solveSketch(conflict);
+    check(std::ranges::find(failed.conflicts, 3) != failed.conflicts.end(), "The contradictory angle was not reported");
+    rejects([&] { model.editSketch(sketch, conflict); }, "A conflicting sketch update was accepted");
+    check(model.revision() == revision && std::abs(volume(model.find(block)->shape) - after) < 1.e-7,
+        "A conflicting sketch update changed the valid extrusion");
+
+    const auto profile = model.addSketch({geom::Plane::XY, {geom::Circle{{0, 0}, 1}}});
+    geom::Sketch route{geom::Plane::XZ, {geom::Arc{{0, 0}, {5.85786437627, 14.1421356237}, {20, 20}},
+                                      geom::Line{{-7, 2}, {-8, 5}}}, {}, {}, 0, {1}, true};
+    const auto pathSketch = model.addSketch(route);
+    const auto swept = model.addAdvanced(doc::Sweep{profile, {}, pathSketch});
+    const double sweptVolume = volume(model.find(swept)->shape);
+    check(model.find(swept)->status == doc::Status::Ready
+        && std::abs(sweptVolume - 10 * std::numbers::pi * std::numbers::pi) < 0.1,
+        "An exact circular arc did not produce the expected swept solid");
+    auto reversed = route;
+    auto& reverseArc = std::get<geom::Arc>(reversed.entities[0]);
+    std::swap(reverseArc.start, reverseArc.end);
+    const auto reverseSketch = model.addSketch(reversed);
+    const auto reverseSweep = model.addAdvanced(doc::Sweep{profile, {}, reverseSketch, true});
+    check(model.find(reverseSweep)->status == doc::Status::Ready
+        && std::abs(volume(model.find(reverseSweep)->shape) - sweptVolume) < 0.01,
+        "Reversing a path did not restore the intended start and sweep");
+
+    route.entities[0] = geom::Spline{{{0, 0}, {0, 12}, {10, 25}, {24, 32}}};
+    check(model.editSketch(pathSketch, route) && model.find(swept)->status == doc::Status::Ready
+        && std::abs(volume(model.find(swept)->shape) - sweptVolume) > 5,
+        "Changing the sketch to a spline did not rebuild the dependent sweep");
+
+    const auto path = folder.filePath("curved-sketches.graph3d");
+    io::saveProject(path, model);
+    check(QJsonDocument::fromJson(read(path)).object().value("version").toInt() == 8, "Expected project version 8");
+    const auto restored = io::openProject(path);
+    const auto& savedPath = std::get<geom::Sketch>(restored.find(pathSketch)->parameters);
+    const auto& savedWedge = std::get<geom::Sketch>(restored.find(sketch)->parameters);
+    check(savedPath.trajectory && savedPath.construction == std::vector<int>{1}
+        && std::get<geom::Spline>(savedPath.entities[0]).points.size() == 4
+        && std::holds_alternative<geom::Arc>(savedWedge.entities[1]) && savedWedge.constraints[2].value == 110
+        && std::get<doc::Sweep>(restored.find(swept)->parameters).pathSketch == pathSketch
+        && std::get<doc::Sweep>(restored.find(reverseSweep)->parameters).reversePath
+        && restored.find(reverseSweep)->status == doc::Status::Ready
+        && restored.find(swept)->status == doc::Status::Ready && restored.find(block)->status == doc::Status::Ready,
+        "Curves, construction mode, driving constraints or the sweep link failed to round trip");
+}
+
 void roundTrip(const QDir& folder)
 {
     doc::Document original;
@@ -358,6 +436,7 @@ int main(int argc, char** argv)
         checkShellAndStep(folder);
         checkSweepAndStep(folder);
         checkOtherAdvancedFeatures(folder);
+        curvedSketches(folder);
     } catch (const Standard_Failure& error) {
         std::cerr << "Open CASCADE: " << error.GetMessageString() << '\n';
         return 1;
