@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Graph3D
+Comment=Parametric CAD for mechanical design
+Comment[ru]=Параметрическая САПР для проектирования деталей
+Exec=env QT_QPA_PLATFORM=xcb Graph3D %f
+TryExec=Graph3D
+Icon=graph3d
+Terminal=false
+Categories=Graphics;Science;Engineering;
+Keywords=CAD;Mechanical;3D;STEP;DXF;

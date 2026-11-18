@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Graph3D LANGUAGES CXX)
+project(Graph3D VERSION 0.2.0 LANGUAGES CXX)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 7)
@@ -50,6 +50,7 @@ target_link_libraries(graph3d_io PUBLIC graph3d_document Qt6::Core
 
 add_executable(Graph3D WIN32 src/app/main.cpp)
 set_target_properties(Graph3D PROPERTIES CXX_EXTENSIONS OFF)
+target_compile_definitions(Graph3D PRIVATE GRAPH3D_VERSION="${PROJECT_VERSION}")
 qt_add_resources(Graph3D app_icon PREFIX "/" FILES resources/icons/graph3d.png)
 if(WIN32)
     enable_language(RC)
@@ -78,6 +79,28 @@ set_target_properties(graph3d_ui PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
 target_link_libraries(graph3d_ui PUBLIC Qt6::Widgets graph3d_document
     PRIVATE graph3d_io graph3d_drawing TKV3d TKOpenGl TKService)
 target_link_libraries(Graph3D PRIVATE graph3d_ui)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(GNUInstallDirs)
+    install(TARGETS Graph3D RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES packaging/linux/graph3d.desktop DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
+    install(FILES resources/icons/graph3d.png DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/512x512/apps")
+    install(FILES THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/graph3d")
+    install(DIRECTORY examples/ DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/graph3d/examples" FILES_MATCHING PATTERN "*.graph3d")
+
+    set(CPACK_GENERATOR DEB)
+    set(CPACK_PACKAGE_NAME graph3d)
+    set(CPACK_PACKAGE_VENDOR "ketchup2031")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/ketchup2031/Graph3D")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Parametric CAD for mechanical design")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Graph3D maintainers")
+    set(CPACK_DEBIAN_PACKAGE_SECTION graphics)
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins")
+    include(CPack)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

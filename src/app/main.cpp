@@ -9,6 +9,7 @@ int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("Graph3D"));
+    QApplication::setApplicationVersion(QStringLiteral(GRAPH3D_VERSION));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/resources/icons/graph3d.png")));
 
     const graph3d::InterfaceLanguage language(graph3d::russianLanguagePreferred());

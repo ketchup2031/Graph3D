@@ -196,6 +196,7 @@ void StartPage::setDarkTheme(bool dark)
         #startPage, #startScroll, #startCanvas { background: #f1f4f8; }
         #startPage QLabel { background: transparent; color: #26394e; }
         #startPage QLabel#subtitle, #startPage QLabel#detail { color: #465c73; font-size: 13px; }
+        #startPage QLabel#author { color: #465c73; font-size: 12px; }
         #startPage QLabel#brand { color: #14263d; font-size: 36px; font-weight: 700; }
         #startPage QLabel#section { color: #162b43; font-size: 21px; font-weight: 700; }
         #startPage QLabel#exampleName { color: #162b43; font-size: 17px; font-weight: 650; }
@@ -219,7 +220,7 @@ void StartPage::setDarkTheme(bool dark)
         style += QStringLiteral(R"(
             #startPage, #startScroll, #startCanvas { background: #161d26; }
             #startPage QLabel { color: #d7e3ef; }
-            #startPage QLabel#subtitle, #startPage QLabel#detail { color: #b4c5d6; }
+            #startPage QLabel#subtitle, #startPage QLabel#detail, #startPage QLabel#author { color: #b4c5d6; }
             #startPage QLabel#brand, #startPage QLabel#section, #startPage QLabel#exampleName { color: #eff5fc; }
             #startPage QLabel#tip { color: #deebf8; }
             #startPage QFrame[panel="true"] { background: #202a36; border-color: #344557; }
@@ -278,6 +279,11 @@ StartPage::StartPage(QWidget* parent) : QWidget(parent)
     title->setSpacing(0);
     title->addWidget(label(QStringLiteral("Graph3D"), "brand", canvas));
     title->addWidget(label(tr("Parametric CAD"), "subtitle", canvas));
+    auto* author = label(QStringLiteral("by <a href=\"https://github.com/ketchup2031\">ketchup2031</a>"), "author", canvas);
+    author->setTextFormat(Qt::RichText);
+    author->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+    author->setOpenExternalLinks(true);
+    title->addWidget(author);
     header->addLayout(title);
     header->addStretch();
     resume_ = new QPushButton(tr("Return to model"), canvas);
