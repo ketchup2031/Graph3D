@@ -457,7 +457,7 @@ ctest --preset dev
 ### Сборка установщика
 
 Установите Inno Setup 6 для текущего пользователя. В терминале **MSYS2 UCRT64**
-соберите Release и подготовьте минимальные библиотеки FFmpeg под LGPL:
+соберите Release и подготовьте библиотеки FFmpeg (LGPL) и LibTIFF (без JBIG):
 
 ```bash
 pacman -S --needed make diffutils
@@ -466,6 +466,15 @@ cmake --build build/release
 mkdir -p build/installers/ffmpeg-src
 curl -fL https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz -o build/installers/ffmpeg-src/ffmpeg-9.0.2.tar.xz
 bash packaging/windows/build-ffmpeg.sh build/installers/ffmpeg-src/ffmpeg-9.0.2.tar.xz build/installers/ffmpeg-src
+
+mkdir -p build/installers/tiff-src
+curl -fL https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz -o build/installers/tiff-src/tiff-4.7.2.tar.gz
+echo '672bd7d10aee4606171afb864f3570b83340f6a33e2c186dc0512f7145ffdf6a  build/installers/tiff-src/tiff-4.7.2.tar.gz' | sha256sum -c -
+tar -xf build/installers/tiff-src/tiff-4.7.2.tar.gz -C build/installers/tiff-src
+cmake -S build/installers/tiff-src/tiff-4.7.2 -B build/installers/tiff-src/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -Djbig=OFF -Dtiff-tools=OFF \
+  -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dtiff-cxx=OFF
+cmake --build build/installers/tiff-src/build --target tiff
 ```
 
 Затем из папки проекта в PowerShell:

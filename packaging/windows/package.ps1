@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)] [ValidatePattern('^\d+\.\d+\.\d+$')] [string]$Version,
     [string]$BuildDirectory = 'build/release',
     [string]$FFmpegDirectory = 'build/installers/ffmpeg-src/ffmpeg-9.0.2',
+    [string]$TIFFDirectory = 'build/installers/tiff-src',
     [string]$MsysRoot = 'C:/msys64',
     [string]$InnoCompiler = "$env:LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe"
 )
@@ -18,6 +19,7 @@ $objdump = Join-Path $ucrtBin 'objdump.exe'
 $compiler = (Get-Item -LiteralPath $InnoCompiler).FullName
 $build = if ([IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $repo $BuildDirectory }
 $ffmpeg = if ([IO.Path]::IsPathRooted($FFmpegDirectory)) { $FFmpegDirectory } else { Join-Path $repo $FFmpegDirectory }
+$tiff = if ([IO.Path]::IsPathRooted($TIFFDirectory)) { $TIFFDirectory } else { Join-Path $repo $TIFFDirectory }
 $exe = Get-Item -LiteralPath (Join-Path $build 'Graph3D.exe')
 $cache = Get-Content -LiteralPath (Join-Path $build 'CMakeCache.txt')
 if ($cache -notcontains 'CMAKE_BUILD_TYPE:STRING=Release') {
@@ -39,6 +41,7 @@ try {
     $bundled = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $packageFiles = [Collections.Generic.List[string]]::new()
     $ffmpegFiles = [Collections.Generic.List[string]]::new()
+    $includesTiff = $false
     $queue.Enqueue($installedExe)
     foreach ($plugin in @('platforms/qwindows.dll', 'styles/qmodernwindowsstyle.dll')) {
         $relative = "share/qt6/plugins/$plugin"
@@ -60,11 +63,16 @@ try {
             if ($line -notmatch 'DLL Name:\s+([\w.+-]+\.dll)\s*$') { continue }
             $name = $Matches[1]
             if ($name -match '^(api-ms-|ext-ms-)') { continue }
+            if ($name -match '^libjbig') { throw 'The release runtime must not include JBIG-KIT.' }
+            $tiffImport = $name -ieq 'libtiff-6.dll'
             $ffmpegImport = $name -match '^(avcodec|avformat|avutil|swresample|swscale)-\d+\.dll$'
             if ($ffmpegImport) {
                 # Open CASCADE links FFmpeg through TKService. Use the LGPL build, not MSYS2's GPL variant.
                 $original = Join-Path $ffmpeg "lib$($Matches[1])/$name"
                 if (!(Test-Path -LiteralPath $original)) { throw "Build the LGPL FFmpeg runtime first; missing $original" }
+            } elseif ($tiffImport) {
+                $original = Join-Path $tiff "build/libtiff/$name"
+                if (!(Test-Path -LiteralPath $original)) { throw "Build LibTIFF with JBIG disabled first; missing $original" }
             } else {
                 $original = Join-Path $ucrtBin $name
             }
@@ -76,7 +84,9 @@ try {
             }
             if ($bundled.Add($name)) {
                 Copy-Item -LiteralPath $original -Destination $stage
-                if ($ffmpegImport) { $ffmpegFiles.Add($name) } else { $packageFiles.Add("$prefix/bin/$name") }
+                if ($ffmpegImport) { $ffmpegFiles.Add($name) }
+                elseif ($tiffImport) { $includesTiff = $true }
+                else { $packageFiles.Add("$prefix/bin/$name") }
                 $queue.Enqueue((Join-Path $stage $name))
             }
         }
@@ -113,6 +123,14 @@ try {
             '- Source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz',
             "- Build: https://github.com/ketchup2031/Graph3D/blob/v$Version/packaging/windows/build-ffmpeg.sh",
             ('- Files: ' + (($ffmpegFiles | Sort-Object) -join ', ')), '- Notices: licenses/ffmpeg', '')
+    }
+    if ($includesTiff) {
+        $target = (New-Item -ItemType Directory (Join-Path $stage 'licenses/libtiff')).FullName
+        Copy-Item -LiteralPath (Join-Path $tiff 'tiff-4.7.2/LICENSE.md') -Destination $target
+        $manifest += @('## LibTIFF 4.7.2 (LibTIFF license)',
+            '- Source: https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz',
+            "- Build: https://github.com/ketchup2031/Graph3D/blob/v$Version/README.md#сборка-установщика",
+            '- Files: libtiff-6.dll', '- Notices: licenses/libtiff', '')
     }
     $packageArguments = ($packages.Keys -join ' ')
     $packageListing = & $bash -lc "LC_ALL=C pacman -Ql $packageArguments"
