@@ -1,0 +1,30 @@
+pkgname=graph3d
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='Parametric CAD for mechanical design'
+arch=('x86_64')
+url='https://github.com/ketchup2031/Graph3D'
+license=('LicenseRef-Unspecified')
+depends=('glibc' 'libgcc' 'libstdc++' 'qt6-base' 'opencascade' 'libglvnd' 'libx11')
+makedepends=('cmake' 'ninja' 'tbb')
+checkdepends=('xorg-server-xvfb' 'xorg-xauth' 'ttf-dejavu' 'mesa' 'desktop-file-utils')
+options=('!debug')
+
+_source_dir="${GRAPH3D_SOURCE_DIR:-$startdir/../..}"
+
+build() {
+    cmake -S "$_source_dir" -B "$srcdir/build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DGRAPH3D_GUI_TESTS=ON
+    cmake --build "$srcdir/build" --parallel 4
+}
+
+check() {
+    desktop-file-validate "$_source_dir/packaging/linux/graph3d.desktop"
+    ctest --test-dir "$srcdir/build" --output-on-failure -E '^viewport$'
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a "$srcdir/build/viewport_test" \
+        startPageWorkflow surfaceAndAnnotationMenus -o -,txt
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

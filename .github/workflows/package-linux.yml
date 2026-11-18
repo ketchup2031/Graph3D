@@ -50,3 +50,42 @@ jobs:
           name: Graph3D-Ubuntu-26.04-amd64
           path: build/package-linux/graph3d_*_amd64.deb
           if-no-files-found: error
+
+  cachyos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and test in the CachyOS container
+        run: |
+          docker run --rm --volume "$PWD:/workspace" --workdir /workspace cachyos/cachyos:latest bash -euc '
+            pacman -Sy --noconfirm --needed archlinux-keyring cachyos-keyring
+            pacman -Su --noconfirm --needed base-devel cmake ninja qt6-base opencascade tbb \
+              xorg-server-xvfb xorg-xauth ttf-dejavu mesa desktop-file-utils
+            useradd --create-home builder
+            install -d -o builder -g builder /workspace/build/package-cachyos
+            install -o builder -g builder -m 644 packaging/linux/PKGBUILD /workspace/build/package-cachyos/PKGBUILD
+            cd /workspace/build/package-cachyos
+            runuser -u builder -- env GRAPH3D_SOURCE_DIR=/workspace makepkg --noconfirm
+          '
+      - name: Install in a clean CachyOS container and check startup
+        run: |
+          docker run --rm --volume "$PWD/build/package-cachyos:/packages:ro" cachyos/cachyos:latest bash -euc '
+            pacman -Sy --noconfirm --needed archlinux-keyring cachyos-keyring
+            pacman -Su --noconfirm --needed xorg-server-xvfb xorg-xauth ttf-dejavu mesa
+            pacman -U --noconfirm /packages/graph3d-*-x86_64.pkg.tar.zst
+            pacman -Qkk graph3d
+            test -f /usr/share/applications/graph3d.desktop
+            ldd /usr/bin/Graph3D | tee /tmp/graph3d-dependencies
+            if grep -q "not found" /tmp/graph3d-dependencies; then exit 1; fi
+            code=0
+            QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 timeout 8s xvfb-run -a Graph3D || code=$?
+            test "$code" -eq 124
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Graph3D-CachyOS-x86_64
+          path: build/package-cachyos/graph3d-*-x86_64.pkg.tar.zst
+          if-no-files-found: error

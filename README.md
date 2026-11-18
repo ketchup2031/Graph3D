@@ -29,6 +29,13 @@ sudo apt install ./graph3d_0.2.0_amd64.deb
 Запустите **Graph3D** из меню приложений. Для 3D-сцены используется X11
 или XWayland. Qt и Open CASCADE устанавливаются из системных репозиториев.
 
+В **CachyOS x86-64** скачайте `graph3d-0.2.0-1-x86_64.pkg.tar.zst` и установите
+его через Pacman. Пакет использует Qt 6 и Open CASCADE 7.9 из репозиториев CachyOS.
+
+```sh
+sudo pacman -U ./graph3d-0.2.0-1-x86_64.pkg.tar.zst
+```
+
 ## Стартовая страница
 
 При запуске Graph3D открывается стартовая страница. В **Open** можно выбрать
